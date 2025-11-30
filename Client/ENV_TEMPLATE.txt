@@ -1,0 +1,8 @@
+# Frontend Environment Variables
+# Copy these to Vercel Environment Variables section
+
+# Backend API URL
+# For local development: http://localhost:5000
+# For production: https://your-backend-url.onrender.com
+REACT_APP_API_URL=http://localhost:5000
+

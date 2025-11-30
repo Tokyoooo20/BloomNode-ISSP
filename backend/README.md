@@ -26,6 +26,10 @@ npm install
      - `MONGODB_URI`: Your MongoDB connection string
      - `JWT_SECRET`: A secure secret key for JWT tokens
      - `PORT`: Server port (default: 5000)
+     - `OPENROUTER_API_KEY`: API key from [openrouter.ai](https://openrouter.ai/)
+     - `OPENROUTER_MODEL` (optional): Override the default `meta-llama/llama-3.1-8b-instruct`
+     - `OPENROUTER_SITE_URL` (optional): Used for the `HTTP-Referer` header; defaults to `http://localhost:3000`
+     - `OPENROUTER_APP_TITLE` (optional): Label OpenRouter uses for analytics; defaults to `BloomNode`
 
 4. Start the server:
 ```bash

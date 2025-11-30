@@ -1,0 +1,20 @@
+# Backend Environment Variables
+# Copy these to Render.com Environment Variables section
+
+# Server Configuration
+NODE_ENV=production
+PORT=10000
+
+# MongoDB Connection String
+# Format: mongodb+srv://username:password@cluster.mongodb.net/database-name?retryWrites=true&w=majority
+MONGODB_URI=your_mongodb_connection_string_here
+
+# JWT Secret Key (use a long random string)
+# Generate one using: node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+JWT_SECRET=your_jwt_secret_key_here
+
+# Email Service Configuration (Resend)
+# Get your API key from: https://resend.com/api-keys
+RESEND_API_KEY=your_resend_api_key_here
+FROM_EMAIL=noreply@yourdomain.com
+

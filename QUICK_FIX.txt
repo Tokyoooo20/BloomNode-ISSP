@@ -1,0 +1,65 @@
+======================================
+🚀 QUICK FIX - EMAIL ERROR WORKAROUND
+======================================
+
+PROBLEM: Resend API not working
+
+SOLUTION: Enable Development Mode (2 steps)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: Add to backend/.env file
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Add this line:
+
+NODE_ENV=development
+
+Your .env should now have:
+
+MONGODB_URI=mongodb://localhost:27017/bloomnode
+JWT_SECRET=your_jwt_secret_here
+NODE_ENV=development
+RESEND_API_KEY=re_WJ6eaCaL_76KD4t5N9UdQfU5K5jwzzkQE
+RESEND_FROM_EMAIL=BloomNode <onboarding@resend.dev>
+FRONTEND_URL=http://localhost:3000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 2: Restart Server
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Stop current server (Ctrl+C)
+2. Run: npm start
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+HOW IT WORKS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Signup: Verification code shown in console
+✅ Password Reset: Reset link shown in console  
+✅ All features work without emails!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXAMPLE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When user signs up, you'll see in console:
+
+⚠️  DEVELOPMENT MODE: Email not sent
+   📧 Email: user@test.com
+   🔢 Verification Code: 123456
+
+Just enter "123456" in the verification page!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THAT'S IT! 🎉
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For detailed docs, see: DEVELOPMENT_MODE.md
+
+To fix Resend API later, see: RESEND_ERROR_FIX.md
+

@@ -1,3 +1,246 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Hide the default password reveal/clear icons (especially in Edge)
+   so only our custom eye icon is visible */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+}
+
+input[type="password"]::-webkit-credentials-auto-fill-button {
+  visibility: hidden;
+  display: none;
+}
+
+/* ============================================
+   RESPONSIVE UTILITY CLASSES
+   ============================================ */
+
+/* Touch-friendly tap targets (minimum 44x44px) */
+@layer utilities {
+  .tap-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Responsive text sizes */
+  .text-responsive-xs {
+    @apply text-xs sm:text-sm;
+  }
+  
+  .text-responsive-sm {
+    @apply text-sm sm:text-base;
+  }
+  
+  .text-responsive-base {
+    @apply text-base sm:text-lg;
+  }
+  
+  .text-responsive-lg {
+    @apply text-lg sm:text-xl;
+  }
+  
+  .text-responsive-xl {
+    @apply text-xl sm:text-2xl;
+  }
+  
+  .text-responsive-2xl {
+    @apply text-2xl sm:text-3xl;
+  }
+  
+  /* Responsive padding */
+  .padding-responsive {
+    @apply px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8;
+  }
+  
+  .padding-responsive-x {
+    @apply px-4 sm:px-6 lg:px-8;
+  }
+  
+  .padding-responsive-y {
+    @apply py-4 sm:py-6 lg:py-8;
+  }
+  
+  /* Responsive margins */
+  .margin-responsive {
+    @apply mx-4 my-4 sm:mx-6 sm:my-6 lg:mx-8 lg:my-8;
+  }
+  
+  /* Responsive container */
+  .container-responsive {
+    @apply w-full max-w-full px-4 sm:px-6 lg:px-8 mx-auto;
+  }
+  
+  /* Responsive grid columns */
+  .grid-responsive {
+    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6;
+  }
+  
+  .grid-responsive-2 {
+    @apply grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6;
+  }
+  
+  .grid-responsive-3 {
+    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6;
+  }
+  
+  .grid-responsive-4 {
+    @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6;
+  }
+  
+  /* Responsive flex direction */
+  .flex-responsive {
+    @apply flex flex-col sm:flex-row;
+  }
+  
+  /* Responsive visibility */
+  .hide-mobile {
+    @apply hidden sm:block;
+  }
+  
+  .show-mobile {
+    @apply block sm:hidden;
+  }
+  
+  .hide-tablet {
+    @apply hidden md:block;
+  }
+  
+  .show-tablet {
+    @apply block md:hidden;
+  }
+  
+  /* Responsive sidebar */
+  .sidebar-responsive {
+    @apply fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-300 ease-in-out;
+    @apply -translate-x-full lg:translate-x-0;
+  }
+  
+  .sidebar-responsive-open {
+    @apply translate-x-0;
+  }
+  
+  /* Responsive table wrapper */
+  .table-responsive-wrapper {
+    @apply overflow-x-auto -mx-4 sm:mx-0;
+  }
+  
+  .table-responsive {
+    @apply min-w-full divide-y divide-gray-200;
+  }
+  
+  /* Responsive modal */
+  .modal-responsive {
+    @apply w-full max-w-md sm:max-w-lg md:max-w-xl lg:max-w-2xl;
+  }
+  
+  /* Responsive card */
+  .card-responsive {
+    @apply bg-white rounded-lg shadow-sm p-4 sm:p-6;
+  }
+  
+  /* Smooth scrolling for mobile */
+  .scroll-smooth-mobile {
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+  }
+  
+  /* Prevent text selection on mobile (for buttons) */
+  .select-none-mobile {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  
+  /* Responsive spacing utilities */
+  .space-responsive {
+    @apply space-y-4 sm:space-y-6 lg:space-y-8;
+  }
+  
+  .gap-responsive {
+    @apply gap-4 sm:gap-6 lg:gap-8;
+  }
+}
+
+/* ============================================
+   RESPONSIVE COMPONENT STYLES
+   ============================================ */
+
+@layer components {
+  /* Responsive button */
+  .btn-responsive {
+    @apply px-4 py-2 sm:px-6 sm:py-3 text-sm sm:text-base font-medium rounded-lg;
+    @apply transition-all duration-200 tap-target;
+  }
+  
+  /* Responsive input */
+  .input-responsive {
+    @apply w-full px-3 py-2 sm:px-4 sm:py-2.5 text-sm sm:text-base;
+    @apply border border-gray-300 rounded-lg focus:outline-none focus:ring-2;
+  }
+  
+  /* Responsive form group */
+  .form-group-responsive {
+    @apply space-y-2 sm:space-y-3;
+  }
+  
+  /* Responsive navigation */
+  .nav-responsive {
+    @apply flex flex-col sm:flex-row items-stretch sm:items-center;
+    @apply space-y-2 sm:space-y-0 sm:space-x-4;
+  }
+  
+  /* Responsive dropdown */
+  .dropdown-responsive {
+    @apply absolute right-0 mt-2 w-56 sm:w-64 rounded-md shadow-lg z-50;
+    @apply origin-top-right;
+  }
+}
+
+/* ============================================
+   MOBILE-SPECIFIC FIXES
+   ============================================ */
+
+/* Fix for iOS Safari viewport height issue */
+@supports (-webkit-touch-callout: none) {
+  .min-h-screen {
+    min-height: -webkit-fill-available;
+  }
+}
+
+/* Prevent horizontal scroll on mobile */
+html, body {
+  overflow-x: hidden;
+  width: 100%;
+}
+
+/* Better font rendering on mobile */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Fix for tap highlight on mobile */
+* {
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0.1);
+}
+
+/* Responsive images */
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Responsive tables - horizontal scroll on mobile */
+@media (max-width: 767px) {
+  table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}

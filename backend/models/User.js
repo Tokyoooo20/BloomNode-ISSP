@@ -8,6 +8,12 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 100
   },
+  campus: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
   username: {
     type: String,
     required: true,
@@ -26,7 +32,7 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: true,
-    minlength: 6
+    minlength: 12
   },
   isApproved: {
     type: Boolean,
@@ -34,7 +40,7 @@ const userSchema = new mongoose.Schema({
   },
   approvalStatus: {
     type: String,
-    enum: ['pending', 'approved', 'rejected'],
+    enum: ['pending', 'approved', 'rejected', 'suspended'],
     default: 'pending'
   },
   approvedBy: {
@@ -48,8 +54,41 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['user', 'admin', 'president'],
-    default: 'user'
+    default: 'Program head'
+  },
+  isEmailVerified: {
+    type: Boolean,
+    default: false
+  },
+  verificationCode: {
+    type: String,
+    default: null
+  },
+  verificationCodeExpires: {
+    type: Date,
+    default: null
+  },
+  resetPasswordToken: {
+    type: String,
+    default: null
+  },
+  resetPasswordExpires: {
+    type: Date,
+    default: null
+  },
+  profilePicture: {
+    type: String,
+    default: null
+  },
+  contactNumber: {
+    type: String,
+    default: null,
+    trim: true
+  },
+  position: {
+    type: String,
+    default: null,
+    trim: true
   }
 }, {
   timestamps: true
