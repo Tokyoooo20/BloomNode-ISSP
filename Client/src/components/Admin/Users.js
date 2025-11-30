@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Modal from '../common/Modal';
+import { API_ENDPOINTS } from '../../utils/api';
 
 const UNIT_OPTIONS_STORAGE_KEY = 'adminUnitOptions';
 
@@ -212,7 +213,7 @@ const Users = () => {
   const fetchUsers = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('http://localhost:5000/api/auth/pending-users', {
+      const response = await fetch(API_ENDPOINTS.auth.pendingUsers, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
@@ -317,7 +318,7 @@ const Users = () => {
         }
       }
       
-      const response = await fetch(`http://localhost:5000/api/auth/update-user/${user._id}`, {
+      const response = await fetch(API_ENDPOINTS.auth.updateUser(user._id), {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -389,7 +390,7 @@ const Users = () => {
       try {
         setUpdatingUserId(userId);
         const token = localStorage.getItem('token');
-        const response = await fetch(`http://localhost:5000/api/auth/approve-user/${userId}`, {
+          const response = await fetch(API_ENDPOINTS.auth.approveUser(userId), {
           method: 'PATCH',
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -541,7 +542,7 @@ const Users = () => {
       onConfirm: async () => {
         try {
           const token = localStorage.getItem('token');
-          const response = await fetch(`http://localhost:5000/api/auth/reject-user/${userId}`, {
+          const response = await fetch(API_ENDPOINTS.auth.rejectUser(userId), {
             method: 'PATCH',
             headers: {
               'Authorization': `Bearer ${token}`,
@@ -588,7 +589,7 @@ const Users = () => {
         try {
           setUpdatingUserId(userId);
           const token = localStorage.getItem('token');
-          const response = await fetch(`http://localhost:5000/api/auth/suspend-user/${userId}`, {
+          const response = await fetch(API_ENDPOINTS.auth.suspendUser(userId), {
             method: 'PATCH',
             headers: {
               'Authorization': `Bearer ${token}`,
@@ -637,7 +638,7 @@ const Users = () => {
         try {
           setUpdatingUserId(userId);
           const token = localStorage.getItem('token');
-          const response = await fetch(`http://localhost:5000/api/auth/delete-user/${userId}`, {
+          const response = await fetch(API_ENDPOINTS.auth.deleteUser(userId), {
             method: 'DELETE',
             headers: {
               'Authorization': `Bearer ${token}`,
