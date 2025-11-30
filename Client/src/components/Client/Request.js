@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { flushSync } from 'react-dom';
 import axios from 'axios';
 import Modal from '../common/Modal';
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const statusBadges = {
   loading: { label: 'Fetching...', styles: 'bg-blue-50 text-blue-600 border-blue-100' },
@@ -208,7 +209,7 @@ const Request = ({ onRequestUpdate }) => {
         const token = localStorage.getItem('token');
         const headers = token ? { 'x-auth-token': token } : undefined;
         const response = await axios.post(
-          'http://localhost:5000/api/ai/item-insights',
+          API_ENDPOINTS.ai.itemInsights,
           { itemName: trimmed },
           { headers }
         );
@@ -259,8 +260,8 @@ const Request = ({ onRequestUpdate }) => {
       setLoading(true);
       setError(null);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/requests', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.requests.list, {
+        headers: getAuthHeaders()
       });
       console.log('Fetched requests:', response.data);
       if (response.data && response.data.length > 0) {
@@ -327,7 +328,7 @@ const Request = ({ onRequestUpdate }) => {
       setUpdatingStatus(true);
       const token = localStorage.getItem('token');
       const response = await axios.put(
-        `http://localhost:5000/api/requests/${statusUpdateModal.requestId}/items/${statusUpdateModal.itemId}/status`,
+        API_ENDPOINTS.requests.updateItemStatus(statusUpdateModal.requestId, statusUpdateModal.itemId),
         {
           itemStatus: statusUpdateForm.itemStatus,
           remarks: statusUpdateForm.remarks || ''
@@ -518,7 +519,7 @@ const Request = ({ onRequestUpdate }) => {
       
       // Update the request status to 'submitted'
       const response = await axios.put(
-        `http://localhost:5000/api/requests/${requestToSubmit._id}`,
+        API_ENDPOINTS.requests.submit(requestToSubmit._id),
         { status: 'submitted' },
         {
           headers: { 'x-auth-token': token }
@@ -594,7 +595,7 @@ const Request = ({ onRequestUpdate }) => {
         if (currentForm.year) {
           try {
             // Fetch admin ISSP to check accepting entries status
-            const adminResponse = await axios.get('http://localhost:5000/api/issp', {
+            const adminResponse = await axios.get(API_ENDPOINTS.issp.get, {
               headers: { 'x-auth-token': token }
             });
             
@@ -657,7 +658,7 @@ const Request = ({ onRequestUpdate }) => {
           }
           console.log('Updating request with ID:', requestId);
           const response = await axios.put(
-            `http://localhost:5000/api/requests/${requestId}`,
+            API_ENDPOINTS.requests.get(requestId),
             formDataToSubmit,
             {
               headers: { 'x-auth-token': token }
@@ -689,7 +690,7 @@ const Request = ({ onRequestUpdate }) => {
         } else {
           // Create new request
           const response = await axios.post(
-            'http://localhost:5000/api/requests',
+            API_ENDPOINTS.requests.list,
             formDataToSubmit,
             {
               headers: { 'x-auth-token': token }
@@ -1440,7 +1441,7 @@ const Request = ({ onRequestUpdate }) => {
                     setLoading(true);
                     const token = localStorage.getItem('token');
                     const response = await axios.put(
-                      `http://localhost:5000/api/requests/${revisingRequest._id}/resubmit-revision`,
+                      API_ENDPOINTS.requests.resubmitRevision(revisingRequest._id),
                       {
                         items: requestForm.items.map(item => ({
                           id: item.id || `item-${Date.now()}-${Math.random()}`,

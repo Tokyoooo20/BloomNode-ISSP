@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import Modal from '../common/Modal';
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const Offices = () => {
   const [animate, setAnimate] = useState(false);
@@ -138,8 +139,8 @@ const Offices = () => {
   const fetchOfficeStats = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/admin/office/stats', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.admin.officeStats, {
+        headers: getAuthHeaders()
       });
       console.log('Fetched office stats:', response.data);
       setOfficeStats(response.data);
@@ -154,8 +155,8 @@ const Offices = () => {
       setLoading(true);
       setError(null);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/admin/submitted-requests', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
+        headers: getAuthHeaders()
       });
       console.log('Fetched submitted requests:', response.data);
       setRequests(response.data);
@@ -243,7 +244,7 @@ const Offices = () => {
       }
       
       await axios.put(
-        `http://localhost:5000/api/admin/requests/${reviewingItem.requestId}/items/${reviewingItem.id}/review`,
+        API_ENDPOINTS.admin.requestReview(reviewingItem.requestId, reviewingItem.id),
         {
           approvalStatus: approvalDecision,
           approvalReason: approvalReason
@@ -276,7 +277,7 @@ const Offices = () => {
         const updatedRequests = await Promise.all(
           selectedUnitGroup.requests.map(request =>
             axios.get(
-              `http://localhost:5000/api/admin/requests/${request._id}`,
+              API_ENDPOINTS.admin.getRequest(request._id),
               { headers: { 'x-auth-token': token } }
             ).then(res => res.data)
           )
@@ -331,7 +332,7 @@ const Offices = () => {
       await Promise.all(
         selectedUnitGroup.requests.map(request =>
           axios.put(
-            `http://localhost:5000/api/admin/requests/${request._id}/complete-review`,
+            API_ENDPOINTS.admin.completeReview(request._id),
             {},
             {
               headers: { 'x-auth-token': token }

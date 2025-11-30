@@ -5,6 +5,7 @@ import Users from './Users';
 import ISSP from './ISSP';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
+import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 const Dashboard = () => {
   const [activeSection, setActiveSection] = useState('dashboard');
@@ -23,8 +24,8 @@ const Dashboard = () => {
   const fetchNotifications = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/notifications', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.notifications.list, {
+        headers: getAuthHeaders()
       });
       
       const transformedNotifications = response.data.notifications.map(notif => {
@@ -57,14 +58,14 @@ const Dashboard = () => {
   const fetchUserData = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/auth/me', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.auth.me, {
+        headers: getAuthHeaders()
       });
       setUserData({
         unit: response.data.unit || '',
         username: response.data.username || '',
         profilePicture: response.data.profilePicture 
-          ? `http://localhost:5000/${response.data.profilePicture}` 
+          ? getFileUrl(response.data.profilePicture)
           : null
       });
     } catch (error) {
@@ -91,8 +92,8 @@ const Dashboard = () => {
     const fetchDashboardStats = async () => {
       try {
         const token = localStorage.getItem('token');
-        const response = await axios.get('http://localhost:5000/api/admin/dashboard/stats', {
-          headers: { 'x-auth-token': token }
+        const response = await axios.get(API_ENDPOINTS.admin.dashboardStats, {
+          headers: getAuthHeaders()
         });
         setStats(response.data);
         
@@ -434,7 +435,7 @@ const Dashboard = () => {
                             if (notification.isNew) {
                               try {
                                 const token = localStorage.getItem('token');
-                                await axios.put(`http://localhost:5000/api/notifications/${notification.id}/read`, {}, {
+                                await axios.put(API_ENDPOINTS.notifications.markRead(notification.id), {}, {
                                   headers: { 'x-auth-token': token }
                                 });
                                 fetchNotifications();
@@ -490,7 +491,7 @@ const Dashboard = () => {
                         onClick={async () => {
                           try {
                             const token = localStorage.getItem('token');
-                            await axios.put('http://localhost:5000/api/notifications/mark-all-read', {}, {
+                            await axios.put(API_ENDPOINTS.notifications.markAllRead, {}, {
                               headers: { 'x-auth-token': token }
                             });
                             fetchNotifications();

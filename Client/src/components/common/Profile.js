@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Modal from './Modal';
+import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 const Profile = () => {
   const [activeTab, setActiveTab] = useState('profile');
@@ -39,8 +40,8 @@ const Profile = () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/auth/me', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.auth.me, {
+        headers: getAuthHeaders()
       });
       
       setUserData(response.data);
@@ -56,7 +57,7 @@ const Profile = () => {
       });
       // Set profile picture preview with full URL
       if (response.data.profilePicture) {
-        const profilePictureUrl = `http://localhost:5000/${response.data.profilePicture}`;
+        const profilePictureUrl = getFileUrl(response.data.profilePicture);
         setProfilePicturePreview(profilePictureUrl);
       } else {
         setProfilePicturePreview(null);
@@ -126,7 +127,7 @@ const Profile = () => {
       }
 
       const response = await axios.put(
-        'http://localhost:5000/api/auth/profile',
+        API_ENDPOINTS.auth.profile,
         formData,
         {
           headers: { 
@@ -142,7 +143,7 @@ const Profile = () => {
       // Update profile picture preview with the new image from server
       if (response.data.profilePicture) {
         // Construct full URL to the profile picture
-        const profilePictureUrl = `http://localhost:5000/${response.data.profilePicture}`;
+        const profilePictureUrl = getFileUrl(response.data.profilePicture);
         setProfilePicturePreview(profilePictureUrl);
       } else {
         setProfilePicturePreview(null);
@@ -195,7 +196,7 @@ const Profile = () => {
       const token = localStorage.getItem('token');
       
       await axios.put(
-        'http://localhost:5000/api/auth/change-email',
+        API_ENDPOINTS.auth.changeEmail,
         {
           newEmail: emailForm.newEmail,
           password: emailForm.password
@@ -261,7 +262,7 @@ const Profile = () => {
       const token = localStorage.getItem('token');
       
       await axios.put(
-        'http://localhost:5000/api/auth/change-password',
+        API_ENDPOINTS.auth.changePassword,
         {
           currentPassword: passwordForm.currentPassword,
           newPassword: passwordForm.newPassword

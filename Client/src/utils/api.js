@@ -47,6 +47,12 @@ export const API_ENDPOINTS = {
     requestReview: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/review`,
     completeReview: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/complete-review`,
     officeStats: `${API_BASE_URL}/api/admin/office/stats`,
+    getRequest: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}`,
+    dictApproval: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/dict-approval`,
+    getRequestItem: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}`,
+    updateRequestItemPrice: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/price`,
+    updateRequestItemQuantity: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/quantity`,
+    updateRequestItemSpecification: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/specification`,
   },
   
   // ISSP endpoints
@@ -60,6 +66,7 @@ export const API_ENDPOINTS = {
     developmentInvestmentProgram: `${API_BASE_URL}/api/issp/development-investment-program`,
     generate: `${API_BASE_URL}/api/issp/generate`,
     reviewSubmit: `${API_BASE_URL}/api/issp/review/submit`,
+    reviewDecision: `${API_BASE_URL}/api/issp/review/decision`,
     uploadDictApproved: `${API_BASE_URL}/api/issp/upload-dict-approved`,
     dictApproval: (isspId) => `${API_BASE_URL}/api/issp/dict-approval/${isspId}`,
     acceptingEntries: (isspId) => `${API_BASE_URL}/api/issp/accepting-entries/${isspId}`,

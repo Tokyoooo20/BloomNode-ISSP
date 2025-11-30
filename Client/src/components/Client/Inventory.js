@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const Inventory = () => {
   const [animateInventory, setAnimateInventory] = useState(false);
@@ -17,8 +18,8 @@ const Inventory = () => {
       setLoading(true);
       setError(null);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/requests/inventory/items', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.requests.inventoryItems, {
+        headers: getAuthHeaders()
       });
       console.log('Fetched inventory items:', response.data);
       setInventoryItems(response.data || []); // Ensure it's always an array

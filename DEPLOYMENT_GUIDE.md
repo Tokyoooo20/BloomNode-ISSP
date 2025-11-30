@@ -325,5 +325,5 @@ Your URLs:
 - Frontend: `https://your-app.vercel.app`
 - Backend: `https://your-backend.onrender.com`
 
-Share your frontend URL with users to access the system!
+
 

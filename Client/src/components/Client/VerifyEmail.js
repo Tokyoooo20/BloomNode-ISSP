@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
+import { API_ENDPOINTS } from '../../utils/api';
 
 const VerifyEmail = () => {
   const navigate = useNavigate();
@@ -42,7 +43,7 @@ const VerifyEmail = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:5000/api/auth/verify-email', {
+      const response = await fetch(API_ENDPOINTS.auth.verifyEmail, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -82,7 +83,7 @@ const VerifyEmail = () => {
     setMessage('');
 
     try {
-      const response = await fetch('http://localhost:5000/api/auth/resend-verification', {
+      const response = await fetch(API_ENDPOINTS.auth.resendVerification, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

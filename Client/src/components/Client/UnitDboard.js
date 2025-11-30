@@ -5,6 +5,7 @@ import Inventory from './Inventory';
 import History from './History';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
+import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 // Custom scrollbar-hiding styles
 const hideScrollbarStyles = `
@@ -43,8 +44,8 @@ const UnitDboard = () => {
   const fetchNotifications = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/notifications', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.notifications.list, {
+        headers: getAuthHeaders()
       });
       
       // Transform backend notifications to frontend format
@@ -68,8 +69,8 @@ const UnitDboard = () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/requests', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.requests.list, {
+        headers: getAuthHeaders()
       });
       
       const fetchedRequests = response.data;
@@ -129,14 +130,14 @@ const UnitDboard = () => {
   const fetchUserData = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/auth/me', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.auth.me, {
+        headers: getAuthHeaders()
       });
       setUserData({
         unit: response.data.unit || '',
         username: response.data.username || '',
         profilePicture: response.data.profilePicture 
-          ? `http://localhost:5000/${response.data.profilePicture}` 
+          ? getFileUrl(response.data.profilePicture)
           : null
       });
     } catch (error) {
@@ -163,8 +164,8 @@ const UnitDboard = () => {
     try {
       setLoadingApprovedISSP(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/issp/approved-document', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.issp.approvedDocument, {
+        headers: getAuthHeaders()
       });
       setApprovedISSPDocument(response.data.dictApprovedISSPDocument || null);
       setDictApprovalStatus(response.data.dictApproval || null);
@@ -452,7 +453,7 @@ const UnitDboard = () => {
                             if (notification.isNew) {
                               try {
                                 const token = localStorage.getItem('token');
-                                await axios.put(`http://localhost:5000/api/notifications/${notification.id}/read`, {}, {
+                                await axios.put(API_ENDPOINTS.notifications.markRead(notification.id), {}, {
                                   headers: { 'x-auth-token': token }
                                 });
                                 fetchNotifications(); // Refresh notifications
@@ -504,7 +505,7 @@ const UnitDboard = () => {
                         onClick={async () => {
                           try {
                             const token = localStorage.getItem('token');
-                            await axios.put('http://localhost:5000/api/notifications/mark-all-read', {}, {
+                            await axios.put(API_ENDPOINTS.notifications.markAllRead, {}, {
                               headers: { 'x-auth-token': token }
                             });
                             fetchNotifications(); // Refresh notifications
@@ -680,7 +681,7 @@ const UnitDboard = () => {
                       <p className="text-xs text-gray-500">Approved ISSP</p>
                     </div>
                     <a
-                      href={`http://localhost:5000/${approvedISSPDocument}`}
+                      href={getFileUrl(approvedISSPDocument)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="px-4 py-2 text-sm font-medium text-white bg-gray-700 rounded-md hover:bg-gray-800 transition-colors flex items-center gap-2"

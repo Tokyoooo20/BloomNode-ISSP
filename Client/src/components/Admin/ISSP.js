@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Modal from '../common/Modal';
 import axios from 'axios';
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const PAGE_C_ROWS = 10;
 
@@ -442,7 +443,7 @@ const InformationSystemsStrategy = ({ onBack, initialData, onDataSaved, refreshS
     try {
       setIsSaving(true);
       const response = await axios.put(
-        'http://localhost:5000/api/issp/information-systems-strategy',
+        API_ENDPOINTS.issp.informationSystemsStrategy,
         payload,
         {
           headers: { 'x-auth-token': token }
@@ -1155,7 +1156,7 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get('http://localhost:5000/api/issp/status', {
+      const response = await axios.get(API_ENDPOINTS.issp.status, {
         headers: { 'x-auth-token': token }
       });
       setIsspItems(response.data);
@@ -1176,7 +1177,7 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get('http://localhost:5000/api/issp', {
+      const response = await axios.get(API_ENDPOINTS.issp.get, {
         headers: { 'x-auth-token': token }
       });
       setIsspData(response.data);
@@ -1193,7 +1194,7 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get('http://localhost:5000/api/admin/office/stats', {
+      const response = await axios.get(API_ENDPOINTS.admin.officeStats, {
         headers: { 'x-auth-token': token }
       });
       
@@ -1216,7 +1217,7 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get('http://localhost:5000/api/admin/submitted-requests', {
+      const response = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
         headers: { 'x-auth-token': token }
       });
       
@@ -1364,7 +1365,7 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get(`http://localhost:5000/api/admin/requests/unit/${encodeURIComponent(unitName)}`, {
+      const response = await axios.get(API_ENDPOINTS.admin.requestsByUnit(unitName), {
         headers: { 'x-auth-token': token }
       });
       
@@ -1452,7 +1453,7 @@ const ISSP = () => {
       }
 
       const response = await axios.put(
-        `http://localhost:5000/api/admin/requests/${selectedUnitRequest._id}/dict-approval`,
+        API_ENDPOINTS.admin.dictApproval(selectedUnitRequest._id),
         {
           status: dictStatusForm.status,
           notes: dictStatusForm.notes || ''
@@ -1520,7 +1521,7 @@ const ISSP = () => {
       }
 
       const response = await axios.put(
-        `http://localhost:5000/api/issp/dict-approval/${isspData._id}`,
+        API_ENDPOINTS.issp.dictApproval(isspData._id),
         {
           status: dictStatusForm.status,
           notes: dictStatusForm.notes || ''
@@ -1575,7 +1576,7 @@ const ISSP = () => {
       }
 
       const response = await axios.put(
-        `http://localhost:5000/api/issp/accepting-entries/${isspData._id}`,
+        API_ENDPOINTS.issp.acceptingEntries(isspData._id),
         {
           status: acceptingEntriesForm.status,
           notes: acceptingEntriesForm.notes || '',
@@ -1653,7 +1654,7 @@ const ISSP = () => {
           console.log('Deleting item:', { itemId, requestId, itemName });
           
           const response = await axios.delete(
-            `http://localhost:5000/api/admin/requests/${requestId}/items/${itemId}`,
+            API_ENDPOINTS.admin.getRequestItem(requestId, itemId),
             {
               headers: { 'x-auth-token': token }
             }
@@ -1719,7 +1720,7 @@ const ISSP = () => {
       }
 
       await axios.put(
-        `http://localhost:5000/api/admin/requests/${requestId}/items/${itemId}/price`,
+        API_ENDPOINTS.admin.updateRequestItemPrice(requestId, itemId),
         { price: priceNum },
         { headers: { 'x-auth-token': token } }
       );
@@ -1945,7 +1946,7 @@ useEffect(() => {
       if (selectedItem) {
         try {
           const token = localStorage.getItem('token');
-          const response = await axios.get('http://localhost:5000/api/issp', {
+          const response = await axios.get(API_ENDPOINTS.issp.get, {
             headers: { 'x-auth-token': token }
           });
           setIsspData(response.data);
@@ -2161,7 +2162,7 @@ useEffect(() => {
                 );
               
               // Fetch current ISSP data to preserve pageB and pageC
-              const currentIsspResponse = await axios.get('http://localhost:5000/api/issp', {
+              const currentIsspResponse = await axios.get(API_ENDPOINTS.issp.get, {
                 headers: { 'x-auth-token': token }
               });
               const currentResource = currentIsspResponse.data?.resourceRequirements || {};
@@ -2180,7 +2181,7 @@ useEffect(() => {
               };
               
               await axios.put(
-                'http://localhost:5000/api/issp/resource-requirements',
+                API_ENDPOINTS.issp.resourceRequirements,
                 payload,
                 { headers: { 'x-auth-token': token } }
               );
@@ -2285,7 +2286,7 @@ useEffect(() => {
       console.log('Page D data being sent:', payload.pageD);
       
       console.log('Sending request to backend...');
-      const response = await axios.put('http://localhost:5000/api/issp/organizational-profile', payload, {
+      const response = await axios.put(API_ENDPOINTS.issp.organizationalProfile, payload, {
         headers: { 'x-auth-token': token }
       });
       
@@ -2475,7 +2476,7 @@ useEffect(() => {
       };
 
       const response = await axios.put(
-        'http://localhost:5000/api/issp/resource-requirements',
+        API_ENDPOINTS.issp.resourceRequirements,
         payload,
         {
           headers: { 'x-auth-token': token }
@@ -2555,7 +2556,7 @@ useEffect(() => {
       };
 
       const response = await axios.put(
-        'http://localhost:5000/api/issp/detailed-ict-projects',
+        API_ENDPOINTS.issp.detailedIctProjects,
         payload,
         {
           headers: { 'x-auth-token': token }
@@ -2657,7 +2658,7 @@ useEffect(() => {
       };
 
       const response = await axios.put(
-        'http://localhost:5000/api/issp/development-investment-program',
+        API_ENDPOINTS.issp.developmentInvestmentProgram,
         payload,
         {
           headers: { 'x-auth-token': token }
@@ -2734,7 +2735,7 @@ useEffect(() => {
 
     try {
       setGeneratingPdf(true);
-      const response = await axios.get('http://localhost:5000/api/issp/generate', {
+      const response = await axios.get(API_ENDPOINTS.issp.generate, {
         responseType: 'blob',
         headers: { 'x-auth-token': token },
         params: { yearCycle: selectedYearCycle }
@@ -2830,7 +2831,7 @@ useEffect(() => {
           setSubmitReviewLoading(true);
 
           await axios.post(
-            'http://localhost:5000/api/issp/review/submit',
+            API_ENDPOINTS.issp.reviewSubmit,
             {},
             {
               headers: { 'x-auth-token': token }
@@ -2950,7 +2951,7 @@ useEffect(() => {
       formData.append('dictApprovedISSP', file);
 
       const response = await axios.post(
-        'http://localhost:5000/api/issp/upload-dict-approved',
+        API_ENDPOINTS.issp.uploadDictApproved,
         formData,
         {
           headers: {
@@ -3544,7 +3545,7 @@ useEffect(() => {
                         
                         if (!isNaN(priceNum) && priceNum >= 0) {
                           await axios.put(
-                            `http://localhost:5000/api/admin/requests/${requestId}/items/${itemId}/price`,
+                            API_ENDPOINTS.admin.updateRequestItemPrice(requestId, itemId),
                             { price: priceNum },
                             { headers: { 'x-auth-token': token } }
                           );
@@ -3559,7 +3560,7 @@ useEffect(() => {
                         
                         if (!isNaN(quantityNum) && quantityNum >= 0) {
                           await axios.put(
-                            `http://localhost:5000/api/admin/requests/${requestId}/items/${itemId}/quantity`,
+                            API_ENDPOINTS.admin.updateRequestItemQuantity(requestId, itemId),
                             { quantity: quantityNum },
                             { headers: { 'x-auth-token': token } }
                           );
@@ -3572,7 +3573,7 @@ useEffect(() => {
                         const [requestId, itemId] = key.split('-');
                         
                         await axios.put(
-                          `http://localhost:5000/api/admin/requests/${requestId}/items/${itemId}/specification`,
+                          API_ENDPOINTS.admin.updateRequestItemSpecification(requestId, itemId),
                           { specification: specification },
                           { headers: { 'x-auth-token': token } }
                         );

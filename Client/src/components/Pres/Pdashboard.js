@@ -3,8 +3,7 @@ import axios from 'axios';
 import PresISSP from './PresISSP';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
-
-const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 const statusStyles = {
   draft: 'bg-gray-50 text-gray-700',
@@ -70,8 +69,8 @@ const Pdashboard = () => {
   const fetchNotifications = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get(`${API_BASE_URL}/api/notifications`, {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.notifications.list, {
+        headers: getAuthHeaders()
       });
       
       const transformedNotifications = response.data.notifications.map(notif => {
@@ -104,14 +103,14 @@ const Pdashboard = () => {
   const fetchUserData = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get(`${API_BASE_URL}/api/auth/me`, {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.auth.me, {
+        headers: getAuthHeaders()
       });
       setUserData({
         unit: response.data.unit || '',
         username: response.data.username || '',
         profilePicture: response.data.profilePicture 
-          ? `${API_BASE_URL}/${response.data.profilePicture}` 
+          ? getFileUrl(response.data.profilePicture)
           : null
       });
     } catch (error) {
@@ -138,8 +137,8 @@ const Pdashboard = () => {
     try {
       setLoadingApprovedISSP(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get(`${API_BASE_URL}/api/issp/approved-document`, {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.issp.approvedDocument, {
+        headers: getAuthHeaders()
       });
       setApprovedISSPDocument(response.data.dictApprovedISSPDocument || null);
       setDictApprovalStatus(response.data.dictApproval || null);
@@ -160,11 +159,11 @@ const Pdashboard = () => {
       
       // Fetch both requests and office stats to get all units
       const [requestsResponse, officeStatsResponse] = await Promise.all([
-        axios.get(`${API_BASE_URL}/api/admin/submitted-requests`, {
-          headers: { 'x-auth-token': token }
+        axios.get(API_ENDPOINTS.admin.submittedRequests, {
+          headers: getAuthHeaders()
         }),
-        axios.get(`${API_BASE_URL}/api/admin/office/stats`, {
-          headers: { 'x-auth-token': token }
+        axios.get(API_ENDPOINTS.admin.officeStats, {
+          headers: getAuthHeaders()
         }).catch(() => ({ data: { unitTracking: { units: [] } } })) // Fallback if endpoint fails
       ]);
 
@@ -310,9 +309,9 @@ const Pdashboard = () => {
         const headers = { 'x-auth-token': token };
 
         const [statsResponse, reviewResponse, requestsResponse] = await Promise.all([
-          axios.get(`${API_BASE_URL}/api/admin/dashboard/stats`, { headers }),
-          axios.get(`${API_BASE_URL}/api/issp/review/list`, { headers }),
-          axios.get(`${API_BASE_URL}/api/admin/submitted-requests`, { headers })
+          axios.get(API_ENDPOINTS.admin.dashboardStats, { headers: getAuthHeaders() }),
+          axios.get(API_ENDPOINTS.issp.reviewList, { headers: getAuthHeaders() }),
+          axios.get(API_ENDPOINTS.admin.submittedRequests, { headers: getAuthHeaders() })
         ]);
 
         const statsData = statsResponse.data;
@@ -557,8 +556,8 @@ const Pdashboard = () => {
                             if (notification.isNew) {
                               try {
                                 const token = localStorage.getItem('token');
-                                await axios.put(`${API_BASE_URL}/api/notifications/${notification.id}/read`, {}, {
-                                  headers: { 'x-auth-token': token }
+                                await axios.put(API_ENDPOINTS.notifications.markRead(notification.id), {}, {
+                                  headers: getAuthHeaders()
                                 });
                                 fetchNotifications();
                               } catch (error) {
@@ -619,8 +618,8 @@ const Pdashboard = () => {
                         onClick={async () => {
                           try {
                             const token = localStorage.getItem('token');
-                            await axios.put(`${API_BASE_URL}/api/notifications/mark-all-read`, {}, {
-                              headers: { 'x-auth-token': token }
+                            await axios.put(API_ENDPOINTS.notifications.markAllRead, {}, {
+                              headers: getAuthHeaders()
                             });
                             fetchNotifications();
                             setShowNotifications(false);

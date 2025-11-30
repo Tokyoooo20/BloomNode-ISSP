@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import Modal from '../common/Modal';
-
-const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const statusStyles = {
   draft: 'bg-gray-100 text-gray-700 border border-gray-200',
@@ -72,8 +71,8 @@ const PresISSP = () => {
         throw new Error('Authentication required. Please sign in again.');
       }
 
-      const response = await axios.get(`${API_BASE_URL}/api/issp/review/list`, {
-        headers: { 'x-auth-token': token },
+      const response = await axios.get(API_ENDPOINTS.issp.reviewList, {
+        headers: getAuthHeaders(),
       });
 
       const list = Array.isArray(response.data) ? response.data : [];
@@ -130,8 +129,8 @@ const PresISSP = () => {
         return;
       }
 
-      const response = await axios.get(`${API_BASE_URL}/api/admin/requests/unit/${encodeURIComponent(unitName)}`, {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.admin.requestsByUnit(unitName), {
+        headers: getAuthHeaders()
       });
       
       setUnitRequests(response.data.requests || []);
@@ -186,8 +185,8 @@ const PresISSP = () => {
 
       setDownloadingId(issp._id);
 
-      const response = await axios.get(`${API_BASE_URL}/api/issp/generate`, {
-        headers: { 'x-auth-token': token },
+      const response = await axios.get(API_ENDPOINTS.issp.generate, {
+        headers: getAuthHeaders(),
         params: { userId },
         responseType: 'blob',
       });
@@ -273,14 +272,14 @@ const PresISSP = () => {
       setIsDeciding(true);
 
       await axios.post(
-        `${API_BASE_URL}/api/issp/review/decision`,
+        API_ENDPOINTS.issp.reviewDecision,
         {
           isspId: selectedIssp._id,
           status: decision,
           notes: decisionNotes.trim(),
         },
         {
-          headers: { 'x-auth-token': token },
+          headers: getAuthHeaders(),
         }
       );
 

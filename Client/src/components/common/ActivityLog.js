@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import axios from 'axios';
-
-const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const actionColors = {
   request_created: 'bg-blue-50 text-blue-700',
@@ -67,10 +66,9 @@ const ActivityLog = ({ limit = 30, title = 'System Activity Log' }) => {
         setLoading(true);
       }
       setError(null);
-      const token = localStorage.getItem('token');
       const params = { limit };
-      const response = await axios.get(`${API_BASE_URL}/api/logs`, {
-        headers: { 'x-auth-token': token },
+      const response = await axios.get(API_ENDPOINTS.logs.list, {
+        headers: getAuthHeaders(),
         params
       });
       const newLogs = response.data?.logs || [];

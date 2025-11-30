@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const STATUS_TOKENS = {
   approved: {
@@ -55,8 +56,8 @@ const History = () => {
       setLoading(true);
       setError(null);
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/requests', {
-        headers: { 'x-auth-token': token }
+      const response = await axios.get(API_ENDPOINTS.requests.list, {
+        headers: getAuthHeaders()
       });
       
       // Filter only submitted, approved, or rejected requests
