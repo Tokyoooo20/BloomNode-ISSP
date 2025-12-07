@@ -4,13 +4,11 @@ import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 
 const Inventory = () => {
   const [animateInventory, setAnimateInventory] = useState(false);
-  const [selectedReason, setSelectedReason] = useState(null);
-  const [selectedItem, setSelectedItem] = useState(null);
-  const [showReasonModal, setShowReasonModal] = useState(false);
   const [inventoryItems, setInventoryItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedRequest, setSelectedRequest] = useState(null); // Track selected request for detail view
 
   // Fetch inventory items from backend
   const fetchInventoryItems = async () => {
@@ -44,12 +42,40 @@ const Inventory = () => {
     fetchInventoryItems();
   }, []);
 
-  // Filter items based on search term
-  const filteredItems = inventoryItems.filter(item =>
-    item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.purpose.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.requestTitle.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // Group items by request
+  const groupedByRequest = inventoryItems.reduce((acc, item) => {
+    const requestKey = item.requestTitle || item.requestId || 'Unknown Request';
+    if (!acc[requestKey]) {
+      acc[requestKey] = {
+        requestTitle: requestKey,
+        requestId: item.requestId,
+        requestYear: item.requestYear || item.year || 'N/A', // Use year cycle instead of date
+        items: []
+      };
+    }
+    acc[requestKey].items.push(item);
+    return acc;
+  }, {});
+
+  // Filter grouped requests based on search term
+  const filteredGroupedRequests = Object.keys(groupedByRequest)
+    .filter(requestKey => {
+      const group = groupedByRequest[requestKey];
+      const searchLower = searchTerm.toLowerCase();
+      return (
+        group.requestTitle.toLowerCase().includes(searchLower) ||
+        group.requestYear.toLowerCase().includes(searchLower) ||
+        group.items.some(item =>
+          item.name.toLowerCase().includes(searchLower) ||
+          item.purpose.toLowerCase().includes(searchLower) ||
+          (item.specification && item.specification.toLowerCase().includes(searchLower))
+        )
+      );
+    })
+    .reduce((acc, key) => {
+      acc[key] = groupedByRequest[key];
+      return acc;
+    }, {});
 
   return (
     <div className={`space-y-4 sm:space-y-6 transition-opacity duration-500 ${animateInventory ? 'opacity-100' : 'opacity-0'}`}>
@@ -85,265 +111,189 @@ const Inventory = () => {
             </div>
           )}
 
-          {/* Inventory Table */}
+          {/* Inventory Items - List View or Detail View */}
           {!loading && !error && (
             <>
-              {/* Mobile Card View */}
-              <div className="block md:hidden space-y-3">
-                {filteredItems.length === 0 ? (
-                  <div className="text-center py-8 text-gray-500">
-                    <svg className="w-10 h-10 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-                    </svg>
-                    <p className="text-sm font-medium">No inventory items found</p>
+              {selectedRequest ? (
+                // Detail View - Show all items from selected request
+                <div className="space-y-4">
+                  {/* Back Button and Header */}
+                  <div className="flex items-center justify-between mb-6">
+                    <button
+                      onClick={() => setSelectedRequest(null)}
+                      className="flex items-center space-x-2 text-gray-600 hover:text-gray-900 transition-colors"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      </svg>
+                      <span className="text-sm font-medium">Back to Requests</span>
+                    </button>
                   </div>
-                ) : (
-                  filteredItems.map((item) => (
-                    <div key={item.id} className="border border-gray-200 rounded-lg p-3 hover:shadow-sm transition-shadow bg-white">
-                      <div className="space-y-2">
-                        {/* Item Name and Status */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Item Name</div>
-                            <div className="text-sm font-medium text-gray-900 break-words">{item.name}</div>
-                            {item.specification && (
-                              <div className="text-xs text-gray-500 mt-1 break-words">Spec: {item.specification}</div>
-                            )}
-                          </div>
-                          <span className={`px-2 py-1 text-xs font-semibold rounded-full whitespace-nowrap flex-shrink-0 ${
-                            item.status === 'Approved' 
-                              ? 'bg-green-100 text-green-800'
-                              : item.status === 'Disapproved'
-                              ? 'bg-red-100 text-red-800'
-                              : 'bg-yellow-100 text-yellow-800'
-                          }`}>
-                            {item.status}
-                          </span>
-                        </div>
 
-                        {/* Request and Purpose */}
-                        <div className="grid grid-cols-1 gap-2">
-                          <div>
-                            <div className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Request</div>
-                            <div className="text-xs text-gray-700 break-words">{item.requestTitle}</div>
-                          </div>
-                          <div>
-                            <div className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Purpose</div>
-                            <div className="text-xs text-gray-700 break-words">{item.purpose}</div>
-                          </div>
-                        </div>
-
-                        {/* Quantity and Action */}
-                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-100">
-                          <div>
-                            <div className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-0.5">Qty</div>
-                            <div className="text-sm font-medium text-gray-900">{item.quantity}</div>
-                          </div>
-                          <button 
-                            onClick={() => {
-                              setSelectedItem(item);
-                              setSelectedReason(item.reason);
-                              setShowReasonModal(true);
-                            }}
-                            className="bg-gray-400 hover:bg-gray-500 text-white px-2 py-1 rounded text-xs font-medium transition duration-200 tap-target whitespace-nowrap"
-                          >
-                            View Details
-                          </button>
-                        </div>
+                  {/* Request Info Card */}
+                  <div className="bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-200 rounded-lg p-4 sm:p-6">
+                    <h3 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">{selectedRequest.requestTitle}</h3>
+                    <div className="flex flex-wrap items-center gap-4 mt-4">
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Year Cycle</span>
+                        <p className="text-sm font-semibold text-gray-900 mt-1">{selectedRequest.requestYear}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Items</span>
+                        <p className="text-sm font-semibold text-gray-900 mt-1">{selectedRequest.items.length} items</p>
                       </div>
                     </div>
-                  ))
-                )}
-              </div>
+                  </div>
 
-              {/* Desktop Table View */}
-              <div className="hidden md:block table-responsive-wrapper">
-                <table className="table-responsive min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Name</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Request</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Purpose</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {filteredItems.length === 0 ? (
-                      <tr>
-                        <td colSpan="6" className="px-6 py-12 text-center">
-                          <div className="text-gray-500">
-                            <svg className="w-12 h-12 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-                            </svg>
-                            <p className="text-lg font-medium">No inventory items found</p>
+                  {/* Items Table */}
+                  <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Name</th>
+                            <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Specification</th>
+                            <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Purpose</th>
+                            <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
+                            <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                            <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                            <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                          {selectedRequest.items.length === 0 ? (
+                            <tr>
+                              <td colSpan="7" className="px-6 py-12 text-center text-gray-500">
+                                No items in this request
+                              </td>
+                            </tr>
+                          ) : (
+                            selectedRequest.items.map((item, index) => (
+                              <tr key={item.id || index} className="hover:bg-gray-50">
+                                <td className="px-4 sm:px-6 py-4 whitespace-nowrap">
+                                  <div className="text-sm font-medium text-gray-900">{item.name}</div>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4">
+                                  <div className="text-sm text-gray-700 max-w-xs break-words">
+                                    {item.specification || <span className="text-gray-400">—</span>}
+                                  </div>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4">
+                                  <div className="text-sm text-gray-700 max-w-xs break-words">
+                                    {item.purpose || <span className="text-gray-400">—</span>}
+                                  </div>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
+                                  <div className="text-sm font-medium text-gray-900">{item.quantity || '—'}</div>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
+                                  <div className="text-sm text-gray-900">
+                                    {item.price > 0 ? `₱${item.price.toLocaleString()}` : '—'}
+                                  </div>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
+                                  <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                    item.status === 'Approved' 
+                                      ? 'bg-green-100 text-green-800'
+                                      : item.status === 'Disapproved'
+                                      ? 'bg-red-100 text-red-800'
+                                      : 'bg-yellow-100 text-yellow-800'
+                                  }`}>
+                                    {item.status || 'Pending'}
+                                  </span>
+                                </td>
+                                <td className="px-4 sm:px-6 py-4">
+                                  <div className="text-sm text-gray-700 max-w-xs break-words">
+                                    {item.reason || <span className="text-gray-400">—</span>}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                // List View - Show all requests with View buttons
+                <>
+                  {Object.keys(filteredGroupedRequests).length === 0 ? (
+                    <div className="text-center py-12 text-gray-500">
+                      <svg className="w-12 h-12 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                      </svg>
+                      <p className="text-lg font-medium">No inventory items found</p>
+                      <p className="text-sm text-gray-400 mt-1">Items will appear here once requests are approved</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {Object.entries(filteredGroupedRequests).map(([requestKey, group]) => {
+                        const totalItems = group.items.length;
+                        const approvedCount = group.items.filter(item => item.status === 'Approved').length;
+                        const disapprovedCount = group.items.filter(item => item.status === 'Disapproved').length;
+                        const pendingCount = group.items.filter(item => item.status === 'Pending' || !item.status).length;
+
+                        return (
+                          <div key={requestKey} className="border border-gray-200 rounded-lg bg-white shadow-sm hover:shadow-md transition-shadow">
+                            <div className="px-4 sm:px-6 py-4">
+                              <div className="flex items-center justify-between">
+                                <div className="flex-1 min-w-0">
+                                  <h3 className="text-base sm:text-lg font-semibold text-gray-900 truncate">{group.requestTitle}</h3>
+                                  <div className="flex items-center space-x-4 mt-2">
+                                    <div>
+                                      <span className="text-xs text-gray-500">Year Cycle: </span>
+                                      <span className="text-xs font-medium text-gray-700">{group.requestYear}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-xs text-gray-500">Items: </span>
+                                      <span className="text-xs font-medium text-gray-700">{totalItems}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                                
+                                <div className="flex items-center space-x-4 ml-4">
+                                  {/* Status Summary */}
+                                  <div className="hidden sm:flex items-center space-x-2">
+                                    {approvedCount > 0 && (
+                                      <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-semibold rounded-full">
+                                        {approvedCount} Approved
+                                      </span>
+                                    )}
+                                    {disapprovedCount > 0 && (
+                                      <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-semibold rounded-full">
+                                        {disapprovedCount} Disapproved
+                                      </span>
+                                    )}
+                                    {pendingCount > 0 && (
+                                      <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-xs font-semibold rounded-full">
+                                        {pendingCount} Pending
+                                      </span>
+                                    )}
+                                  </div>
+                                  
+                                  {/* View Button */}
+                                  <button
+                                    onClick={() => setSelectedRequest(group)}
+                                    className="px-4 py-2 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md"
+                                  >
+                                    View
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
                           </div>
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredItems.map((item) => (
-                        <tr key={item.id} className="hover:bg-gray-50">
-                          <td className="px-6 py-4 text-sm text-gray-900">
-                            <div className="font-medium">{item.name}</div>
-                            {item.specification && (
-                              <div className="text-xs text-gray-500 mt-1 break-words">Spec: {item.specification}</div>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 text-sm text-gray-500">
-                            <div className="max-w-xs truncate">{item.requestTitle}</div>
-                          </td>
-                          <td className="px-6 py-4 text-sm text-gray-500 break-words">{item.purpose}</td>
-                          <td className="px-6 py-4 text-sm text-gray-900">
-                            <span className="font-medium">{item.quantity}</span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                              item.status === 'Approved' 
-                                ? 'bg-green-100 text-green-800'
-                                : item.status === 'Disapproved'
-                                ? 'bg-red-100 text-red-800'
-                                : 'bg-yellow-100 text-yellow-800'
-                            }`}>
-                              {item.status}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                            <button 
-                              onClick={() => {
-                                setSelectedItem(item);
-                                setSelectedReason(item.reason);
-                                setShowReasonModal(true);
-                              }}
-                              className="bg-gray-400 hover:bg-gray-500 text-white px-2 py-1 rounded text-xs font-medium transition duration-200 tap-target"
-                            >
-                              View Details
-                            </button>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
             </>
           )}
         </div>
       </div>
 
-      {/* Item Details Modal */}
-      {showReasonModal && selectedItem && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg p-4 sm:p-6 max-w-2xl w-full shadow-xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg sm:text-xl font-semibold text-gray-900">Item Details</h3>
-              <button
-                onClick={() => {
-                  setShowReasonModal(false);
-                  setSelectedItem(null);
-                }}
-                className="text-gray-400 hover:text-gray-500 transition-colors"
-              >
-                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            <div className="space-y-4">
-              {/* Item Information */}
-              <div className="bg-gray-50 rounded-lg p-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Item Information</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                  <div>
-                    <p className="text-xs text-gray-500">Item Name</p>
-                    <p className="text-sm font-medium text-gray-900">{selectedItem.name}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Quantity</p>
-                    <p className="text-sm font-medium text-gray-900">{selectedItem.quantity}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Range</p>
-                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                      selectedItem.range === 'high' ? 'bg-red-100 text-red-800' :
-                      selectedItem.range === 'mid' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-green-100 text-green-800'
-                    }`}>
-                      {selectedItem.range.toUpperCase()}
-                    </span>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Status</p>
-                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                      selectedItem.status === 'Approved' ? 'bg-green-100 text-green-800' :
-                      selectedItem.status === 'Disapproved' ? 'bg-red-100 text-red-800' :
-                      'bg-yellow-100 text-yellow-800'
-                    }`}>
-                      {selectedItem.status}
-                    </span>
-                  </div>
-                </div>
-                
-                {selectedItem.purpose && (
-                  <div className="mt-3">
-                    <p className="text-xs text-gray-500">Purpose</p>
-                    <p className="text-sm text-gray-900 mt-1">{selectedItem.purpose}</p>
-                  </div>
-                )}
-                
-                {selectedItem.specification && (
-                  <div className="mt-3">
-                    <p className="text-xs text-gray-500">Specification</p>
-                    <p className="text-sm text-gray-900 mt-1">{selectedItem.specification}</p>
-                  </div>
-                )}
-              </div>
-
-              {/* Request Information */}
-              <div className="bg-blue-50 rounded-lg p-4">
-                <h4 className="text-sm font-semibold text-gray-700 mb-3">Request Information</h4>
-                <div>
-                  <p className="text-xs text-gray-500">Request Title</p>
-                  <p className="text-sm font-medium text-gray-900">{selectedItem.requestTitle}</p>
-                </div>
-                <div className="mt-2">
-                  <p className="text-xs text-gray-500">Request Date</p>
-                  <p className="text-sm text-gray-900">{new Date(selectedItem.requestDate).toLocaleDateString()}</p>
-                </div>
-              </div>
-
-              {/* Approval Reason */}
-              <div className={`rounded-lg p-4 ${
-                selectedItem.status === 'Approved' ? 'bg-green-50' :
-                selectedItem.status === 'Disapproved' ? 'bg-red-50' :
-                'bg-yellow-50'
-              }`}>
-                <h4 className="text-sm font-semibold text-gray-700 mb-2">
-                  {selectedItem.status === 'Approved' ? 'Approval Reason' :
-                   selectedItem.status === 'Disapproved' ? 'Disapproval Reason' :
-                   'Review Status'}
-                </h4>
-                <p className="text-sm text-gray-900">
-                  {selectedReason}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => {
-                  setShowReasonModal(false);
-                  setSelectedItem(null);
-                }}
-                className="bg-gray-400 hover:bg-gray-500 text-white px-4 sm:px-6 py-2 rounded-lg text-sm sm:text-base font-medium transition-colors duration-200 tap-target"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

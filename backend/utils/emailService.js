@@ -4,11 +4,16 @@ const sgMail = require('@sendgrid/mail');
 const apiKey = process.env.SENDGRID_API_KEY;
 
 if (!apiKey) {
-  console.error('⚠️  WARNING: SENDGRID_API_KEY is not set in environment variables!');
-  console.error('   Email functionality will not work. Please add SENDGRID_API_KEY to your .env file.');
+  console.error('WARNING: SENDGRID_API_KEY is not set in environment variables!');
+  console.error('Email functionality will not work. Please add SENDGRID_API_KEY to your .env file.');
+} else {
+  try {
+    sgMail.setApiKey(apiKey);
+    // SendGrid API key loaded silently
+  } catch (err) {
+    console.error('Error setting SendGrid API key:', err.message);
+  }
 }
-
-sgMail.setApiKey(apiKey);
 
 /**
  * Generate a 6-digit verification code
@@ -25,9 +30,33 @@ const generateVerificationCode = () => {
  */
 const sendVerificationEmail = async (email, username, code) => {
   try {
+    // Validate configuration before attempting to send
+    if (!apiKey) {
+      const error = new Error('SENDGRID_API_KEY is not configured in environment variables');
+      console.error('❌ EMAIL CONFIGURATION ERROR:');
+      console.error('   Missing: SENDGRID_API_KEY');
+      console.error('   Fix: Add SENDGRID_API_KEY to your .env file');
+      throw error;
+    }
+
+    const fromEmail = process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com';
+    
+    if (!fromEmail) {
+      const error = new Error('SENDGRID_FROM_EMAIL is not configured');
+      console.error('❌ EMAIL CONFIGURATION ERROR:');
+      console.error('   Missing: SENDGRID_FROM_EMAIL');
+      console.error('   Fix: Add SENDGRID_FROM_EMAIL to your .env file');
+      throw error;
+    }
+
+    console.log('📧 Attempting to send verification email...');
+    console.log('   To:', email);
+    console.log('   From:', fromEmail);
+    console.log('   API Key (first 10 chars):', apiKey.substring(0, 10) + '...');
+
     const msg = {
       to: email,
-      from: process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com',
+      from: fromEmail,
       subject: 'Verify Your BloomNode Account',
       html: `
         <!DOCTYPE html>
@@ -96,15 +125,93 @@ const sendVerificationEmail = async (email, username, code) => {
       `,
     };
 
+    // Validate API key is set before attempting to send
+    if (!apiKey) {
+      throw new Error('SENDGRID_API_KEY is not configured. Please add it to your .env file.');
+    }
+
     await sgMail.send(msg);
 
-    console.log('✅ Verification email sent successfully to:', email);
+    console.log('✅ Verification email sent successfully!');
+    console.log('   Recipient:', email);
+    console.log('   Verification Code:', code);
     return { success: true };
   } catch (error) {
-    console.error('❌ Error sending verification email:', error);
+    console.error('\n❌ ============================================');
+    console.error('❌ EMAIL SENDING FAILED');
+    console.error('❌ ============================================');
+    console.error('📧 Email Details:');
+    console.error('   To:', email);
+    console.error('   From:', process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com');
+    console.error('   Verification Code:', code);
+    console.error('\n🔍 Error Information:');
+    console.error('   Error Type:', error.name || 'Unknown');
+    console.error('   Error Message:', error.message || 'No message');
+    
     if (error.response) {
-      console.error('SendGrid API Error:', error.response.body);
+      console.error('\n📡 SendGrid API Response:');
+      console.error('   Status Code:', error.response.statusCode || error.response.status);
+      console.error('   Response Body:', JSON.stringify(error.response.body, null, 2));
+      
+      if (error.response.body?.errors && Array.isArray(error.response.body.errors)) {
+        console.error('\n🚨 SendGrid Error Details:');
+        error.response.body.errors.forEach((err, index) => {
+          console.error(`   Error ${index + 1}:`);
+          console.error('      Message:', err.message || 'No message');
+          console.error('      Field:', err.field || 'N/A');
+          console.error('      Help:', err.help || 'No help available');
+        });
+      }
     }
+
+    // Provide specific fix instructions based on error type
+    console.error('\n🔧 TROUBLESHOOTING GUIDE:');
+    
+    if (error.message?.includes('SENDGRID_API_KEY') || error.message?.includes('not configured')) {
+      console.error('   ❌ Problem: API Key is missing');
+      console.error('   ✅ Solution:');
+      console.error('      1. Check your .env file has: SENDGRID_API_KEY=SG.your_key_here');
+      console.error('      2. Make sure there are no spaces or quotes around the value');
+      console.error('      3. Restart your server after updating .env');
+    } else if (error.response?.statusCode === 401 || error.response?.status === 401) {
+      console.error('   ❌ Problem: API Key is invalid, expired, or revoked');
+      console.error('   ✅ Solution:');
+      console.error('      1. Go to https://app.sendgrid.com');
+      console.error('      2. Navigate to Settings > API Keys');
+      console.error('      3. Create a new API key with "Full Access" permissions');
+      console.error('      4. Copy the new key (starts with SG.)');
+      console.error('      5. Update .env: SENDGRID_API_KEY=SG.your_new_key');
+      console.error('      6. Restart your server');
+    } else if (error.response?.body?.errors?.some(e => e.message?.includes('from') || e.message?.includes('sender'))) {
+      console.error('   ❌ Problem: Sender email is not verified');
+      console.error('   ✅ Solution:');
+      console.error('      1. Go to https://app.sendgrid.com');
+      console.error('      2. Navigate to Settings > Sender Authentication > Single Sender Verification');
+      console.error('      3. Verify your sender email:', process.env.SENDGRID_FROM_EMAIL);
+      console.error('      4. Check your email inbox for verification link');
+      console.error('      5. Click the verification link');
+    } else if (error.response?.statusCode === 403 || error.response?.status === 403) {
+      console.error('   ❌ Problem: API Key lacks required permissions');
+      console.error('   ✅ Solution:');
+      console.error('      1. Go to https://app.sendgrid.com');
+      console.error('      2. Navigate to Settings > API Keys');
+      console.error('      3. Edit your API key or create a new one');
+      console.error('      4. Select "Full Access" permissions (or at minimum "Mail Send")');
+    } else {
+      console.error('   ❌ Problem: Unknown error occurred');
+      console.error('   ✅ General Solutions:');
+      console.error('      1. Verify your .env file has both SENDGRID_API_KEY and SENDGRID_FROM_EMAIL');
+      console.error('      2. Check SendGrid dashboard for account status');
+      console.error('      3. Verify your internet connection');
+      console.error('      4. Check SendGrid service status: https://status.sendgrid.com');
+    }
+    
+    console.error('\n📝 Current Configuration:');
+    console.error('   SENDGRID_API_KEY:', apiKey ? `${apiKey.substring(0, 10)}...` : 'NOT SET');
+    console.error('   SENDGRID_FROM_EMAIL:', process.env.SENDGRID_FROM_EMAIL || 'NOT SET');
+    console.error('   NODE_ENV:', process.env.NODE_ENV || 'NOT SET');
+    console.error('❌ ============================================\n');
+    
     throw new Error(`Failed to send email: ${error.message}`);
   }
 };

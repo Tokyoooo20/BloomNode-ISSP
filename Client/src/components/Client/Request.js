@@ -103,12 +103,6 @@ const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
                   {insights.priceRange || 'Information unavailable'}
                 </p>
               </div>
-              {insights.brandSuggestion && (
-                <div className="bg-white border border-gray-200 rounded-2xl p-4">
-                  <p className="text-xs text-gray-900 uppercase tracking-widest mb-1">Brand Suggestion</p>
-                  <p className="text-sm text-gray-900">{insights.brandSuggestion}</p>
-                </div>
-              )}
             </div>
 
             {Array.isArray(insights.specs) && insights.specs.length > 0 && (
@@ -117,17 +111,6 @@ const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
                 <ul className="space-y-1 text-gray-900 text-sm list-disc list-inside">
                   {insights.specs.map((spec, idx) => (
                     <li key={`${spec}-${idx}`}>{spec}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {Array.isArray(insights.vendors) && insights.vendors.length > 0 && (
-              <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
-                  <p className="text-xs text-gray-900 uppercase tracking-widest mb-2">Potential Vendors</p>
-                  <ul className="space-y-1 text-gray-900 text-sm list-disc list-inside">
-                  {insights.vendors.map((vendor, idx) => (
-                    <li key={`${vendor}-${idx}`}>{vendor}</li>
                   ))}
                 </ul>
               </div>
@@ -147,7 +130,7 @@ const Request = ({ onRequestUpdate }) => {
   const [requestForm, setRequestForm] = useState({
     requestTitle: '',
     priority: 'medium',
-    year: '2024-2027',
+    year: '2024-2026',
     description: '',
     items: []
   });
@@ -160,11 +143,51 @@ const Request = ({ onRequestUpdate }) => {
   const [currentItem, setCurrentItem] = useState({
     item: '',
     quantity: '',
+    quantityByYear: {}, // e.g., { 2024: 30, 2025: 30, 2026: 0 }
     price: '',
     range: 'mid',
     specification: '',
     purpose: ''
   });
+
+  // Helper function to extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
+  const getYearsFromCycle = (cycle) => {
+    if (!cycle || typeof cycle !== 'string') return [];
+    const parts = cycle.split('-');
+    if (parts.length !== 2) return [];
+    const startYear = parseInt(parts[0], 10);
+    const endYear = parseInt(parts[1], 10);
+    if (isNaN(startYear) || isNaN(endYear)) return [];
+    const years = [];
+    for (let year = startYear; year <= endYear; year++) {
+      years.push(year);
+    }
+    return years;
+  };
+
+  // Get years for current request cycle
+  const currentCycleYears = useMemo(() => {
+    return getYearsFromCycle(requestForm.year);
+  }, [requestForm.year]);
+
+  // Reset quantityByYear when year cycle changes
+  useEffect(() => {
+    if (currentCycleYears.length > 0) {
+      setCurrentItem(prev => {
+        const newQuantityByYear = {};
+        currentCycleYears.forEach(year => {
+          newQuantityByYear[year] = prev.quantityByYear?.[year] || 0;
+        });
+        const totalQuantity = Object.values(newQuantityByYear).reduce((sum, qty) => sum + (qty || 0), 0);
+        return {
+          ...prev,
+          quantityByYear: newQuantityByYear,
+          quantity: totalQuantity.toString()
+        };
+      });
+    }
+  }, [requestForm.year]); // Only reset when year changes, not on every render
+
   const [showNewRequestPage, setShowNewRequestPage] = useState(false);
   const [showAddItemForm, setShowAddItemForm] = useState(false);
   const [requests, setRequests] = useState([]);
@@ -284,7 +307,7 @@ const Request = ({ onRequestUpdate }) => {
   const groupedRequests = useMemo(() => {
     const grouped = {};
     requests.forEach(request => {
-      const year = request.year || '2024-2027';
+      const year = request.year || '2024-2026';
       if (!grouped[year]) {
         grouped[year] = [];
       }
@@ -297,11 +320,36 @@ const Request = ({ onRequestUpdate }) => {
   const allYearGroupItems = useMemo(() => {
     if (!selectedYearGroup) return [];
     const items = [];
+    const cycleYears = getYearsFromCycle(selectedYearGroup.year);
+    
     selectedYearGroup.requests.forEach(request => {
       if (request.items && request.items.length > 0) {
         request.items.forEach(item => {
+          // Ensure quantityByYear is preserved and properly formatted
+          let quantityByYear = item.quantityByYear || {};
+          
+          // If quantityByYear is empty but quantity exists, and we have cycle years,
+          // we could initialize it, but for now just preserve what's there
+          // Convert any number keys to strings for consistency
+          if (quantityByYear && typeof quantityByYear === 'object') {
+            const normalizedQuantityByYear = {};
+            Object.keys(quantityByYear).forEach(key => {
+              const yearKey = key.toString();
+              normalizedQuantityByYear[yearKey] = quantityByYear[key];
+            });
+            quantityByYear = normalizedQuantityByYear;
+          }
+          
+          // Log for debugging
+          if (Object.keys(quantityByYear).length > 0) {
+            console.log('Item quantityByYear:', item.item, quantityByYear, 'Total quantity:', item.quantity);
+          } else if (item.quantity) {
+            console.log('Item without quantityByYear:', item.item, 'Total quantity:', item.quantity);
+          }
+          
           items.push({
             ...item,
+            quantityByYear: quantityByYear,
             requestId: request._id,
             requestTitle: request.requestTitle || request.title,
             requestStatus: request.status
@@ -310,6 +358,12 @@ const Request = ({ onRequestUpdate }) => {
       }
     });
     return items;
+  }, [selectedYearGroup]);
+
+  // Get years from the selected year cycle for the table
+  const cycleYears = useMemo(() => {
+    if (!selectedYearGroup) return [];
+    return getYearsFromCycle(selectedYearGroup.year);
   }, [selectedYearGroup]);
 
   // Handle item status update
@@ -363,6 +417,7 @@ const Request = ({ onRequestUpdate }) => {
           id: item.id || item._id || `item-${Date.now()}-${index}`,
           item: item.item || '',
           quantity: Number(item.quantity) || 0,
+          quantityByYear: item.quantityByYear || {},
           price: item.price ? Number(item.price) : 0,
           range: item.range || 'mid',
           specification: item.specification || '',
@@ -376,7 +431,7 @@ const Request = ({ onRequestUpdate }) => {
         setRequestForm({
           requestTitle: updatedRequest.requestTitle || updatedRequest.title,
           priority: updatedRequest.priority,
-          year: updatedRequest.year || '2024-2027',
+          year: updatedRequest.year || '2024-2026',
           description: updatedRequest.description,
           items: normalizedItems
         });
@@ -440,17 +495,43 @@ const Request = ({ onRequestUpdate }) => {
     }));
   };
 
+  // Handle year-by-year quantity change
+  const handleQuantityByYearChange = (year, value) => {
+    const numValue = value === '' ? 0 : Math.max(0, parseInt(value, 10) || 0);
+    setCurrentItem(prev => {
+      const newQuantityByYear = {
+        ...prev.quantityByYear,
+        [year.toString()]: numValue  // Ensure year is stored as string for consistency
+      };
+      // Calculate total quantity
+      const totalQuantity = Object.values(newQuantityByYear).reduce((sum, qty) => sum + (qty || 0), 0);
+      console.log('Updated quantityByYear:', newQuantityByYear, 'for year:', year);
+      return {
+        ...prev,
+        quantityByYear: newQuantityByYear,
+        quantity: totalQuantity.toString()
+      };
+    });
+  };
+
   const addItemToRequest = () => {
-    if (currentItem.item && currentItem.quantity) {
+    // Calculate total from quantityByYear if available, otherwise use quantity
+    const totalQuantity = Object.keys(currentItem.quantityByYear || {}).length > 0
+      ? Object.values(currentItem.quantityByYear).reduce((sum, qty) => sum + (qty || 0), 0)
+      : Number(currentItem.quantity) || 0;
+
+    if (currentItem.item && totalQuantity > 0) {
       const newItem = {
         id: Date.now().toString(),
         item: currentItem.item,
-        quantity: Number(currentItem.quantity), // Convert to number for backend
+        quantity: totalQuantity,
+        quantityByYear: currentItem.quantityByYear || {},
         price: currentItem.price ? Number(currentItem.price) : 0,
         range: currentItem.range,
         specification: currentItem.specification || '',
         purpose: currentItem.purpose || ''
       };
+      console.log('Adding item with quantityByYear:', newItem.item, newItem.quantityByYear);
       console.log('Adding new item:', newItem);
       console.log('Current items in form before adding:', requestForm.items);
       console.log('Current items count:', requestForm.items.length);
@@ -485,18 +566,19 @@ const Request = ({ onRequestUpdate }) => {
       setCurrentItem({
         item: '',
         quantity: '',
+        quantityByYear: {},
         price: '',
         range: 'mid',
         specification: '',
         purpose: ''
       });
       setShowAddItemForm(false);
-    } else {
+      } else {
       setAlertModal({
         show: true,
         variant: 'danger',
         title: 'Missing Required Fields',
-        message: 'Please fill in at least Item name and Quantity'
+        message: 'Please fill in Item name and at least one year quantity'
       });
     }
   };
@@ -634,6 +716,7 @@ const Request = ({ onRequestUpdate }) => {
               id: item.id || `item-${Date.now()}-${index}`,
               item: item.item || '',
               quantity: Number(item.quantity) || 0,
+              quantityByYear: item.quantityByYear || {},
               price: item.price ? Number(item.price) : 0,
               range: item.range || 'mid',
               specification: item.specification || '',
@@ -715,7 +798,7 @@ const Request = ({ onRequestUpdate }) => {
         setRequestForm({
           requestTitle: '',
           priority: 'medium',
-          year: '2024-2027',
+          year: '2024-2026',
           description: '',
           items: []
         });
@@ -872,14 +955,77 @@ const Request = ({ onRequestUpdate }) => {
                         })()}
                       </div>
 
-                      <div className="flex justify-end pt-4 border-t border-gray-200 mt-4">
+                      <div className="flex justify-end gap-3 pt-4 border-t border-gray-200 mt-4">
+                        {/* Check if there are any pending/draft requests that can be submitted */}
+                        {(() => {
+                          const pendingRequests = yearRequests.filter(r => r.status === 'pending' || r.status === 'draft');
+                          const hasPending = pendingRequests.length > 0;
+                          
+                          return hasPending && (
+                            <button
+                              onClick={async () => {
+                                // Submit all pending requests in this year group
+                                const pendingReqs = yearRequests.filter(r => r.status === 'pending' || r.status === 'draft');
+                                
+                                if (pendingReqs.length === 0) return;
+                                
+                                try {
+                                  setLoading(true);
+                                  setError(null);
+                                  const token = localStorage.getItem('token');
+                                  
+                                  // Submit all pending requests
+                                  const submitPromises = pendingReqs.map(request => 
+                                    axios.put(
+                                      API_ENDPOINTS.requests.submit(request._id),
+                                      { status: 'submitted' },
+                                      { headers: { 'x-auth-token': token } }
+                                    )
+                                  );
+                                  
+                                  await Promise.all(submitPromises);
+                                  
+                                  setAlertModal({
+                                    show: true,
+                                    variant: 'success',
+                                    title: 'Requests Submitted',
+                                    message: `Successfully submitted ${pendingReqs.length} request${pendingReqs.length !== 1 ? 's' : ''} for ${year}!`
+                                  });
+                                  
+                                  // Refresh the requests list
+                                  await fetchRequests();
+                                  
+                                  // Trigger dashboard refresh if callback is provided
+                                  if (onRequestUpdate) {
+                                    onRequestUpdate();
+                                  }
+                                } catch (err) {
+                                  const errorMessage = err.response?.data?.message || err.message || 'Failed to submit requests';
+                                  setError(errorMessage);
+                                  setAlertModal({
+                                    show: true,
+                                    variant: 'danger',
+                                    title: 'Submission Failed',
+                                    message: `Failed to submit requests: ${errorMessage}`
+                                  });
+                                } finally {
+                                  setLoading(false);
+                                }
+                              }}
+                              disabled={loading}
+                              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {loading ? 'Submitting...' : 'Submit'}
+                            </button>
+                          );
+                        })()}
                         <button
                           onClick={() => {
                             setSelectedYearGroup({ year, requests: yearRequests });
                           }}
                           className="px-4 py-2 bg-gray-400 hover:bg-gray-500 text-white rounded-lg text-sm font-medium transition-colors"
                         >
-                          View Details
+                          View
                         </button>
                       </div>
                     </div>
@@ -965,103 +1111,151 @@ const Request = ({ onRequestUpdate }) => {
             </div>
             <div className="overflow-x-auto">
               {allYearGroupItems.length > 0 ? (
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Item Status</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Quantity</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Remarks</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {allYearGroupItems.map((item, index) => (
-                      <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <div className="text-sm font-medium text-gray-900">{item.item}</div>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                            item.approvalStatus === 'approved' ? 'bg-green-50 text-green-700' :
-                            item.approvalStatus === 'disapproved' ? 'bg-red-50 text-red-700' :
-                            'bg-yellow-50 text-yellow-700'
-                          }`}>
-                            {(item.approvalStatus || 'pending').toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          {item.approvalStatus === 'approved' && item.itemStatus ? (
-                            <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                              item.itemStatus === 'pr_created' ? 'bg-blue-50 text-blue-700' :
-                              item.itemStatus === 'purchased' ? 'bg-purple-50 text-purple-700' :
-                              item.itemStatus === 'received' ? 'bg-green-50 text-green-700' :
-                              item.itemStatus === 'in_transit' ? 'bg-yellow-50 text-yellow-700' :
-                              item.itemStatus === 'completed' ? 'bg-emerald-50 text-emerald-700' :
-                              'bg-gray-50 text-gray-700'
-                            }`}>
-                              {item.itemStatus === 'pr_created' ? 'PR CREATED' :
-                               item.itemStatus === 'purchased' ? 'PURCHASED' :
-                               item.itemStatus === 'received' ? 'RECEIVED' :
-                               item.itemStatus === 'in_transit' ? 'IN TRANSIT' :
-                               item.itemStatus === 'completed' ? 'COMPLETED' :
-                               item.itemStatus.toUpperCase()}
-                            </span>
-                          ) : item.approvalStatus === 'approved' ? (
-                            <span className="text-xs text-gray-400">Not Set</span>
-                          ) : (
-                            <span className="text-xs text-gray-400">—</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          <div className="text-sm text-gray-900">{item.quantity || '—'}</div>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          <div className="text-sm text-gray-900">
-                            {item.price > 0 ? `₱${item.price.toLocaleString()}` : '—'}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          <span className={`px-2 py-0.5 text-xs font-semibold rounded ${
-                            item.range === 'high' ? 'bg-gray-200 text-gray-800' :
-                            item.range === 'mid' ? 'bg-gray-100 text-gray-700' :
-                            'bg-gray-50 text-gray-600'
-                          }`}>
-                            {item.range ? item.range.toUpperCase() : '—'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-sm text-gray-900 max-w-xs break-words">
-                            {item.specification || <span className="text-gray-400">—</span>}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-sm text-gray-900 max-w-xs break-words">
-                            {item.purpose || <span className="text-gray-400">—</span>}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-sm text-gray-700 max-w-xs break-words">
-                            {item.itemStatusRemarks || <span className="text-gray-400">—</span>}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
-                          {item.approvalStatus === 'approved' && (
-                            <button
-                              onClick={() => openStatusUpdateModal(item.requestId, item.id || item._id, item.item, item.itemStatus)}
-                              className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                            >
-                              {item.itemStatus ? 'Update Status' : 'Set Status'}
-                            </button>
-                          )}
-                        </td>
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
+                        {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Item Status</th>
+                        )}
+                        {cycleYears.map(year => (
+                          <th key={year} className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                            {year}
+                          </th>
+                        ))}
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
+                        {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
+                        )}
+                        {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Remarks</th>
+                        )}
+                        {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
+                        )}
                       </tr>
-                    ))}
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {allYearGroupItems.map((item, index) => {
+                        const isApproved = item.approvalStatus === 'approved';
+                        return (
+                          <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <div className="text-sm font-medium text-gray-900">{item.item}</div>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-center">
+                              <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                item.approvalStatus === 'approved' ? 'bg-green-50 text-green-700' :
+                                item.approvalStatus === 'disapproved' ? 'bg-red-50 text-red-700' :
+                                'bg-yellow-50 text-yellow-700'
+                              }`}>
+                                {(item.approvalStatus || 'pending').toUpperCase()}
+                              </span>
+                            </td>
+                            {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
+                              <td className="px-4 py-3 whitespace-nowrap text-center">
+                                {isApproved && item.itemStatus ? (
+                                  <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                    item.itemStatus === 'pr_created' ? 'bg-blue-50 text-blue-700' :
+                                    item.itemStatus === 'purchased' ? 'bg-purple-50 text-purple-700' :
+                                    item.itemStatus === 'received' ? 'bg-green-50 text-green-700' :
+                                    item.itemStatus === 'in_transit' ? 'bg-yellow-50 text-yellow-700' :
+                                    item.itemStatus === 'completed' ? 'bg-emerald-50 text-emerald-700' :
+                                    'bg-gray-50 text-gray-700'
+                                  }`}>
+                                    {item.itemStatus === 'pr_created' ? 'PR CREATED' :
+                                     item.itemStatus === 'purchased' ? 'PURCHASED' :
+                                     item.itemStatus === 'received' ? 'RECEIVED' :
+                                     item.itemStatus === 'in_transit' ? 'IN TRANSIT' :
+                                     item.itemStatus === 'completed' ? 'COMPLETED' :
+                                     item.itemStatus.toUpperCase()}
+                                  </span>
+                                ) : isApproved ? (
+                                  <span className="text-xs text-gray-400">Not Set</span>
+                                ) : (
+                                  <span className="text-xs text-gray-400">—</span>
+                                )}
+                              </td>
+                            )}
+                            {cycleYears.map(year => {
+                              // Check if quantityByYear exists and has data for this year
+                              // Try both string and number keys for compatibility
+                              const hasQuantityByYear = item.quantityByYear && 
+                                                       typeof item.quantityByYear === 'object' && 
+                                                       Object.keys(item.quantityByYear).length > 0;
+                              const yearStr = year.toString();
+                              const yearNum = parseInt(year, 10);
+                              const yearQuantity = hasQuantityByYear 
+                                ? (item.quantityByYear[yearStr] !== undefined ? item.quantityByYear[yearStr] : item.quantityByYear[yearNum])
+                                : null;
+                              const displayValue = yearQuantity !== null && yearQuantity !== undefined 
+                                ? yearQuantity 
+                                : '—';
+                              
+                              // Debug logging
+                              if (hasQuantityByYear && yearQuantity === null) {
+                                console.log('Item:', item.item, 'quantityByYear:', item.quantityByYear, 'year:', year, 'yearStr:', yearStr);
+                              }
+                              
+                              return (
+                                <td key={year} className="px-4 py-3 whitespace-nowrap text-center">
+                                  <div className="text-sm text-gray-900">
+                                    {displayValue}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <div className="text-sm text-gray-900">
+                              {item.price > 0 ? `₱${item.price.toLocaleString()}` : '—'}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <span className={`px-2 py-0.5 text-xs font-semibold rounded ${
+                              item.range === 'high' ? 'bg-gray-200 text-gray-800' :
+                              item.range === 'mid' ? 'bg-gray-100 text-gray-700' :
+                              'bg-gray-50 text-gray-600'
+                            }`}>
+                              {item.range ? item.range.toUpperCase() : '—'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="text-sm text-gray-900 max-w-xs break-words">
+                              {item.specification || <span className="text-gray-400">—</span>}
+                            </div>
+                          </td>
+                          {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
+                            <td className="px-4 py-3">
+                              <div className="text-sm text-gray-900 max-w-xs break-words">
+                                {isApproved ? (item.purpose || <span className="text-gray-400">—</span>) : <span className="text-gray-400">—</span>}
+                              </div>
+                            </td>
+                          )}
+                          {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
+                            <td className="px-4 py-3">
+                              <div className="text-sm text-gray-700 max-w-xs break-words">
+                                {isApproved ? (item.itemStatusRemarks || <span className="text-gray-400">—</span>) : <span className="text-gray-400">—</span>}
+                              </div>
+                            </td>
+                          )}
+                          {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
+                            <td className="px-4 py-3 whitespace-nowrap text-center">
+                              {isApproved && (
+                                <button
+                                  onClick={() => openStatusUpdateModal(item.requestId, item.id || item._id, item.item, item.itemStatus)}
+                                  className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+                                >
+                                  {item.itemStatus ? 'Update Status' : 'Set Status'}
+                                </button>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : (
@@ -1086,7 +1280,7 @@ const Request = ({ onRequestUpdate }) => {
                 setRequestForm({
                   requestTitle: '',
                   priority: 'medium',
-                  year: '2024-2027',
+                  year: '2024-2026',
                   description: '',
                   items: []
                 });
@@ -1311,7 +1505,7 @@ const Request = ({ onRequestUpdate }) => {
                   <button
                     type="button"
                     onClick={() => {
-                      setCurrentItem({ item: '', quantity: '', price: '', range: 'mid', specification: '', purpose: '' });
+                      setCurrentItem({ item: '', quantity: '', quantityByYear: {}, price: '', range: 'mid', specification: '', purpose: '' });
                       setShowAddItemForm(false);
                     }}
                     className="text-gray-400 hover:text-gray-600"
@@ -1337,16 +1531,48 @@ const Request = ({ onRequestUpdate }) => {
                         />
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Quantity *</label>
-                        <input
-                          type="number"
-                          name="quantity"
-                          value={currentItem.quantity}
-                          onChange={handleCurrentItemChange}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
-                          placeholder="Enter quantity"
-                          min="1"
-                        />
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Quantity by Year *</label>
+                        {currentCycleYears.length > 0 ? (
+                          <div className="border border-gray-300 rounded-lg overflow-hidden">
+                            <table className="w-full">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  {currentCycleYears.map(year => (
+                                    <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                                      {year}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr>
+                                  {currentCycleYears.map(year => (
+                                    <td key={year} className="px-2 py-2 border-r border-gray-300 last:border-r-0">
+                                      <input
+                                        type="number"
+                                        value={currentItem.quantityByYear?.[year] || ''}
+                                        onChange={(e) => handleQuantityByYearChange(year, e.target.value)}
+                                        className="w-full px-2 py-1 text-sm text-center border border-gray-200 rounded focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                                        placeholder="0"
+                                        min="0"
+                                      />
+                                    </td>
+                                  ))}
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            name="quantity"
+                            value={currentItem.quantity}
+                            onChange={handleCurrentItemChange}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                            placeholder="Enter quantity"
+                            min="1"
+                          />
+                        )}
                       </div>
                     </div>
 
@@ -1447,6 +1673,7 @@ const Request = ({ onRequestUpdate }) => {
                           id: item.id || `item-${Date.now()}-${Math.random()}`,
                           item: item.item,
                           quantity: Number(item.quantity) || 0,
+                          quantityByYear: item.quantityByYear || {},
                           price: item.price ? Number(item.price) : 0,
                           range: item.range || 'mid',
                           specification: item.specification || '',
@@ -1472,7 +1699,7 @@ const Request = ({ onRequestUpdate }) => {
                     setRequestForm({
                       requestTitle: '',
                       priority: 'medium',
-                      year: '2024-2027',
+                      year: '2024-2026',
                       description: '',
                       items: []
                     });
@@ -1513,7 +1740,7 @@ const Request = ({ onRequestUpdate }) => {
                 setRequestForm({
                   requestTitle: '',
                   priority: 'medium',
-                  year: '2024-2027',
+                  year: '2024-2026',
                   description: '',
                   items: []
                 });
@@ -1562,10 +1789,10 @@ const Request = ({ onRequestUpdate }) => {
                       onChange={handleRequestFormChange}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
                     >
-                      <option value="2024-2027">2024-2027</option>
-                      <option value="2027-2030">2027-2030</option>
-                      <option value="2030-2033">2030-2033</option>
-                      <option value="2033-2036">2033-2036</option>
+                      <option value="2024-2026">2024-2026</option>
+                      <option value="2027-2029">2027-2029</option>
+                      <option value="2030-2032">2030-2032</option>
+                      <option value="2033-2035">2033-2035</option>
                     </select>
                   </div>
                   
@@ -1599,16 +1826,48 @@ const Request = ({ onRequestUpdate }) => {
                       </div>
                       
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Quantity *</label>
-                        <input
-                          type="number"
-                          name="quantity"
-                          value={currentItem.quantity}
-                          onChange={handleCurrentItemChange}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
-                          placeholder="Enter quantity"
-                          min="1"
-                        />
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Quantity by Year *</label>
+                        {currentCycleYears.length > 0 ? (
+                          <div className="border border-gray-300 rounded-lg overflow-hidden">
+                            <table className="w-full">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  {currentCycleYears.map(year => (
+                                    <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                                      {year}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr>
+                                  {currentCycleYears.map(year => (
+                                    <td key={year} className="px-2 py-2 border-r border-gray-300 last:border-r-0">
+                                      <input
+                                        type="number"
+                                        value={currentItem.quantityByYear?.[year] || ''}
+                                        onChange={(e) => handleQuantityByYearChange(year, e.target.value)}
+                                        className="w-full px-2 py-1 text-sm text-center border border-gray-200 rounded focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                                        placeholder="0"
+                                        min="0"
+                                      />
+                                    </td>
+                                  ))}
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            name="quantity"
+                            value={currentItem.quantity}
+                            onChange={handleCurrentItemChange}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                            placeholder="Enter quantity"
+                            min="1"
+                          />
+                        )}
                       </div>
                     </div>
 
@@ -1799,10 +2058,10 @@ const Request = ({ onRequestUpdate }) => {
                       disabled={editingRequest.status === 'submitted' || editingRequest.status === 'approved' || editingRequest.status === 'rejected'}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     >
-                      <option value="2024-2027">2024-2027</option>
-                      <option value="2027-2030">2027-2030</option>
-                      <option value="2030-2033">2030-2033</option>
-                      <option value="2033-2036">2033-2036</option>
+                      <option value="2024-2026">2024-2026</option>
+                      <option value="2027-2029">2027-2029</option>
+                      <option value="2030-2032">2030-2032</option>
+                      <option value="2033-2035">2033-2035</option>
                     </select>
                   </div>
                   <div>
@@ -2028,7 +2287,7 @@ const Request = ({ onRequestUpdate }) => {
                       <button
                         type="button"
                         onClick={() => {
-                          setCurrentItem({ item: '', quantity: '', price: '', range: 'mid', specification: '', purpose: '' });
+                          setCurrentItem({ item: '', quantity: '', quantityByYear: {}, price: '', range: 'mid', specification: '', purpose: '' });
                           setShowAddItemForm(false);
                         }}
                         className="text-gray-400 hover:text-gray-600"
@@ -2054,16 +2313,48 @@ const Request = ({ onRequestUpdate }) => {
                             />
                           </div>
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Quantity *</label>
-                            <input
-                              type="number"
-                              name="quantity"
-                              value={currentItem.quantity}
-                              onChange={handleCurrentItemChange}
-                              className="input-responsive tap-target"
-                              placeholder="Enter quantity"
-                              min="1"
-                            />
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Quantity by Year *</label>
+                            {currentCycleYears.length > 0 ? (
+                              <div className="border border-gray-300 rounded-lg overflow-hidden">
+                                <table className="w-full">
+                                  <thead className="bg-gray-50">
+                                    <tr>
+                                      {currentCycleYears.map(year => (
+                                        <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                                          {year}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    <tr>
+                                      {currentCycleYears.map(year => (
+                                        <td key={year} className="px-2 py-2 border-r border-gray-300 last:border-r-0">
+                                          <input
+                                            type="number"
+                                            value={currentItem.quantityByYear?.[year] || ''}
+                                            onChange={(e) => handleQuantityByYearChange(year, e.target.value)}
+                                            className="w-full px-2 py-1 text-sm text-center border border-gray-200 rounded focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                                            placeholder="0"
+                                            min="0"
+                                          />
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              <input
+                                type="number"
+                                name="quantity"
+                                value={currentItem.quantity}
+                                onChange={handleCurrentItemChange}
+                                className="input-responsive tap-target"
+                                placeholder="Enter quantity"
+                                min="1"
+                              />
+                            )}
                           </div>
                         </div>
 

@@ -7,7 +7,7 @@ const Login = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
-    email: location.state?.email || '',
+    email: '',
     password: ''
   });
   
@@ -22,6 +22,16 @@ const Login = () => {
     variant: 'brand',
     confirmLabel: 'Continue',
   });
+
+  // Initialize email from location state only once on mount
+  useEffect(() => {
+    if (location.state?.email) {
+      setFormData(prev => ({
+        ...prev,
+        email: location.state.email
+      }));
+    }
+  }, []); // Empty dependency array - only run once on mount
 
   // Show message from location state (e.g., from verify email page)
   useEffect(() => {

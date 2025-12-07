@@ -53,12 +53,30 @@ const formatMetadataValue = (value) => {
   return String(value);
 };
 
-const ActivityLog = ({ limit = 30, title = 'System Activity Log' }) => {
+const ActivityLog = ({ limit = 30, title = 'System Activity Log', filterByRole = null, filterByCurrentUser = false }) => {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [currentUserId, setCurrentUserId] = useState(null);
   const lastLogIdRef = useRef(null);
+
+  // Fetch current user ID if filtering by current user
+  useEffect(() => {
+    if (filterByCurrentUser) {
+      const fetchCurrentUser = async () => {
+        try {
+          const response = await axios.get(API_ENDPOINTS.auth.me, {
+            headers: getAuthHeaders()
+          });
+          setCurrentUserId(response.data._id || response.data.id);
+        } catch (err) {
+          console.error('Error fetching current user:', err);
+        }
+      };
+      fetchCurrentUser();
+    }
+  }, [filterByCurrentUser]);
 
   const fetchLogs = useCallback(async (checkForNew = false) => {
     try {
@@ -67,11 +85,27 @@ const ActivityLog = ({ limit = 30, title = 'System Activity Log' }) => {
       }
       setError(null);
       const params = { limit };
+      // Add role filter if specified
+      if (filterByRole) {
+        params.actorRole = filterByRole;
+      }
       const response = await axios.get(API_ENDPOINTS.logs.list, {
         headers: getAuthHeaders(),
         params
       });
-      const newLogs = response.data?.logs || [];
+      let newLogs = response.data?.logs || [];
+      
+      // Filter by current user ID if specified
+      if (filterByCurrentUser && currentUserId) {
+        newLogs = newLogs.filter(log => {
+          const actorId = log.actor?.id;
+          // Handle both string and ObjectId comparison
+          return actorId && (
+            actorId.toString() === currentUserId.toString() ||
+            actorId === currentUserId
+          );
+        });
+      }
       
       if (checkForNew && lastLogIdRef.current) {
         // Check if there are new logs (compare first log ID with last known ID)
@@ -97,9 +131,14 @@ const ActivityLog = ({ limit = 30, title = 'System Activity Log' }) => {
         setLoading(false);
       }
     }
-  }, [limit]);
+  }, [limit, filterByRole, filterByCurrentUser, currentUserId]);
 
   useEffect(() => {
+    // If filtering by current user, wait for user ID to be fetched
+    if (filterByCurrentUser && !currentUserId) {
+      return; // Don't fetch logs yet, wait for user ID
+    }
+    
     fetchLogs(false); // Initial load
     
     // Poll for new logs every 15 seconds, but only update if there are new ones
@@ -108,7 +147,7 @@ const ActivityLog = ({ limit = 30, title = 'System Activity Log' }) => {
     }, 15000);
     
     return () => clearInterval(interval);
-  }, [fetchLogs]);
+  }, [fetchLogs, filterByCurrentUser, currentUserId]);
 
   const filteredLogs = logs.filter((log) => {
     if (!searchQuery.trim()) return true;

@@ -5,6 +5,7 @@ const itemSchema = new mongoose.Schema({
   id: { type: String },  // Changed from ObjectId to String
   item: { type: String, required: true },
   quantity: { type: Number, required: true },
+  quantityByYear: { type: mongoose.Schema.Types.Mixed, default: {} }, // e.g., { 2024: 30, 2025: 30, 2026: 0 }
   price: { type: Number, default: 0 },
   range: { type: String, enum: ['low', 'mid', 'high'], default: 'mid' },
   specification: String,
@@ -77,6 +78,13 @@ const requestSchema = new mongoose.Schema({
     trim: true,
     index: true // Index for efficient queries by unit
   },
+  campus: {
+    type: String,
+    required: false,
+    trim: true,
+    default: '',
+    index: true // Index for efficient queries by campus
+  },
   dictApproval: {
     status: {
       type: String,
@@ -113,17 +121,22 @@ requestSchema.pre('save', async function(next) {
     });
   }
   
-  // Populate unit from userId if not already set
-  if (!this.unit && this.userId) {
+  // Populate unit and campus from userId if not already set
+  if ((!this.unit || !this.campus) && this.userId) {
     try {
       const User = mongoose.model('User');
       const user = await User.findById(this.userId);
-      if (user && user.unit) {
-        this.unit = user.unit;
+      if (user) {
+        if (!this.unit && user.unit) {
+          this.unit = user.unit;
+        }
+        if (!this.campus && user.campus) {
+          this.campus = user.campus;
+        }
       }
     } catch (error) {
-      // If user not found or error, continue without setting unit
-      console.warn('Could not populate unit for Request:', error.message);
+      // If user not found or error, continue without setting unit/campus
+      console.warn('Could not populate unit/campus for Request:', error.message);
     }
   }
   

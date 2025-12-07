@@ -12,6 +12,7 @@ const sanitizeRequestItems = (items = []) =>
     id: item.id || `item-${Date.now()}-${index}`,
     item: item.item || '',
     quantity: Number(item.quantity) || 0,
+    quantityByYear: item.quantityByYear || {},
     price: Number(item.price) || 0,
     range: item.range || 'mid',
     specification: item.specification || '',
@@ -117,30 +118,51 @@ router.get('/', auth, async (req, res) => {
     
     let requests;
     if (isProgramHead || isPendingWithUnit) {
-      // For Program Heads (and pending users with matching unit): Query by unit to get all department requests
-      // This allows new Program Heads to see previous Program Head's requests
-      // Query by unit field OR by userId from users in the same unit (for backward compatibility with old requests)
-      // First, find all users in the same unit
-      const unitUsers = await User.find({ unit: user.unit }).select('_id');
+      // For Program Heads (and pending users with matching unit): Query by unit AND campus to get all department requests
+      // This allows new Program Heads to see previous Program Head's requests for the same campus
+      // Normalize campus values (empty/null = 'Main')
+      const userCampus = (user.campus || '').trim() || 'Main';
+      
+      // Build campus query: match exact campus or match empty/null if userCampus is 'Main'
+      const campusQuery = userCampus === 'Main' 
+        ? { $or: [{ campus: 'Main' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
+        : { campus: userCampus };
+      
+      // First, find all users in the same unit AND same campus
+      const unitUsers = await User.find({ 
+        unit: user.unit,
+        ...campusQuery
+      }).select('_id');
       const unitUserIds = unitUsers.map(u => u._id);
       
-      // Query requests by unit OR by userId from the same unit
-      // This ensures we get all requests from the department, even old ones without unit field
+      // Query requests by unit+campus OR by userId from the same unit+campus
+      // This ensures we get all requests from the department for this campus, even old ones without unit/campus field
       requests = await Request.find({
         $or: [
-          { unit: user.unit }, // Requests with unit field set
-          { userId: { $in: unitUserIds } } // Requests from users in the same unit (for old requests)
+          { 
+            unit: user.unit,
+            ...campusQuery
+          }, // Requests with unit+campus field set
+          { userId: { $in: unitUserIds } } // Requests from users in the same unit+campus (for old requests)
         ]
       })
-        .populate('userId', 'username email unit')
+        .populate('userId', 'username email unit campus')
         .sort({ createdAt: -1 });
       
-      // Update any requests that don't have unit field set (migration)
-      const requestsWithoutUnit = requests.filter(req => !req.unit || req.unit.trim() === '');
-      if (requestsWithoutUnit.length > 0) {
+      // Update any requests that don't have unit/campus field set (migration)
+      const requestsToUpdate = requests.filter(req => 
+        (!req.unit || req.unit.trim() === '') || 
+        (!req.campus || req.campus.trim() === '')
+      );
+      if (requestsToUpdate.length > 0) {
         await Promise.all(
-          requestsWithoutUnit.map(req => {
-            req.unit = user.unit;
+          requestsToUpdate.map(req => {
+            if (!req.unit || req.unit.trim() === '') {
+              req.unit = user.unit;
+            }
+            if (!req.campus || req.campus.trim() === '') {
+              req.campus = userCampus;
+            }
             return req.save();
           })
         );
@@ -192,6 +214,9 @@ router.post('/', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
     
+    // Normalize campus values (empty/null = 'Main')
+    const userCampus = (user.campus || '').trim() || 'Main';
+    
     const newRequest = new Request({
       requestTitle,
       priority,
@@ -199,7 +224,8 @@ router.post('/', auth, async (req, res) => {
       description,
       items: cleanedItems,
       userId: req.user.id, // Use id instead of _id
-      unit: user.unit || '' // Store unit for department-based queries
+      unit: user.unit || '', // Store unit for department-based queries
+      campus: userCampus // Store campus for department-based queries
     });
 
     const savedRequest = await newRequest.save();
@@ -780,19 +806,33 @@ router.get('/inventory/items', auth, async (req, res) => {
     
     let requests;
     if (isProgramHead || isPendingWithUnit) {
-      // For Program Heads (and pending users with matching unit): Query by unit to get all department requests
-      // Query by unit field OR by userId from users in the same unit (for backward compatibility)
-      const unitUsers = await User.find({ unit: user.unit }).select('_id');
+      // For Program Heads (and pending users with matching unit): Query by unit AND campus to get all department requests
+      // Normalize campus values (empty/null = 'Main')
+      const userCampus = (user.campus || '').trim() || 'Main';
+      
+      // Build campus query: match exact campus or match empty/null if userCampus is 'Main'
+      const campusQuery = userCampus === 'Main' 
+        ? { $or: [{ campus: 'Main' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
+        : { campus: userCampus };
+      
+      // Find all users in the same unit AND same campus
+      const unitUsers = await User.find({ 
+        unit: user.unit,
+        ...campusQuery
+      }).select('_id');
       const unitUserIds = unitUsers.map(u => u._id);
       
       requests = await Request.find({
         $or: [
-          { unit: user.unit }, // Requests with unit field set
-          { userId: { $in: unitUserIds } } // Requests from users in the same unit (for old requests)
+          { 
+            unit: user.unit,
+            ...campusQuery
+          }, // Requests with unit+campus field set
+          { userId: { $in: unitUserIds } } // Requests from users in the same unit+campus (for old requests)
         ],
         status: { $in: ['submitted', 'approved', 'rejected'] }
       })
-        .populate('userId', 'username email unit')
+        .populate('userId', 'username email unit campus')
         .sort({ createdAt: -1 });
     } else {
       // For admin/president: Query by userId (individual account)
@@ -822,7 +862,9 @@ router.get('/inventory/items', auth, async (req, res) => {
                    item.approvalStatus === 'disapproved' ? 'Disapproved' : 'Pending',
             reason: item.approvalReason || 'Awaiting review',
             requestTitle: requestName,
+            requestId: request._id,
             requestStatus: request.status,
+            requestYear: request.year || 'N/A', // Include year cycle
             requestDate: request.createdAt
           });
         });

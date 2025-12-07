@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import PresISSP from './PresISSP';
 import ActivityLog from '../common/ActivityLog';
@@ -64,6 +64,10 @@ const Pdashboard = () => {
   const [dictApprovalStatus, setDictApprovalStatus] = useState(null);
   const [itemStatistics, setItemStatistics] = useState(null);
   const [loadingItemStats, setLoadingItemStats] = useState(false);
+  const [priceDistribution, setPriceDistribution] = useState(null);
+  const [loadingPriceDistribution, setLoadingPriceDistribution] = useState(false);
+  const [priceDistributionYearCycle, setPriceDistributionYearCycle] = useState('2024-2026');
+  const [priceDistributionDropdownOpen, setPriceDistributionDropdownOpen] = useState(false);
 
   // Fetch notifications
   const fetchNotifications = async () => {
@@ -151,8 +155,97 @@ const Pdashboard = () => {
     }
   };
 
+  // Helper function to extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
+  const getYearsFromCycle = (cycle) => {
+    if (!cycle || typeof cycle !== 'string') return [];
+    const parts = cycle.split('-');
+    if (parts.length !== 2) return [];
+    const startYear = parseInt(parts[0], 10);
+    const endYear = parseInt(parts[1], 10);
+    if (isNaN(startYear) || isNaN(endYear)) return [];
+    const years = [];
+    for (let year = startYear; year <= endYear; year++) {
+      years.push(year);
+    }
+    return years;
+  };
+
+  // Fetch price distribution statistics
+  const fetchPriceDistribution = useCallback(async () => {
+    try {
+      setLoadingPriceDistribution(true);
+      const token = localStorage.getItem('token');
+      
+      const requestsResponse = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
+        headers: getAuthHeaders()
+      });
+
+      const requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+      
+      console.log('[Price Distribution] Total requests:', requests.length);
+      console.log('[Price Distribution] Selected year cycle:', priceDistributionYearCycle);
+      
+      // Filter requests by selected year cycle
+      const filteredRequests = requests.filter(request => {
+        const requestYear = request.year || '';
+        const matches = requestYear === priceDistributionYearCycle;
+        if (matches) {
+          console.log('[Price Distribution] Matching request:', request._id, 'Year:', requestYear);
+        }
+        return matches;
+      });
+      
+      console.log('[Price Distribution] Filtered requests:', filteredRequests.length);
+      
+      // Define price ranges
+      const priceRanges = [
+        { label: '₱0 - ₱10k', min: 0, max: 10000, color: 'emerald', count: 0 },
+        { label: '₱10k - ₱50k', min: 10001, max: 50000, color: 'blue', count: 0 },
+        { label: '₱50k - ₱100k', min: 50001, max: 100000, color: 'indigo', count: 0 },
+        { label: '₱100k - ₱200k', min: 100001, max: 200000, color: 'purple', count: 0 },
+        { label: '₱200k+', min: 200001, max: Infinity, color: 'rose', count: 0 }
+      ];
+      
+      // Process filtered requests and count items by price range
+      filteredRequests.forEach(request => {
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach(item => {
+            // Only count approved items
+            if (item.approvalStatus === 'approved' && item.price) {
+              const price = Number(item.price) || 0;
+              
+              // Find which range this price belongs to
+              const range = priceRanges.find(r => price >= r.min && price <= r.max);
+              if (range) {
+                range.count++;
+              }
+            }
+          });
+        }
+      });
+      
+      // Calculate total and percentages
+      const totalItems = priceRanges.reduce((sum, range) => sum + range.count, 0);
+      
+      const distribution = priceRanges.map(range => ({
+        ...range,
+        percentage: totalItems > 0 ? Math.round((range.count / totalItems) * 100) : 0
+      }));
+      
+      setPriceDistribution({
+        ranges: distribution,
+        totalItems
+      });
+    } catch (error) {
+      console.error('Error fetching price distribution:', error);
+      setPriceDistribution(null);
+    } finally {
+      setLoadingPriceDistribution(false);
+    }
+  }, [priceDistributionYearCycle]);
+
   // Fetch item statistics by unit
-  const fetchItemStatistics = async () => {
+  const fetchItemStatistics = useCallback(async () => {
     try {
       setLoadingItemStats(true);
       const token = localStorage.getItem('token');
@@ -167,7 +260,22 @@ const Pdashboard = () => {
         }).catch(() => ({ data: { unitTracking: { units: [] } } })) // Fallback if endpoint fails
       ]);
 
-      const requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+      let requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+      
+      console.log('[Item Statistics] Total requests:', requests.length);
+      console.log('[Item Statistics] Selected year cycle:', priceDistributionYearCycle);
+      
+      // Filter requests by selected year cycle
+      requests = requests.filter(request => {
+        const requestYear = request.year || '';
+        const matches = requestYear === priceDistributionYearCycle;
+        if (matches && request.items && request.items.length > 0) {
+          console.log('[Item Statistics] Matching request:', request._id, 'Year:', requestYear, 'Items:', request.items.length);
+        }
+        return matches;
+      });
+      
+      console.log('[Item Statistics] Filtered requests:', requests.length);
       
       // Get all unique units from office stats (all units in the system)
       const allUnitsFromStats = officeStatsResponse.data?.unitTracking?.units || [];
@@ -294,7 +402,7 @@ const Pdashboard = () => {
     } finally {
       setLoadingItemStats(false);
     }
-  };
+  }, [priceDistributionYearCycle]);
 
   useEffect(() => {
     const fetchDashboardData = async () => {
@@ -315,8 +423,20 @@ const Pdashboard = () => {
         ]);
 
         const statsData = statsResponse.data;
-        const reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
-        const requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+        let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
+        let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+        
+        // Filter requests by selected year cycle
+        requestsData = requestsData.filter(request => {
+          const requestYear = request.year || '';
+          return requestYear === priceDistributionYearCycle;
+        });
+        
+        // Filter review data by selected year cycle
+        reviewData = reviewData.filter(review => {
+          const reviewYear = review.year || '';
+          return reviewYear === priceDistributionYearCycle;
+        });
 
         setDashboardStats(statsData);
         setRecentRequests(reviewData);
@@ -338,15 +458,68 @@ const Pdashboard = () => {
     fetchUserData();
     fetchApprovedISSP();
     fetchItemStatistics();
+    fetchPriceDistribution();
     
     // Refresh notifications every 30 seconds
     const interval = setInterval(() => {
       fetchNotifications();
       fetchApprovedISSP();
       fetchItemStatistics();
+      fetchPriceDistribution();
     }, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [priceDistributionYearCycle]);
+
+  // Refetch all data when year cycle changes
+  useEffect(() => {
+    if (activeSection === 'dashboard') {
+      fetchPriceDistribution();
+      fetchItemStatistics();
+      // Refetch dashboard data to update top items and review queue
+      const fetchDashboardData = async () => {
+        try {
+          const token = localStorage.getItem('token');
+          if (!token) return;
+
+          const [statsResponse, reviewResponse, requestsResponse] = await Promise.all([
+            axios.get(API_ENDPOINTS.admin.dashboardStats, { headers: getAuthHeaders() }),
+            axios.get(API_ENDPOINTS.issp.reviewList, { headers: getAuthHeaders() }),
+            axios.get(API_ENDPOINTS.admin.submittedRequests, { headers: getAuthHeaders() })
+          ]);
+
+          const statsData = statsResponse.data;
+          let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
+          let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+          
+          console.log('[Dashboard Refresh] Total requests:', requestsData.length);
+          console.log('[Dashboard Refresh] Total reviews:', reviewData.length);
+          console.log('[Dashboard Refresh] Selected year cycle:', priceDistributionYearCycle);
+          
+          // Filter requests by selected year cycle
+          requestsData = requestsData.filter(request => {
+            const requestYear = request.year || '';
+            return requestYear === priceDistributionYearCycle;
+          });
+          
+          // Filter review data by selected year cycle
+          reviewData = reviewData.filter(review => {
+            const reviewYear = review.year || '';
+            return reviewYear === priceDistributionYearCycle;
+          });
+          
+          console.log('[Dashboard Refresh] Filtered requests:', requestsData.length);
+          console.log('[Dashboard Refresh] Filtered reviews:', reviewData.length);
+
+          setDashboardStats(statsData);
+          setRecentRequests(reviewData);
+          setTopItems(aggregateItemSummary(requestsData));
+        } catch (err) {
+          console.error('Error loading dashboard data:', err);
+        }
+      };
+      fetchDashboardData();
+    }
+  }, [priceDistributionYearCycle, activeSection, fetchPriceDistribution, fetchItemStatistics]);
 
   // Auto-hide notification dropdown when clicking outside
   useEffect(() => {
@@ -354,13 +527,16 @@ const Pdashboard = () => {
       if (showNotifications && !event.target.closest('.notification-container')) {
         setShowNotifications(false);
       }
+      if (priceDistributionDropdownOpen && !event.target.closest('.price-distribution-dropdown')) {
+        setPriceDistributionDropdownOpen(false);
+      }
     };
 
     document.addEventListener('mousedown', handleClickOutside);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [showNotifications]);
+  }, [showNotifications, priceDistributionDropdownOpen]);
 
   const visibleRequests = recentRequests.slice(0, 5);
   const topItemsMaxQuantity =
@@ -654,6 +830,7 @@ const Pdashboard = () => {
                   Fetching the latest dashboard data…
                 </div>
               )}
+              
               {/* Status Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
@@ -678,9 +855,41 @@ const Pdashboard = () => {
 
               {/* Item Statistics by Unit */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mt-6">
-                <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
                   <div>
                     <h3 className="text-base font-bold text-gray-900">ITEM STATISTICS BY UNIT</h3>
+                  </div>
+                  {/* Year Cycle Selector */}
+                  <div className="relative price-distribution-dropdown">
+                    <label className="text-sm font-medium text-gray-700 mr-3">Year Cycle:</label>
+                    <button
+                      onClick={() => setPriceDistributionDropdownOpen(!priceDistributionDropdownOpen)}
+                      className="bg-white border border-gray-300 rounded-lg px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500 flex items-center space-x-2"
+                    >
+                      <span>{priceDistributionYearCycle}</span>
+                      <svg className={`w-4 h-4 transition-transform ${priceDistributionDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    
+                    {priceDistributionDropdownOpen && (
+                      <div className="absolute right-0 mt-2 w-40 bg-white border border-gray-300 rounded-lg shadow-lg z-10">
+                        {['2024-2026', '2027-2029', '2030-2032', '2033-2035'].map((yearRange) => (
+                          <button
+                            key={yearRange}
+                            onClick={() => {
+                              setPriceDistributionYearCycle(yearRange);
+                              setPriceDistributionDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
+                              priceDistributionYearCycle === yearRange ? 'bg-gray-50 text-gray-700 font-medium' : 'text-gray-700'
+                            }`}
+                          >
+                            {yearRange}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
                 {loadingItemStats ? (
@@ -829,6 +1038,109 @@ const Pdashboard = () => {
                 )}
               </div>
 
+              {/* Price Distribution Chart */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mt-6">
+                <div className="mb-6">
+                  <h3 className="text-base font-bold text-gray-900">ITEM PRICE DISTRIBUTION</h3>
+                  <p className="text-xs text-gray-500 mt-1">Distribution of approved items by price range</p>
+                </div>
+                {loadingPriceDistribution ? (
+                  <div className="p-4 rounded-lg border bg-gray-50 border-gray-200">
+                    <p className="text-sm text-gray-600">Loading price distribution...</p>
+                  </div>
+                ) : priceDistribution && priceDistribution.totalItems > 0 ? (
+                  <div className="bg-gradient-to-br from-gray-50 to-white rounded-xl border border-gray-200 p-5 shadow-sm">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {/* Donut Chart */}
+                      <div className="flex items-center justify-center">
+                        <div className="relative w-48 h-48">
+                          <svg className="transform -rotate-90 w-48 h-48">
+                            {priceDistribution.ranges.map((range, index) => {
+                              const circumference = 2 * Math.PI * 56;
+                              const previousPercentages = priceDistribution.ranges
+                                .slice(0, index)
+                                .reduce((sum, r) => sum + r.percentage, 0);
+                              const offset = circumference * (previousPercentages / 100);
+                              const dashArray = `${circumference * (range.percentage / 100)} ${circumference}`;
+                              
+                              const colorClasses = {
+                                emerald: 'text-emerald-600',
+                                blue: 'text-blue-600',
+                                indigo: 'text-indigo-600',
+                                purple: 'text-purple-600',
+                                rose: 'text-rose-600'
+                              };
+                              
+                              return (
+                                <circle
+                                  key={range.label}
+                                  cx="96"
+                                  cy="96"
+                                  r="56"
+                                  stroke="currentColor"
+                                  strokeWidth="14"
+                                  fill="transparent"
+                                  strokeDasharray={dashArray}
+                                  strokeDashoffset={-offset}
+                                  className={`${colorClasses[range.color]} transition-all duration-500`}
+                                  strokeLinecap="round"
+                                />
+                              );
+                            })}
+                            {/* Background circle */}
+                            <circle
+                              cx="96"
+                              cy="96"
+                              r="56"
+                              stroke="currentColor"
+                              strokeWidth="14"
+                              fill="transparent"
+                              className="text-gray-200"
+                            />
+                          </svg>
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <div className="text-center">
+                              <p className="text-3xl font-bold text-gray-900">{priceDistribution.totalItems}</p>
+                              <p className="text-xs text-gray-500">Total Items</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Legend */}
+                      <div className="flex flex-col justify-center space-y-3">
+                        {priceDistribution.ranges.map((range) => {
+                          const colorClasses = {
+                            emerald: 'bg-emerald-600',
+                            blue: 'bg-blue-600',
+                            indigo: 'bg-indigo-600',
+                            purple: 'bg-purple-600',
+                            rose: 'bg-rose-600'
+                          };
+                          
+                          return (
+                            <div key={range.label} className="flex items-center justify-between p-2 bg-gray-50 rounded-lg">
+                              <div className="flex items-center space-x-3">
+                                <div className={`w-4 h-4 rounded ${colorClasses[range.color]}`}></div>
+                                <span className="text-sm font-medium text-gray-700">{range.label}</span>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-sm font-bold text-gray-900">{range.count} items</p>
+                                <p className="text-xs text-gray-500">{range.percentage}%</p>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50">
+                    <p className="text-sm text-gray-500">No price distribution data available yet.</p>
+                  </div>
+                )}
+              </div>
+
               {/* Main Content Grid */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
                 {/* Recent ISSP Requests */}
@@ -948,7 +1260,7 @@ const Pdashboard = () => {
                       <p className="text-xs text-gray-500">Approved ISSP</p>
                     </div>
                     <a
-                      href={`${API_BASE_URL}/${approvedISSPDocument}`}
+                      href={getFileUrl(approvedISSPDocument)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="px-4 py-2 text-sm font-medium text-white bg-gray-700 rounded-md hover:bg-gray-800 transition-colors flex items-center gap-2"
@@ -1030,7 +1342,7 @@ const Pdashboard = () => {
           )}
 
           {activeSection === 'logs' && (
-            <ActivityLog title="System Activity (President View)" />
+            <ActivityLog title="System Activity (President View)" filterByCurrentUser={true} />
           )}
 
           {activeSection === 'profile' && (

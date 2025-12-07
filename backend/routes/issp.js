@@ -48,31 +48,51 @@ const getISSPForUser = async (user) => {
                             user.unit.trim() !== '';
   
   if (isProgramHead || isPendingWithUnit) {
-    // For Program Heads (and pending users with matching unit): Query by unit to get department's ISSP
-    // This allows new Program Heads to see previous Program Head's data
+    // For Program Heads (and pending users with matching unit): Query by unit AND campus to get department's ISSP
+    // This allows new Program Heads to see previous Program Head's data for the same campus
     // AND allows pending users to preview the unit's data before approval
     
-    // First try to find ISSP by unit
-    let issp = await ISSP.findOne({ unit: user.unit });
+    // Normalize campus values (empty/null = 'Main')
+    const userCampus = (user.campus || '').trim() || 'Main';
     
-    // If not found by unit, try to find ISSP by userId from users in the same unit (for backward compatibility)
+    // First try to find ISSP by unit AND campus
+    // Build campus query: match exact campus or match empty/null if userCampus is 'Main'
+    const campusQuery = userCampus === 'Main' 
+      ? { $or: [{ campus: 'Main' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
+      : { campus: userCampus };
+    
+    let issp = await ISSP.findOne({ 
+      unit: user.unit,
+      ...campusQuery
+    });
+    
+    // If not found by unit+campus, try to find ISSP by userId from users in the same unit AND same campus (for backward compatibility)
     if (!issp) {
-      const unitUsers = await User.find({ unit: user.unit }).select('_id');
+      const unitUsers = await User.find({ 
+        unit: user.unit,
+        ...campusQuery
+      }).select('_id');
       const unitUserIds = unitUsers.map(u => u._id);
       issp = await ISSP.findOne({ userId: { $in: unitUserIds } });
       
-      // If found by userId, update it to have the unit field
-      if (issp && (!issp.unit || issp.unit.trim() === '')) {
-        issp.unit = user.unit;
+      // If found by userId, update it to have the unit and campus fields
+      if (issp) {
+        if (!issp.unit || issp.unit.trim() === '') {
+          issp.unit = user.unit;
+        }
+        if (!issp.campus || issp.campus.trim() === '') {
+          issp.campus = userCampus;
+        }
         await issp.save();
       }
     }
     
-    // If no ISSP exists for this unit, create one
+    // If no ISSP exists for this unit+campus, create one
     if (!issp) {
       issp = new ISSP({ 
         userId: user._id,
-        unit: user.unit 
+        unit: user.unit,
+        campus: userCampus
       });
       await issp.save();
     }
@@ -97,6 +117,21 @@ const getSectionLabel = (sectionKey = '') =>
 const getPageLabel = (pageKey = '') => formatLabel(pageKey);
 
 const deepClone = (value = {}) => JSON.parse(JSON.stringify(value || {}));
+
+// Helper function to extract years from cycle string (e.g., "2024-2026" → [2024, 2025, 2026])
+const getYearsFromCycle = (cycle) => {
+  if (!cycle || typeof cycle !== 'string') return [];
+  const parts = cycle.split('-');
+  if (parts.length !== 2) return [];
+  const startYear = parseInt(parts[0], 10);
+  const endYear = parseInt(parts[1], 10);
+  if (isNaN(startYear) || isNaN(endYear)) return [];
+  const years = [];
+  for (let year = startYear; year <= endYear; year++) {
+    years.push(year);
+  }
+  return years;
+};
 
 const isEmptyValue = (value) => {
   if (value === null || value === undefined) return true;
@@ -370,19 +405,345 @@ const renderDataUrlImage = (doc, dataUrl, options = {}) => {
 const drawHeader = (doc, { isFirstPage = false, yearCycle = '2024-2027' } = {}) => {
   const contentWidth = getContentWidth(doc);
   const marginLeft = doc.page.margins.left;
-  const titleFontSize = isFirstPage ? 18 : 16;
-  doc.font('Helvetica-Bold').fontSize(titleFontSize).text('INFORMATION SYSTEMS STRATEGIC PLAN', marginLeft, doc.y, {
-    align: 'center',
-    width: contentWidth
-  });
-  doc.font('Helvetica').fontSize(12).text(yearCycle, {
-    align: 'center',
-    width: contentWidth
-  });
-  doc.moveDown(0.2);
-  const lineY = doc.y;
-  doc.moveTo(marginLeft, lineY).lineTo(marginLeft + contentWidth, lineY).stroke();
-  doc.y = lineY + 10;
+  const startY = doc.y;
+  
+  // University Header Section
+  if (isFirstPage) {
+    // Light blue color - matching the image description
+    const lightBlue = '#5B9BD5'; // Light blue (similar to #ADD8E6 but more visible in PDF)
+    const lightYellow = '#FFD700'; // Light yellow for logo
+    const headerTopY = startY - 24; // Move images up by 24 points (3x the previous 8 points)
+    
+    // Layout matching the image: Left section (university name), Center (logo), Right (title)
+    const leftSectionWidth = contentWidth * 0.35; // 35% for university name
+    const centerSectionStart = marginLeft + leftSectionWidth - 40; // Move logo further to the left (added 15 more points)
+    const centerSectionWidth = contentWidth * 0.25; // 25% for logo
+    const rightSectionStart = centerSectionStart + centerSectionWidth - 68; // Moved further left by adding 20 more points (from -48 to -68)
+    const rightSectionWidth = contentWidth * 0.35; // Increased from 30% to 35% to give title more space
+    
+    // Try to load university header image (text with tagline), fallback to text rendering
+    const headerImagePaths = [
+      path.join(__dirname, '..', 'assets', 'dorsu-header.png'),
+      path.join(__dirname, '..', 'assets', 'DOrSU-header.png'),
+      path.join(__dirname, '..', 'assets', 'university-header.png'),
+      path.join(__dirname, '..', 'assets', 'dorsu-header.jpg'),
+      path.join(__dirname, '..', 'assets', 'DOrSU-header.jpg'),
+      path.join(__dirname, '..', 'assets', 'university-header.jpg')
+    ];
+    
+    let headerImageLoaded = false;
+    let actualHeaderImageHeight = 40; // Default height, will be updated if image loads
+    
+    console.log('[PDF Header] Checking for header image...');
+    for (const headerPath of headerImagePaths) {
+      const exists = fs.existsSync(headerPath);
+      console.log('[PDF Header] Checking:', headerPath, 'exists:', exists);
+      if (exists) {
+        try {
+          // Save current Y position before image
+          const yBeforeImage = doc.y;
+          
+          // Load image with width only - PDFKit will maintain aspect ratio
+          doc.image(headerPath, marginLeft, headerTopY, {
+            width: leftSectionWidth
+          });
+          
+          // Calculate actual height used by the image
+          // PDFKit doesn't directly tell us, but we can estimate based on image loading
+          // For now, use a reasonable estimate - header images are typically 3:1 to 4:1 aspect ratio
+          // So height ≈ width / 3.5
+          actualHeaderImageHeight = Math.max(35, leftSectionWidth / 3.5);
+          
+          headerImageLoaded = true;
+          console.log('[PDF Header] ✓ University header image loaded successfully from:', headerPath);
+          console.log('[PDF Header] Image dimensions - width:', leftSectionWidth, 'height:', actualHeaderImageHeight);
+          break;
+        } catch (error) {
+          console.error('[PDF Header] ✗ Error loading header image from', headerPath, ':', error.message);
+          console.error('[PDF Header] Error stack:', error.stack);
+        }
+      }
+    }
+    
+    // Fallback to text rendering if image not found
+    if (!headerImageLoaded) {
+      console.log('[PDF Header] Header image not found, using text rendering fallback');
+      // Top horizontal line (only for left section)
+      doc.strokeColor(lightBlue).lineWidth(0.5);
+      doc.moveTo(marginLeft, headerTopY).lineTo(marginLeft + leftSectionWidth, headerTopY).stroke();
+      doc.y = headerTopY + 6;
+      
+      // "DAVAO ORIENTAL" - Large bold uppercase light blue, centered
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Bold')
+         .fontSize(20)
+         .text('DAVAO ORIENTAL', marginLeft, doc.y, {
+           width: leftSectionWidth,
+           align: 'center'
+         });
+      doc.y += 6;
+      
+      // "STATE UNIVERSITY" - Large bold uppercase light blue, centered
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Bold')
+         .fontSize(20)
+         .text('STATE UNIVERSITY', marginLeft, doc.y, {
+           width: leftSectionWidth,
+           align: 'center'
+         });
+      doc.y += 4;
+      
+      // Tagline - Smaller italicized light blue, centered
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Oblique')
+         .fontSize(8)
+         .text('A University of excellence, innovation, and inclusion', marginLeft, doc.y, {
+           width: leftSectionWidth,
+           align: 'center'
+         });
+      doc.y += 5;
+      
+      // Bottom horizontal line (only for left section)
+      const bottomLineY = doc.y;
+      doc.strokeColor(lightBlue).lineWidth(0.5);
+      doc.moveTo(marginLeft, bottomLineY).lineTo(marginLeft + leftSectionWidth, bottomLineY).stroke();
+      actualHeaderImageHeight = doc.y - headerTopY;
+    }
+    
+    // Logo in the center - Try to load from file, fallback to programmatic drawing
+    // Position logo vertically centered with the header section, moved down slightly
+    const logoCenterX = centerSectionStart + centerSectionWidth / 2;
+    const logoCenterY = headerTopY + (actualHeaderImageHeight / 2) + 8; // Center vertically with header, moved down by 8 points
+    const logoSize = 70; // Logo size in PDF points (reduced from 100 to prevent overlap)
+    
+    // Try to load logo image file (check multiple possible filenames)
+    const logoPath = path.join(__dirname, '..', 'assets', 'dorsu-logo.png');
+    const logoPathAlt = path.join(__dirname, '..', 'assets', 'DOrSU_logo.png');
+    const logoPathJpg = path.join(__dirname, '..', 'assets', 'dorsu-logo.jpg');
+    const logoPathJpeg = path.join(__dirname, '..', 'assets', 'dorsu-logo.jpeg');
+    
+    let logoLoaded = false;
+    
+    // Try PNG files first (check both naming conventions), then JPG, then JPEG
+    // Log which files we're checking
+    console.log('[PDF Header] Checking logo paths:');
+    console.log('[PDF Header] -', logoPath, 'exists:', fs.existsSync(logoPath));
+    console.log('[PDF Header] -', logoPathAlt, 'exists:', fs.existsSync(logoPathAlt));
+    
+    if (fs.existsSync(logoPath)) {
+      try {
+        doc.image(logoPath, logoCenterX - logoSize / 2, logoCenterY - logoSize / 2, {
+          width: logoSize,
+          height: logoSize,
+          fit: [logoSize, logoSize],
+          align: 'center'
+        });
+        logoLoaded = true;
+        console.log('[PDF Header] Logo loaded successfully from:', logoPath);
+      } catch (error) {
+        console.warn('[PDF Header] Error loading logo PNG:', error.message);
+        console.warn('[PDF Header] Will use fallback drawing');
+      }
+    } else if (fs.existsSync(logoPathAlt)) {
+      try {
+        doc.image(logoPathAlt, logoCenterX - logoSize / 2, logoCenterY - logoSize / 2, {
+          width: logoSize,
+          height: logoSize,
+          fit: [logoSize, logoSize],
+          align: 'center'
+        });
+        logoLoaded = true;
+        console.log('[PDF Header] Logo loaded successfully from:', logoPathAlt);
+      } catch (error) {
+        console.warn('[PDF Header] Error loading logo PNG (alt):', error.message);
+        console.warn('[PDF Header] Will use fallback drawing');
+      }
+    } else if (fs.existsSync(logoPathJpg)) {
+      try {
+        doc.image(logoPathJpg, logoCenterX - logoSize / 2, logoCenterY - logoSize / 2, {
+          width: logoSize,
+          height: logoSize,
+          fit: [logoSize, logoSize],
+          align: 'center'
+        });
+        logoLoaded = true;
+        console.log('[PDF Header] Logo loaded successfully from:', logoPathJpg);
+      } catch (error) {
+        console.warn('[PDF Header] Error loading logo JPG:', error.message);
+        console.warn('[PDF Header] Will use fallback drawing');
+      }
+    } else if (fs.existsSync(logoPathJpeg)) {
+      try {
+        doc.image(logoPathJpeg, logoCenterX - logoSize / 2, logoCenterY - logoSize / 2, {
+          width: logoSize,
+          height: logoSize,
+          fit: [logoSize, logoSize],
+          align: 'center'
+        });
+        logoLoaded = true;
+        console.log('[PDF Header] Logo loaded successfully from:', logoPathJpeg);
+      } catch (error) {
+        console.warn('[PDF Header] Error loading logo JPEG:', error.message);
+        console.warn('[PDF Header] Will use fallback drawing');
+      }
+    } else {
+      console.log('[PDF Header] No logo file found, using fallback drawing');
+    }
+    
+    // Fallback: Draw logo programmatically if image file not found
+    if (!logoLoaded) {
+      // Scale radii proportionally to match logo size (70)
+      const outerGearRadius = 39; // Scaled for logoSize 70
+      const whiteBandRadius = 34; // Scaled for logoSize 70
+      const innerBlueRadius = 28; // Scaled for logoSize 70
+      const centerEmblemRadius = 21; // Scaled for logoSize 70
+      
+      // Outer yellow gear ring (simplified as thick circle with gear-like appearance)
+      doc.save();
+      doc.translate(logoCenterX, logoCenterY);
+      // Draw gear teeth (simplified - small rectangles around circle, scaled for logoSize 70)
+      doc.fillColor(lightYellow);
+      for (let i = 0; i < 16; i++) {
+        const angle = (i * Math.PI * 2) / 16;
+        const x1 = Math.cos(angle) * outerGearRadius;
+        const y1 = Math.sin(angle) * outerGearRadius;
+        const x2 = Math.cos(angle) * (outerGearRadius + 3); // Scaled for logoSize 70
+        const y2 = Math.sin(angle) * (outerGearRadius + 3); // Scaled for logoSize 70
+        doc.moveTo(x1, y1).lineTo(x2, y2).lineWidth(3).stroke(); // Scaled for logoSize 70
+      }
+      // Main outer circle
+      doc.circle(0, 0, outerGearRadius).fill();
+      doc.restore();
+      
+      // White band inside gear
+      doc.fillColor('#FFFFFF')
+         .circle(logoCenterX, logoCenterY, whiteBandRadius)
+         .fill();
+      
+      // Text on white band - "DAVAO ORIENTAL STATE UNIVERSITY" (scaled for logoSize 70)
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Bold')
+         .fontSize(8) // Scaled for logoSize 70
+         .text('DAVAO ORIENTAL', logoCenterX - 28, logoCenterY - 25, {
+           width: 56, // Scaled for logoSize 70
+           align: 'center'
+         });
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Bold')
+         .fontSize(8) // Scaled for logoSize 70
+         .text('STATE UNIVERSITY', logoCenterX - 28, logoCenterY + 17, {
+           width: 56, // Scaled for logoSize 70
+           align: 'center'
+         });
+      
+      // Inner blue circle
+      doc.fillColor(lightBlue)
+         .circle(logoCenterX, logoCenterY, innerBlueRadius)
+         .fill();
+      
+      // White rays emanating from center (scaled for logoSize 70)
+      doc.strokeColor('#FFFFFF').lineWidth(1.4); // Scaled for logoSize 70
+      for (let i = 0; i < 12; i++) {
+        const angle = (i * Math.PI * 2) / 12;
+        const startX = logoCenterX + Math.cos(angle) * 11; // Scaled for logoSize 70
+        const startY = logoCenterY + Math.sin(angle) * 11; // Scaled for logoSize 70
+        const endX = logoCenterX + Math.cos(angle) * innerBlueRadius;
+        const endY = logoCenterY + Math.sin(angle) * innerBlueRadius;
+        doc.moveTo(startX, startY).lineTo(endX, endY).stroke();
+      }
+      
+      // Central yellow emblem area
+      doc.fillColor(lightYellow)
+         .circle(logoCenterX, logoCenterY, centerEmblemRadius)
+         .fill();
+      
+      // Simplified central elements (scaled for logoSize 70)
+      // Atom symbol at top (simplified as circles)
+      doc.fillColor(lightYellow)
+         .circle(logoCenterX, logoCenterY - 11, 3) // Scaled for logoSize 70
+         .fill();
+      doc.strokeColor(lightYellow).lineWidth(0.7); // Scaled for logoSize 70
+      doc.circle(logoCenterX, logoCenterY - 11, 6).stroke(); // Scaled for logoSize 70
+      
+      // Open book at bottom (simplified as rectangle)
+      doc.fillColor(lightYellow)
+         .rect(logoCenterX - 8, logoCenterY + 8, 16, 6) // Scaled for logoSize 70
+         .fill();
+      doc.strokeColor(lightBlue).lineWidth(0.4); // Scaled for logoSize 70
+      doc.moveTo(logoCenterX, logoCenterY + 8).lineTo(logoCenterX, logoCenterY + 14).stroke(); // Scaled for logoSize 70
+      
+      // "MMXVIII" on book (simplified, scaled for logoSize 70)
+      doc.fillColor(lightBlue)
+         .font('Helvetica')
+         .fontSize(6) // Scaled for logoSize 70
+         .text('MMXVIII', logoCenterX - 11, logoCenterY + 10, {
+           width: 22, // Scaled for logoSize 70
+           align: 'center'
+         });
+      
+      // "RA 11033" text below logo (scaled for logoSize 70)
+      doc.fillColor(lightBlue)
+         .font('Helvetica-Bold')
+         .fontSize(7) // Scaled for logoSize 70
+         .text('RA 11033', logoCenterX - 17, logoCenterY + 21, {
+           width: 34, // Scaled for logoSize 70
+           align: 'center'
+         });
+    }
+    
+    // Reset colors to black for rest of document
+    doc.fillColor('#000000').strokeColor('#000000');
+    
+    // ISSP Title Section - Positioned to the right of the logo (matching image layout)
+    // Title on the right side of the header, moved down and to the left
+    const titleY = headerTopY + 40; // Moved down further from 30 to 40
+    const titleFontSize = 15; // Slightly reduced to ensure it fits on one line
+    // Make title one line: "INFORMATION SYSTEMS STRATEGIC PLAN"
+    // Calculate available width from title start to right margin to prevent wrapping
+    const marginRight = doc.page.margins.right;
+    const availableTitleWidth = doc.page.width - rightSectionStart - marginRight;
+    doc.font('Helvetica-Bold')
+       .fontSize(titleFontSize)
+       .fillColor('#000000')
+       .text('INFORMATION SYSTEMS STRATEGIC PLAN', rightSectionStart, titleY, {
+         width: availableTitleWidth, // Use full available width to prevent wrapping
+         align: 'center'
+       });
+    
+    // Year cycle below title - centered with the title text
+    doc.font('Helvetica')
+       .fontSize(11)
+       .text(yearCycle, rightSectionStart, titleY + 20, {
+         width: availableTitleWidth, // Use same width as title to center it properly
+         align: 'center'
+       });
+    
+    // Set Y position after header section (use the maximum of header bottom or title bottom)
+    const headerBottomY = headerTopY + actualHeaderImageHeight;
+    const titleBottomY = titleY + 50;
+    doc.y = Math.max(headerBottomY + 12, titleBottomY);
+  } else {
+    // For subsequent pages, use centered title
+    const titleFontSize = 16;
+    doc.font('Helvetica-Bold')
+       .fontSize(titleFontSize)
+       .fillColor('#000000')
+       .text('INFORMATION SYSTEMS STRATEGIC PLAN', marginLeft, doc.y, {
+         align: 'center',
+         width: contentWidth
+       });
+    doc.font('Helvetica')
+       .fontSize(12)
+       .text(yearCycle, {
+         align: 'center',
+         width: contentWidth
+       });
+    doc.moveDown(0.2);
+    const lineY = doc.y;
+    doc.strokeColor('#000000').lineWidth(1);
+    doc.moveTo(marginLeft, lineY).lineTo(marginLeft + contentWidth, lineY).stroke();
+    doc.y = lineY + 10;
+  }
 };
 
 const drawPartHeading = (doc, text) => {
@@ -1159,10 +1520,6 @@ const drawDeploymentTable = (doc, rows = [], options = {}) => {
     width: columnWidths[0] - 12,
     align: 'center'
   });
-  doc.font('Helvetica-Oblique').fontSize(8).text('Examples:', marginLeft + 6, startY + headerTopHeight + 6, {
-    width: columnWidths[0] - 12,
-    align: 'left'
-  });
 
   doc.font('Helvetica-Bold').fontSize(10).text('NAME OF OFFICE/\nORGANIZATIONAL UNITS₂', marginLeft + columnWidths[0] + 4, startY + 12, {
     width: columnWidths[1] - 8,
@@ -1174,10 +1531,11 @@ const drawDeploymentTable = (doc, rows = [], options = {}) => {
     align: 'center'
   });
 
-  const yearLabels = ['YEAR 1', 'YEAR 2', 'YEAR 3'];
+  // Use actual year labels from options if provided, otherwise default to YEAR 1, YEAR 2, YEAR 3
+  const yearLabels = options.yearLabels || ['YEAR 1', 'YEAR 2', 'YEAR 3'];
   let labelX = yearGroupX;
   columnWidths.slice(2).forEach((width, index) => {
-    doc.font('Helvetica-Bold').fontSize(9).text(yearLabels[index], labelX + 4, startY + headerTopHeight + 6, {
+    doc.font('Helvetica-Bold').fontSize(9).text(yearLabels[index] || `YEAR ${index + 1}`, labelX + 4, startY + headerTopHeight + 6, {
       width: width - 8,
       align: 'center'
     });
@@ -1223,10 +1581,39 @@ const drawDeploymentTable = (doc, rows = [], options = {}) => {
     const rowY = doc.y;
     let cellX = marginLeft;
 
+    // Check if this is a total row (has isTotalRow flag or item is "TOTAL")
+    const isTotalRow = row.isTotalRow === true || (row.item && row.item.toString().trim().toUpperCase() === 'TOTAL');
+
+    // Draw background color for total rows (darker grey) and cell borders
+    if (isTotalRow) {
+      doc.save();
+      // Fill background
+      doc.rect(marginLeft, rowY, contentWidth, rowHeight).fill('#d9d9d9');
+      // Draw cell borders
+      let borderX = marginLeft;
+      columnWidths.forEach((width) => {
+        doc.rect(borderX, rowY, width, rowHeight).stroke();
+        borderX += width;
+      });
+      doc.restore();
+    }
+
     values.forEach((text, index) => {
       const width = columnWidths[index];
-      doc.rect(cellX, rowY, width, rowHeight).stroke();
-      doc.font('Helvetica').fontSize(9).text(text, cellX + 4, rowY + 4, {
+      
+      // Draw border for non-total rows
+      if (!isTotalRow) {
+        doc.rect(cellX, rowY, width, rowHeight).stroke();
+      }
+      
+      // Use bold font for total rows
+      if (isTotalRow) {
+        doc.font('Helvetica-Bold').fontSize(9);
+      } else {
+        doc.font('Helvetica').fontSize(9);
+      }
+      
+      doc.text(text, cellX + 4, rowY + 4, {
         width: width - 8,
         align: index >= 2 ? 'center' : 'left'
       });
@@ -1390,11 +1777,41 @@ const drawSummaryInvestmentsTable = (doc, rows = [], options = {}) => {
     ensureSpace(doc, rowHeight + 8);
 
     const rowY = doc.y;
+    
+    // Check if this is a total row (has isTotalRow flag or item is "TOTAL")
+    const isTotalRow = row.isTotalRow === true || (row.item && row.item.toString().trim().toUpperCase() === 'TOTAL');
+    
+    // Draw background color for total rows (grey background)
+    if (isTotalRow) {
+      doc.save();
+      // Fill background with grey color
+      doc.rect(marginLeft, rowY, totalWidth, rowHeight).fill('#d9d9d9');
+      // Draw cell borders
+      let borderX = marginLeft;
+      columnWidths.forEach((width) => {
+        doc.rect(borderX, rowY, width, rowHeight).stroke();
+        borderX += width;
+      });
+      doc.restore();
+    }
+    
     let cellX = marginLeft;
     values.forEach((text, index) => {
       const width = columnWidths[index];
-      doc.rect(cellX, rowY, width, rowHeight).stroke();
-      doc.font('Helvetica').fontSize(8.2).text(text, cellX + 6, rowY + 6, {
+      
+      // Draw border for non-total rows
+      if (!isTotalRow) {
+        doc.rect(cellX, rowY, width, rowHeight).stroke();
+      }
+      
+      // Use bold font for total rows, regular font for others
+      if (isTotalRow) {
+        doc.font('Helvetica-Bold').fontSize(8.2);
+      } else {
+        doc.font('Helvetica').fontSize(8.2);
+      }
+      
+      doc.text(text, cellX + 6, rowY + 6, {
         width: width - 12,
         align: alignments[index],
         lineGap: 1.6
@@ -1809,7 +2226,9 @@ router.put('/organizational-profile', auth, async (req, res) => {
     
     if (!issp) {
       console.log('No existing ISSP found, creating new one');
-      issp = new ISSP({ userId: user._id, unit: user.unit });
+      // Normalize campus values (empty/null = 'Main')
+      const userCampus = (user.campus || '').trim() || 'Main';
+      issp = new ISSP({ userId: user._id, unit: user.unit, campus: userCampus });
     } else {
       console.log('Found existing ISSP:', issp._id);
     }
@@ -2197,10 +2616,12 @@ router.put('/development-investment-program', auth, async (req, res) => {
 
 router.get('/generate', auth, async (req, res) => {
   try {
+    console.log('[PDF Generation] Starting PDF generation...');
     const { userId: queryUserId, yearCycle } = req.query;
     const selectedYearCycle = yearCycle || '2024-2027';
+    console.log('[PDF Generation] Year cycle:', selectedYearCycle);
 
-    let targetUserId = req.user.id;
+    let targetUser;
 
     if (queryUserId) {
       // Allow admin, president, or Executive roles to generate ISSP for other users
@@ -2212,10 +2633,21 @@ router.get('/generate', auth, async (req, res) => {
         return res.status(400).json({ message: 'Invalid user identifier' });
       }
 
-      targetUserId = queryUserId;
+      // Fetch the target user
+      targetUser = await User.findById(queryUserId);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    } else {
+      // Fetch the full user document for the current user
+      targetUser = await User.findById(req.user.id);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
     }
 
-    const issp = await ISSP.findOne({ userId: targetUserId });
+    // Use getISSPForUser to get the correct ISSP (handles unit-based ISSP for Program Heads)
+    const issp = await getISSPForUser(targetUser);
 
     if (!issp) {
       return res.status(404).json({ message: 'ISSP data not found' });
@@ -2241,14 +2673,22 @@ router.get('/generate', auth, async (req, res) => {
 
     let headerInitialized = false;
     const addPageWithHeader = () => {
-      if (headerInitialized) {
-        doc.addPage();
-        drawHeader(doc, { yearCycle: selectedYearCycle });
-      } else {
-        drawHeader(doc, { isFirstPage: true, yearCycle: selectedYearCycle });
-        headerInitialized = true;
+      try {
+        if (headerInitialized) {
+          doc.addPage();
+          drawHeader(doc, { yearCycle: selectedYearCycle });
+        } else {
+          console.log('[PDF Generation] Drawing first page header...');
+          drawHeader(doc, { isFirstPage: true, yearCycle: selectedYearCycle });
+          headerInitialized = true;
+          console.log('[PDF Generation] First page header drawn successfully');
+        }
+        doc.moveDown(1);
+      } catch (headerError) {
+        console.error('[PDF Generation] Error in addPageWithHeader:', headerError);
+        console.error('[PDF Generation] Header error stack:', headerError.stack);
+        throw headerError;
       }
-      doc.moveDown(1);
     };
 
     const startPart = (title) => {
@@ -2265,6 +2705,14 @@ router.get('/generate', auth, async (req, res) => {
     const resourceRequirements = issp.resourceRequirements || {};
     const detailedProjects = issp.detailedIctProjects || {};
     const developmentProgram = issp.developmentInvestmentProgram || {};
+    
+    // Debug: Log development program data
+    console.log('[PDF Generation] Full ISSP developmentInvestmentProgram:', JSON.stringify(issp.developmentInvestmentProgram, null, 2));
+    console.log('[PDF Generation] Development Program pageB:', JSON.stringify(developmentProgram.pageB, null, 2));
+    console.log('[PDF Generation] Summary Investments:', developmentProgram.pageB?.summaryInvestments?.length || 0, 'rows');
+    if (developmentProgram.pageB?.summaryInvestments) {
+      console.log('[PDF Generation] First summary investment row:', JSON.stringify(developmentProgram.pageB.summaryInvestments[0], null, 2));
+    }
 
     // Part I
     startPart('PART I. ORGANIZATIONAL PROFILE');
@@ -2520,36 +2968,148 @@ router.get('/generate', auth, async (req, res) => {
     startPart('PART IV. RESOURCE REQUIREMENTS');
     startSection('A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES');
     
-    // Get deployment data - if empty, populate from submitted requests
-    let deploymentData = resourceRequirements.pageA?.deploymentData || [];
-    const hasDeploymentData = deploymentData.length > 0 && 
-                              deploymentData.some(row => row.item && row.item.trim() !== '');
+    // Extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
+    const cycleYears = getYearsFromCycle(selectedYearCycle);
     
-    // If no deployment data exists, populate from submitted requests
-    if (!hasDeploymentData) {
-      const unitRequests = await Request.find({
-        status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] },
-        year: selectedYearCycle
-      })
-      .populate('userId', 'username email unit')
-      .sort({ createdAt: -1 });
+    // Always regenerate deployment data from submitted requests to ensure
+    // it uses the new campus grouping format with year-by-year quantities
+    let deploymentData = [];
+    
+    // Fetch all submitted requests for the selected year cycle
+    const unitRequests = await Request.find({
+      status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] },
+      year: selectedYearCycle
+    })
+    .populate('userId', 'username email unit campus')
+    .sort({ createdAt: -1 });
+    
+    console.log(`[PDF Generation] Found ${unitRequests.length} requests for year cycle: ${selectedYearCycle}`);
+    console.log(`[PDF Generation] Cycle years: ${cycleYears.join(', ')}`);
+    
+    // Only process if we have requests
+    if (unitRequests.length > 0) {
       
-      const itemsFromRequests = [];
+      // Group items by item name (ignore specification) and campus
+      // Structure: { "itemName": { "campus": { year1: qty, year2: qty, year3: qty } } }
+      const itemGroups = {};
+      
       unitRequests.forEach(request => {
-        const unitName = request.userId?.unit || 'N/A';
+        const userCampus = request.userId?.campus || '';
+        // Identify Main Campus: empty, null, or undefined campus field
+        const campus = (!userCampus || userCampus.trim() === '') ? 'DOrSU Main Campus' : userCampus;
+        
+        console.log(`[PDF Generation] Processing request from unit: ${request.userId?.unit || 'N/A'}, campus: ${campus}`);
+        
         if (request.items && Array.isArray(request.items)) {
           request.items.forEach(item => {
             if (item.item && item.item.trim() !== '') {
-              itemsFromRequests.push({
-                item: item.item || '',
-                office: unitName,
-                year1: '',
-                year2: '',
-                year3: ''
+              // Normalize item name to lowercase for grouping (ignore case differences)
+              // This ensures "Laptop" and "laptop" are grouped together
+              const itemName = item.item.trim().toLowerCase();
+              
+              // Initialize item group if not exists
+              if (!itemGroups[itemName]) {
+                itemGroups[itemName] = {};
+              }
+              
+              // Initialize campus group if not exists
+              if (!itemGroups[itemName][campus]) {
+                itemGroups[itemName][campus] = {};
+                cycleYears.forEach(year => {
+                  itemGroups[itemName][campus][year] = 0;
+                });
+              }
+              
+              // Sum quantities by year from quantityByYear
+              const quantityByYear = item.quantityByYear || {};
+              let hasQuantityData = false;
+              
+              cycleYears.forEach(year => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                if (qty > 0) hasQuantityData = true;
+                itemGroups[itemName][campus][year] += qty;
               });
+              
+              // If no quantityByYear data exists, log for debugging
+              if (!hasQuantityData && Object.keys(quantityByYear).length === 0 && item.quantity > 0) {
+                console.log(`[PDF Generation] Warning: Item "${itemName}" from ${campus} has total quantity ${item.quantity} but no quantityByYear data`);
+              }
             }
           });
         }
+      });
+      
+      // Convert grouped data to deployment table format
+      // Format: item header row, then campus rows with quantities, then item total
+      const itemsFromRequests = [];
+      
+      // Sort item names alphabetically (case-insensitive)
+      const sortedItemNames = Object.keys(itemGroups).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      
+      sortedItemNames.forEach(itemNameKey => {
+        const campusData = itemGroups[itemNameKey];
+        
+        // Filter out campuses with 0 quantities across all years
+        const campusesWithData = Object.keys(campusData).filter(campus => {
+          return cycleYears.some(year => campusData[campus][year] > 0);
+        });
+        
+        // Sort campuses: Main Campus first, then others alphabetically
+        campusesWithData.sort((a, b) => {
+          if (a === 'DOrSU Main Campus') return -1;
+          if (b === 'DOrSU Main Campus') return 1;
+          return a.localeCompare(b);
+        });
+        
+        // Capitalize first letter of item name for display (e.g., "laptop" -> "Laptop")
+        const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+        
+        // Add item header row (item name in first column, others empty)
+        itemsFromRequests.push({
+          item: displayItemName,
+          office: '',
+          year1: '',
+          year2: '',
+          year3: ''
+        });
+        
+        // Add campus rows
+        let itemTotal = {};
+        cycleYears.forEach(year => {
+          itemTotal[year] = 0;
+        });
+        
+        campusesWithData.forEach(campus => {
+          const yearValues = cycleYears.map(year => {
+            const qty = campusData[campus][year] || 0;
+            itemTotal[year] += qty;
+            return qty > 0 ? qty.toString() : '';
+          });
+          
+          itemsFromRequests.push({
+            item: '',
+            office: campus,
+            year1: yearValues[0] || '',
+            year2: yearValues[1] || '',
+            year3: yearValues[2] || ''
+          });
+        });
+        
+        // Add item total row - put "TOTAL" in the item column
+        const itemTotalValues = cycleYears.map(year => {
+          const total = itemTotal[year] || 0;
+          return total > 0 ? total.toString() : '';
+        });
+        
+        itemsFromRequests.push({
+          item: 'TOTAL',
+          office: '',
+          year1: itemTotalValues[0] || '',
+          year2: itemTotalValues[1] || '',
+          year3: itemTotalValues[2] || '',
+          isTotalRow: true // Flag to identify total rows for styling
+        });
       });
       
       if (itemsFromRequests.length > 0) {
@@ -2557,7 +3117,9 @@ router.get('/generate', auth, async (req, res) => {
       }
     }
     
-    drawDeploymentTable(doc, deploymentData);
+    // Use actual years from cycle as column labels
+    const yearLabels = cycleYears.map(year => year.toString());
+    drawDeploymentTable(doc, deploymentData, { yearLabels });
 
     addPageWithHeader();
     drawPartHeading(doc, 'PART IV. RESOURCE REQUIREMENTS');
@@ -2606,7 +3168,29 @@ router.get('/generate', auth, async (req, res) => {
     addPageWithHeader();
     drawPartHeading(doc, 'PART V. DEVELOPMENT AND INVESTMENT PROGRAM');
     startSection('C. SUMMARY OF INVESTMENTS', { after: 0.6 });
-    drawSummaryInvestmentsTable(doc, developmentProgram.pageB?.summaryInvestments || []);
+    
+    // Get summary investments data - ensure we're getting it from the right place
+    let summaryInvestmentsData = [];
+    
+    // Try multiple possible paths to get the data
+    if (developmentProgram.pageB?.summaryInvestments) {
+      summaryInvestmentsData = developmentProgram.pageB.summaryInvestments;
+    } else if (developmentProgram.summaryInvestments) {
+      summaryInvestmentsData = developmentProgram.summaryInvestments;
+    } else if (developmentProgram.pageB) {
+      // Check if pageB itself is an array
+      if (Array.isArray(developmentProgram.pageB)) {
+        summaryInvestmentsData = developmentProgram.pageB;
+      }
+    }
+    
+    // Debug: Log the summary investments data
+    console.log('[PDF Generation] Summary Investments data (final):', JSON.stringify(summaryInvestmentsData, null, 2));
+    console.log('[PDF Generation] Summary Investments count (final):', summaryInvestmentsData.length);
+    console.log('[PDF Generation] Is array?', Array.isArray(summaryInvestmentsData));
+    
+    // Always draw the table, even if empty (it will show empty rows)
+    drawSummaryInvestmentsTable(doc, summaryInvestmentsData);
 
     addPageWithHeader();
     drawPartHeading(doc, 'PART V. DEVELOPMENT AND INVESTMENT PROGRAM');
@@ -2807,7 +3391,12 @@ router.put('/dict-approval/:isspId', auth, async (req, res) => {
     }
 
     const { isspId } = req.params;
-    const { status, notes } = req.body;
+    const { status, notes, yearCycle } = req.body;
+
+    // Validate yearCycle
+    if (!yearCycle || typeof yearCycle !== 'string') {
+      return res.status(400).json({ message: 'Year cycle is required' });
+    }
 
     // Validate status
     const validStatuses = ['pending', 'approve_for_dict', 'collation_compilation', 'revision_from_dict', 'approved_by_dict'];
@@ -2824,20 +3413,31 @@ router.put('/dict-approval/:isspId', auth, async (req, res) => {
       return res.status(404).json({ message: 'ISSP not found' });
     }
 
-    const oldStatus = issp.dictApproval?.status || 'pending';
-
-    // Update DICT approval status
+    // Initialize dictApproval Map if it doesn't exist
     if (!issp.dictApproval) {
-      issp.dictApproval = {};
+      issp.dictApproval = new Map();
     }
-    issp.dictApproval.status = status;
-    issp.dictApproval.updatedAt = new Date();
-    issp.dictApproval.updatedBy = req.user.id;
-    issp.dictApproval.notes = notes || '';
+
+    // Get old status for the year cycle
+    const yearCycleData = issp.dictApproval.get(yearCycle);
+    const oldStatus = yearCycleData?.status || 'pending';
+
+    // Update DICT approval status for the specific year cycle
+    issp.dictApproval.set(yearCycle, {
+      status: status,
+      updatedAt: new Date(),
+      updatedBy: req.user.id,
+      notes: notes || ''
+    });
 
     await issp.save();
     await issp.populate('userId', 'username email unit');
-    await issp.populate('dictApproval.updatedBy', 'username email');
+    
+    // Populate updatedBy for the specific year cycle if it exists
+    const updatedYearCycleData = issp.dictApproval.get(yearCycle);
+    if (updatedYearCycleData?.updatedBy) {
+      await User.populate(updatedYearCycleData, { path: 'updatedBy', select: 'username email' });
+    }
 
     // Create notifications for all units and president
     const statusLabels = {
@@ -2848,7 +3448,7 @@ router.put('/dict-approval/:isspId', auth, async (req, res) => {
       'approved_by_dict': 'Approved by DICT'
     };
 
-    const notificationMessage = `ISSP DICT approval status has been updated to: ${statusLabels[status]}.${notes ? ' Notes: ' + notes : ''}`;
+    const notificationMessage = `ISSP DICT approval status for ${yearCycle} has been updated to: ${statusLabels[status]}.${notes ? ' Notes: ' + notes : ''}`;
 
     try {
       // Find all unit users (non-admin, non-president)

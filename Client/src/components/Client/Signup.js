@@ -488,13 +488,13 @@ const Signup = () => {
                 </div>
               </div>
 
-              {/* Username */}
+              {/* Full name */}
               <div className="form-group-responsive">
                 <label
                   htmlFor="username"
                   className="block text-gray-700 text-responsive-sm font-medium mb-1.5"
                 >
-                  Username
+                  Full name
                 </label>
                 <input
                   type="text"
@@ -503,7 +503,7 @@ const Signup = () => {
                   value={formData.username}
                   onChange={handleChange}
                   className="input-responsive tap-target"
-                  placeholder="Choose a username"
+                  placeholder="Enter your full name"
                   required
                   disabled={loading}
                 />

@@ -12,6 +12,13 @@ const isspSchema = new mongoose.Schema({
     trim: true,
     index: true // Index for efficient queries by unit
   },
+  campus: {
+    type: String,
+    required: false,
+    trim: true,
+    default: '',
+    index: true // Index for efficient queries by campus
+  },
   // PART I: ORGANIZATIONAL PROFILE
   organizationalProfile: {
     pageA: {
@@ -188,24 +195,28 @@ const isspSchema = new mongoose.Schema({
     default: null
   },
   dictApproval: {
-    status: {
-      type: String,
-      enum: ['pending', 'approve_for_dict', 'collation_compilation', 'revision_from_dict', 'approved_by_dict'],
-      default: 'pending'
+    type: Map,
+    of: {
+      status: {
+        type: String,
+        enum: ['pending', 'approve_for_dict', 'collation_compilation', 'revision_from_dict', 'approved_by_dict'],
+        default: 'pending'
+      },
+      updatedAt: {
+        type: Date,
+        default: null
+      },
+      updatedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+      },
+      notes: {
+        type: String,
+        default: ''
+      }
     },
-    updatedAt: {
-      type: Date,
-      default: null
-    },
-    updatedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      default: null
-    },
-    notes: {
-      type: String,
-      default: ''
-    }
+    default: {}
   },
   acceptingEntries: {
     type: Map,

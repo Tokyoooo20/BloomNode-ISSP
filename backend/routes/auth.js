@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const multer = require('multer');
@@ -141,32 +142,72 @@ router.post('/signup', async (req, res) => {
     }
 
     // Send verification email
+    let emailSent = false;
+    let emailError = null;
     try {
-      await sendVerificationEmail(email, username, verificationCode);
-    } catch (emailError) {
-      console.error('Failed to send verification email:', emailError);
+      console.log('\n📧 ============================================');
+      console.log('📧 SENDING VERIFICATION EMAIL');
+      console.log('📧 ============================================');
+      console.log('   User:', username);
+      console.log('   Email:', email);
+      console.log('   Code:', verificationCode);
+      console.log('   Expires:', codeExpiration.toISOString());
+      console.log('📧 ============================================\n');
       
-      // DEVELOPMENT MODE: Log verification code to console
-      if (process.env.NODE_ENV === 'development' || !process.env.SENDGRID_API_KEY) {
-        console.warn('⚠️  DEVELOPMENT MODE: Email not sent, but verification code generated.');
-        console.warn('   📧 Email:', email);
-        console.warn('   🔢 Verification Code:', verificationCode);
-        console.warn('   ⏰ Expires:', codeExpiration);
-      }
-      // Continue even if email fails - user can request resend
+      await sendVerificationEmail(email, username, verificationCode);
+      emailSent = true;
+      
+      console.log('\n✅ ============================================');
+      console.log('✅ VERIFICATION EMAIL SENT SUCCESSFULLY');
+      console.log('✅ ============================================');
+      console.log('   Email sent to:', email);
+      console.log('   User should check their inbox (and spam folder)');
+      console.log('✅ ============================================\n');
+    } catch (err) {
+      emailError = err;
+      console.error('\n⚠️  ============================================');
+      console.error('⚠️  VERIFICATION EMAIL FAILED TO SEND');
+      console.error('⚠️  ============================================');
+      console.error('   User registration will continue, but email was not sent.');
+      console.error('   User can use the resend verification endpoint to try again.');
+      console.error('   Verification code has been saved to database.');
+      console.error('\n   📧 Email:', email);
+      console.error('   🔢 Verification Code:', verificationCode);
+      console.error('   ⏰ Expires:', codeExpiration.toISOString());
+      console.error('   💡 User can still verify using this code via POST /api/auth/verify-email');
+      console.error('⚠️  ============================================\n');
+      
+      // Continue even if email fails - user can request resend or use the code directly
     }
 
-    res.status(201).json({
-      message: existingPendingUser 
+    // Prepare response message based on email status
+    let responseMessage;
+    if (emailSent) {
+      responseMessage = existingPendingUser 
         ? 'A new verification code has been sent to your email. Please check your email to complete your registration.'
-        : 'Please check your email for the verification code to complete your registration.',
+        : 'Please check your email for the verification code to complete your registration.';
+    } else {
+      responseMessage = 'Registration successful, but email could not be sent. Please use the resend verification option or contact support.';
+    }
+
+    const response = {
+      message: responseMessage,
       pendingUser: {
         id: pendingUser._id,
         username: pendingUser.username,
         email: pendingUser.email
       },
       requiresVerification: true
-    });
+    };
+
+    // In development or when email fails, optionally include code in response for testing
+    if ((process.env.NODE_ENV === 'development' || !process.env.SENDGRID_API_KEY) && !emailSent) {
+      response.devMode = true;
+      response.verificationCode = verificationCode; // Include code for testing
+      response.codeExpires = codeExpiration;
+    }
+
+    res.status(201).json(response);
 
   } catch (error) {
     console.error('Signup error:', error);
@@ -315,32 +356,35 @@ router.post('/resend-verification', async (req, res) => {
     await pendingUser.save();
 
     // Send verification email
+    let emailSent = false;
     try {
       await sendVerificationEmail(email, pendingUser.username, verificationCode);
-      
-      res.json({
-        message: 'Verification code sent successfully! Please check your email.'
-      });
+      emailSent = true;
     } catch (emailError) {
       console.error('Failed to send verification email:', emailError);
       
-      // DEVELOPMENT MODE: Return code in response for testing
-      if (process.env.NODE_ENV === 'development' || !process.env.SENDGRID_API_KEY) {
-        console.warn('⚠️  DEVELOPMENT MODE: Email not sent, but code saved.');
-        console.warn('   📧 Email:', email);
-        console.warn('   🔢 Verification Code:', verificationCode);
-        
-        return res.json({
-          message: 'Verification code sent successfully! Please check your email.',
-          devMode: true,
-          code: verificationCode // Only in development
-        });
-      }
-      
-      res.status(500).json({
-        message: 'Failed to send verification email. Please try again later.'
-      });
+      // Always log verification code when email fails
+      console.warn('⚠️  Email not sent, but verification code saved.');
+      console.warn('   📧 Email:', email);
+      console.warn('   🔢 Verification Code:', verificationCode);
+      console.warn('   ⏰ Expires:', codeExpiration);
     }
+
+    // Prepare response
+    const response = {
+      message: emailSent 
+        ? 'Verification code sent successfully! Please check your email.'
+        : 'Verification code generated, but email could not be sent. Please try again or contact support.'
+    };
+
+    // In development or when email fails, optionally include code in response for testing
+    if ((process.env.NODE_ENV === 'development' || !process.env.SENDGRID_API_KEY) && !emailSent) {
+      response.devMode = true;
+      response.verificationCode = verificationCode; // Include code for testing
+      response.codeExpires = codeExpiration;
+    }
+
+    res.json(response);
 
   } catch (error) {
     console.error('Resend verification error:', error);
@@ -473,31 +517,43 @@ router.patch('/approve-user/:userId', auth, async (req, res) => {
       });
     }
 
-    // Check if there's already an approved user with the same unit (excluding admin/president roles)
+    // Normalize campus values (empty/null = 'Main')
+    const userToApproveCampus = (userToApprove.campus || '').trim() || 'Main';
+    
+    // Check if there's already an approved user with the same unit AND same campus (excluding admin/president/Executive roles)
+    // Build campus query: match exact campus or match empty/null if userToApproveCampus is 'Main'
+    const campusQuery = userToApproveCampus === 'Main' 
+      ? { $or: [{ campus: 'Main' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
+      : { campus: userToApproveCampus };
+    
     const existingUser = await User.findOne({
       unit: userToApprove.unit,
+      ...campusQuery,
       approvalStatus: 'approved',
-      role: 'user', // Only check for regular users, not admin/president
+      role: { $nin: ['admin', 'president', 'Executive'] }, // Check for program heads, not admin/president/Executive
       _id: { $ne: userId } // Exclude the user being approved
     }).select('-password');
 
     // If conflict exists and not auto-suspending, return conflict info
     if (existingUser && !autoSuspendConflict) {
+      const existingUserCampus = (existingUser.campus || '').trim() || 'Main';
       return res.status(409).json({
         conflict: true,
-        message: 'Another user with the same unit is already approved',
+        message: `Another user with the same unit (${existingUserCampus} campus) is already approved`,
         existingUser: {
           _id: existingUser._id,
           username: existingUser.username,
           email: existingUser.email,
           unit: existingUser.unit,
+          campus: existingUserCampus,
           approvedAt: existingUser.approvedAt
         },
         userToApprove: {
           _id: userToApprove._id,
           username: userToApprove.username,
           email: userToApprove.email,
-          unit: userToApprove.unit
+          unit: userToApprove.unit,
+          campus: userToApproveCampus
         }
       });
     }
@@ -771,6 +827,13 @@ router.delete('/delete-user/:userId', auth, async (req, res) => {
   try {
     const { userId } = req.params;
 
+    // Validate userId format
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        message: 'Invalid user ID format'
+      });
+    }
+
     const user = await User.findById(userId);
 
     if (!user) {
@@ -779,23 +842,53 @@ router.delete('/delete-user/:userId', auth, async (req, res) => {
       });
     }
 
-    if (['admin', 'president'].includes(user.role)) {
+    // Store user info before deletion for audit log
+    const userEmail = user.email;
+    const username = user.username;
+    const userUnit = user.unit;
+    const userIdString = user._id.toString();
+
+    // Prevent deletion of admin, president, and Executive roles
+    if (['admin', 'president', 'Executive'].includes(user.role)) {
       return res.status(403).json({
         message: 'Cannot delete administrator accounts'
       });
     }
 
-    await User.findByIdAndDelete(userId);
+    // Delete the user
+    const deletedUser = await User.findByIdAndDelete(userId);
 
-    await logAuditEvent({
-      actor: req.user,
-      action: 'account_removed',
-      description: `Removed user ${user.email}`,
-      target: { type: 'user', id: user._id.toString(), name: user.username },
-      metadata: {
-        unit: user.unit
-      }
-    });
+    // Verify deletion was successful
+    if (!deletedUser) {
+      return res.status(500).json({
+        message: 'Failed to delete user. User may have already been deleted.'
+      });
+    }
+
+    // Double-check that user is actually deleted
+    const verifyDeletion = await User.findById(userId);
+    if (verifyDeletion) {
+      console.error('Warning: User still exists after deletion attempt:', userId);
+      return res.status(500).json({
+        message: 'User deletion failed. User still exists in database.'
+      });
+    }
+
+    // Log audit event (non-blocking - don't fail if this errors)
+    try {
+      await logAuditEvent({
+        actor: req.user,
+        action: 'account_removed',
+        description: `Removed user ${userEmail}`,
+        target: { type: 'user', id: userIdString, name: username },
+        metadata: {
+          unit: userUnit
+        }
+      });
+    } catch (auditError) {
+      console.error('Failed to log audit event for user deletion:', auditError);
+      // Don't fail the request if audit logging fails
+    }
 
     res.json({
       message: 'User deleted successfully'
@@ -803,7 +896,8 @@ router.delete('/delete-user/:userId', auth, async (req, res) => {
   } catch (error) {
     console.error('Error deleting user:', error);
     res.status(500).json({
-      message: 'Server error deleting user'
+      message: 'Server error deleting user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });

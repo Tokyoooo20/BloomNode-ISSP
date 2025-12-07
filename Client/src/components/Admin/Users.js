@@ -6,6 +6,22 @@ const UNIT_OPTIONS_STORAGE_KEY = 'adminUnitOptions';
 
 const sanitizeUnitValue = (unit) => (typeof unit === 'string' ? unit.trim() : '');
 
+// Campus abbreviation mapping for all campuses
+const CAMPUS_ABBREVIATIONS = {
+  'Main': 'MAIN',
+  'Baganga': 'BGA',
+  'Tarragona': 'TAR',
+  'Banaybanay': 'BAN',
+  'San Isidro': 'SID',
+  'President': '' // President campus shows unit without prefix
+};
+
+const getCampusAbbreviation = (campus) => {
+  if (!campus || typeof campus !== 'string') return '';
+  const trimmedCampus = campus.trim();
+  return CAMPUS_ABBREVIATIONS[trimmedCampus] || '';
+};
+
 const loadStoredUnitOptions = () => {
   if (typeof window === 'undefined') {
     return [];
@@ -386,22 +402,153 @@ const Users = () => {
   const approveUser = async (user) => {
     const userId = user._id;
 
+    // Check if there's already an active program head for this unit AND campus
+    const checkForConflict = () => {
+      if (!user.unit || user.unit.trim() === '') {
+        return null; // No unit assigned, no conflict
+      }
+
+      // Normalize campus values (empty/null = 'Main')
+      const userCampus = (user.campus || '').trim() || 'Main';
+      
+      // Find if there's another approved user with the same unit AND same campus
+      const existingActiveHead = users.find(
+        (u) => {
+          // Skip if same user
+          if (u._id === userId) return false;
+          
+          // Must have unit
+          if (!u.unit || u.unit.trim() === '') return false;
+          
+          // Must have same unit name
+          if (sanitizeUnitValue(u.unit) !== sanitizeUnitValue(user.unit)) return false;
+          
+          // Must have same campus (normalize empty/null to 'Main')
+          const uCampus = (u.campus || '').trim() || 'Main';
+          if (uCampus !== userCampus) return false;
+          
+          // Must be approved
+          if (u.approvalStatus !== 'approved') return false;
+          
+          // Must not be admin, president, or Executive role
+          if (u.role === 'admin' || u.role === 'president' || u.role === 'Executive') return false;
+          
+          return true;
+        }
+      );
+
+      return existingActiveHead || null;
+    };
+
+    const showConflictModal = (existingUser) => {
+      const approvedDate = existingUser.approvedAt 
+        ? new Date(existingUser.approvedAt).toLocaleDateString('en-US', { 
+            year: 'numeric', 
+            month: 'short', 
+            day: 'numeric' 
+          })
+        : 'Unknown date';
+
+      // Get campus display names
+      const existingUserCampus = (existingUser.campus || '').trim() || 'Main';
+      const newUserCampus = (user.campus || '').trim() || 'Main';
+      const existingCampusAbbr = getCampusAbbreviation(existingUserCampus);
+      const newCampusAbbr = getCampusAbbreviation(newUserCampus);
+      const existingUnitDisplay = existingCampusAbbr ? `${existingCampusAbbr} ${existingUser.unit}` : existingUser.unit;
+      const newUnitDisplay = newCampusAbbr ? `${newCampusAbbr} ${user.unit}` : user.unit;
+
+      openModal({
+        variant: 'danger',
+        title: '⚠️ Active Program Head Detected',
+        confirmLabel: 'Yes, Change Program Head',
+        cancelLabel: 'Cancel',
+        children: (
+          <div className="space-y-4">
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <p className="text-sm text-gray-700 mb-3">
+                Unit <strong>"{existingUnitDisplay}"</strong> ({existingUserCampus} campus) already has an active program head:
+              </p>
+              
+              <div className="bg-white border border-gray-200 rounded-lg p-3 mb-3">
+                <div className="flex items-start space-x-3">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 bg-blue-50 rounded-full flex items-center justify-center">
+                      <span className="text-blue-700 font-semibold text-sm">
+                        {existingUser.username.charAt(0).toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-900">{existingUser.username}</p>
+                    <p className="text-xs text-gray-600">{existingUser.email}</p>
+                    <p className="text-xs text-gray-500 mt-1">Approved since {approvedDate}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center my-3">
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+              </div>
+
+              <div className="bg-white border border-green-200 rounded-lg p-3">
+                <div className="flex items-start space-x-3">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 bg-green-50 rounded-full flex items-center justify-center">
+                      <span className="text-green-700 font-semibold text-sm">
+                        {user.username.charAt(0).toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-900">{user.username}</p>
+                    <p className="text-xs text-gray-600">{user.email}</p>
+                    <p className="text-xs text-green-700 mt-1 font-medium">New Program Head</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+              <div className="flex items-start space-x-2">
+                <svg className="w-5 h-5 text-red-700 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <div className="text-sm text-red-700">
+                  <p className="font-semibold mb-1">⚠️ Only ONE program head per unit per campus allowed</p>
+                  <p>Approving <strong>{user.username}</strong> will automatically <strong>SUSPEND {existingUser.username}</strong> for unit "{newUnitDisplay}" ({newUserCampus} campus)</p>
+                </div>
+              </div>
+            </div>
+
+            <p className="text-sm text-gray-600 text-center">
+              Do you want to proceed with the program head transfer?
+            </p>
+          </div>
+        ),
+        onConfirm: async () => {
+          await executeApproval(true);
+        }
+      });
+    };
+
     const executeApproval = async (autoSuspendConflict = false) => {
       try {
         setUpdatingUserId(userId);
         const token = localStorage.getItem('token');
           const response = await fetch(API_ENDPOINTS.auth.approveUser(userId), {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ autoSuspendConflict })
-        });
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ autoSuspendConflict })
+          });
 
         const data = await response.json();
         
-        // Handle conflict (409 status code)
+        // Handle conflict (409 status code) - fallback in case frontend check missed it
         if (response.status === 409 && data.conflict) {
           const existingUser = data.existingUser;
           const approvedDate = existingUser.approvedAt 
@@ -412,6 +559,14 @@ const Users = () => {
               })
             : 'Unknown date';
 
+          // Get campus display names
+          const existingUserCampus = (existingUser.campus || '').trim() || 'Main';
+          const newUserCampus = (user.campus || '').trim() || 'Main';
+          const existingCampusAbbr = getCampusAbbreviation(existingUserCampus);
+          const newCampusAbbr = getCampusAbbreviation(newUserCampus);
+          const existingUnitDisplay = existingCampusAbbr ? `${existingCampusAbbr} ${existingUser.unit}` : existingUser.unit;
+          const newUnitDisplay = newCampusAbbr ? `${newCampusAbbr} ${user.unit}` : user.unit;
+
           openModal({
             variant: 'danger',
             title: '⚠️ Program Head Conflict Detected',
@@ -421,7 +576,7 @@ const Users = () => {
               <div className="space-y-4">
                 <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
                   <p className="text-sm text-gray-700 mb-3">
-                    Unit <strong>"{user.unit}"</strong> already has an active program head:
+                    Unit <strong>"{existingUnitDisplay}"</strong> ({existingUserCampus} campus) already has an active program head:
                   </p>
                   
                   <div className="bg-white border border-gray-200 rounded-lg p-3 mb-3">
@@ -471,8 +626,8 @@ const Users = () => {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
                     </svg>
                     <div className="text-sm text-red-700">
-                      <p className="font-semibold mb-1">⚠️ Only ONE program head per unit allowed</p>
-                      <p>Approving <strong>{user.username}</strong> will automatically <strong>SUSPEND {existingUser.username}</strong> for unit "{user.unit}"</p>
+                      <p className="font-semibold mb-1">⚠️ Only ONE program head per unit per campus allowed</p>
+                      <p>Approving <strong>{user.username}</strong> will automatically <strong>SUSPEND {existingUser.username}</strong> for unit "{newUnitDisplay}" ({newUserCampus} campus)</p>
                     </div>
                   </div>
                 </div>
@@ -515,6 +670,14 @@ const Users = () => {
       }
     };
 
+    // Check for conflict BEFORE approving
+    const existingActiveHead = checkForConflict();
+    if (existingActiveHead) {
+      showConflictModal(existingActiveHead);
+      return;
+    }
+
+    // If user is suspended, show confirmation first
     if (user.approvalStatus === 'suspended') {
       openModal({
         variant: 'confirm',
@@ -528,6 +691,7 @@ const Users = () => {
       return;
     }
 
+    // For pending users, proceed directly
     await executeApproval();
   };
 
@@ -638,6 +802,17 @@ const Users = () => {
         try {
           setUpdatingUserId(userId);
           const token = localStorage.getItem('token');
+          
+          if (!token) {
+            showAlert({
+              variant: 'danger',
+              title: 'Authentication Required',
+              message: 'No authentication token found. Please login again.'
+            });
+            setUpdatingUserId(null);
+            return;
+          }
+
           const response = await fetch(API_ENDPOINTS.auth.deleteUser(userId), {
             method: 'DELETE',
             headers: {
@@ -646,7 +821,15 @@ const Users = () => {
             },
           });
 
-          const data = await response.json();
+          let data;
+          try {
+            data = await response.json();
+          } catch (jsonError) {
+            // If response is not JSON, create a data object with the status text
+            data = {
+              message: response.statusText || 'Failed to delete user'
+            };
+          }
 
           if (response.ok) {
             showAlert({
@@ -654,19 +837,21 @@ const Users = () => {
               title: 'User Deleted',
               message: data.message || 'User deleted successfully!'
             });
-            fetchUsers();
+            // Refresh the user list to reflect the deletion
+            await fetchUsers();
           } else {
             showAlert({
               variant: 'danger',
               title: 'Action Failed',
-              message: data.message || 'Failed to delete user.'
+              message: data.message || `Failed to delete user. (Status: ${response.status})`
             });
           }
         } catch (error) {
+          console.error('Error deleting user:', error);
           showAlert({
             variant: 'danger',
             title: 'Network Error',
-            message: 'Network error. Please try again.'
+            message: error.message || 'Network error. Please try again.'
           });
         } finally {
           setUpdatingUserId(null);
@@ -794,15 +979,60 @@ const Users = () => {
 
   const renderUnitDisplay = (user) => {
     const unitValue = sanitizeUnitValue(user.unit);
+    if (!unitValue) {
+      return (
+        <div className="text-sm text-gray-900">
+          <span className="text-gray-400 italic">No unit</span>
+        </div>
+      );
+    }
+
+    // Check if this is a President user (by campus, role, or unit)
+    const isPresidentUser = user.campus === 'President' || 
+                            user.role === 'president' || 
+                            user.role === 'Executive' && unitValue === 'Executive';
+    
+    // President users show unit without campus prefix
+    if (isPresidentUser) {
+      return (
+        <div className="text-sm text-gray-900">
+          {unitValue}
+        </div>
+      );
+    }
+
+    // Get campus abbreviation for other users
+    // Defaults to 'Main' if campus is empty/null
+    const campus = user.campus || 'Main';
+    const campusAbbr = getCampusAbbreviation(campus);
+    
+    // Show campus abbreviation + unit
+    const displayValue = campusAbbr ? `${campusAbbr} ${unitValue}` : unitValue;
+    
     return (
       <div className="text-sm text-gray-900">
-        {unitValue || <span className="text-gray-400 italic">No unit</span>}
+        {displayValue}
       </div>
     );
   };
 
   const renderRoleDisplay = (user) => {
     // Display role as read-only text
+    // Check if this is a President user (by campus, role, or unit)
+    const unitValue = sanitizeUnitValue(user.unit);
+    const isPresidentUser = user.campus === 'President' || 
+                            user.role === 'president' || 
+                            (user.role === 'Executive' && unitValue === 'Executive');
+    
+    // For President users, show "PRESIDENT" in role column
+    if (isPresidentUser) {
+      return (
+        <div className="text-sm text-gray-900">
+          PRESIDENT
+        </div>
+      );
+    }
+    
     // Default is "Program head" when unit is assigned
     const role = user.role || (user.unit ? 'Program head' : 'N/A');
     return (

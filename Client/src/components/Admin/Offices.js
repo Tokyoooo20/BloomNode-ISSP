@@ -9,16 +9,17 @@ const Offices = () => {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [reviewingItem, setReviewingItem] = useState(null);
-  const [showReviewModal, setShowReviewModal] = useState(false);
-  const [approvalDecision, setApprovalDecision] = useState('');
-  const [approvalReason, setApprovalReason] = useState('');
+  // Track pending reviews before saving
+  const [pendingReviews, setPendingReviews] = useState({}); // { itemKey: { decision, reason } }
   const [officeStats, setOfficeStats] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
-  const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2027');
+  const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2026');
   const [selectedUnitGroup, setSelectedUnitGroup] = useState(null); // { unitName, year, requests }
   const [searchQuery, setSearchQuery] = useState('');
+  // Pagination for Items for Review table
+  const [itemsCurrentPage, setItemsCurrentPage] = useState(1);
+  const itemsPerPage = 10;
   
   // Modal state for confirmation dialogs
   const [modalState, setModalState] = useState({
@@ -178,7 +179,12 @@ const Offices = () => {
   const groupedRequests = useMemo(() => {
     const grouped = {};
     requests.forEach(request => {
-      const unitName = request.userId?.unit || 'Unknown Unit';
+      // Use request.unit field first (from request schema), then fallback to userId.unit
+      const unitName = (request.unit && request.unit.trim()) 
+        ? request.unit.trim() 
+        : (request.userId?.unit && request.userId.unit.trim()) 
+          ? request.userId.unit.trim() 
+          : 'Unknown Unit';
       const year = request.year || 'Unknown Year';
       const key = `${unitName}|||${year}`;
       
@@ -228,94 +234,126 @@ const Offices = () => {
     return filtered;
   }, [groupedRequests, statusFilter, priorityFilter, selectedYearCycle, searchQuery]);
 
-  // Handle item review - with confirmation modal
-  const performItemReview = async () => {
-    try {
-      setLoading(true);
-      const token = localStorage.getItem('token');
-      
-      if (!reviewingItem || !reviewingItem.requestId) {
-        showAlert({
-          variant: 'danger',
-          title: 'Error',
-          message: 'Invalid item or request ID'
-        });
-        return;
+  // Handle inline approve/disapprove
+  const handleItemDecision = (item, decision) => {
+    const itemKey = `${item.requestId}-${item.id}`;
+    setPendingReviews(prev => ({
+      ...prev,
+      [itemKey]: {
+        decision,
+        reason: decision === 'approved' ? 'Approved' : (prev[itemKey]?.reason || '')
       }
-      
-      await axios.put(
-        API_ENDPOINTS.admin.requestReview(reviewingItem.requestId, reviewingItem.id),
-        {
-          approvalStatus: approvalDecision,
-          approvalReason: approvalReason
-        },
-        {
-          headers: { 'x-auth-token': token }
-        }
-      );
-
-      showAlert({
-        variant: 'success',
-        title: 'Review Submitted',
-        message: `Item ${approvalDecision === 'approved' ? 'approved' : 'disapproved'} successfully!`,
-        autoCloseDelay: 2000
-      });
-      
-      // Refresh requests and office stats
-      await fetchSubmittedRequests();
-      await fetchOfficeStats();
-      
-      // Close modals and reset
-      setShowReviewModal(false);
-      setReviewingItem(null);
-      setApprovalDecision('');
-      setApprovalReason('');
-      
-      // Refresh the selected unit group
-      if (selectedUnitGroup) {
-        const token = localStorage.getItem('token');
-        const updatedRequests = await Promise.all(
-          selectedUnitGroup.requests.map(request =>
-            axios.get(
-              API_ENDPOINTS.admin.getRequest(request._id),
-              { headers: { 'x-auth-token': token } }
-            ).then(res => res.data)
-          )
-        );
-        setSelectedUnitGroup({
-          ...selectedUnitGroup,
-          requests: updatedRequests
-        });
-      }
-    } catch (err) {
-      console.error('Error reviewing item:', err);
-      showAlert({
-        variant: 'danger',
-        title: 'Review Failed',
-        message: 'Failed to review item: ' + (err.response?.data?.message || err.message)
-      });
-    } finally {
-      setLoading(false);
-    }
+    }));
   };
 
-  const handleItemReview = () => {
-    if (!approvalDecision || !approvalReason.trim()) {
+  // Handle reason change for disapproved items
+  const handleReasonChange = (item, reason) => {
+    const itemKey = `${item.requestId}-${item.id}`;
+    setPendingReviews(prev => ({
+      ...prev,
+      [itemKey]: {
+        ...prev[itemKey],
+        reason
+      }
+    }));
+  };
+
+  // Save all pending reviews
+  const handleSaveReviews = async () => {
+    const pendingKeys = Object.keys(pendingReviews);
+    if (pendingKeys.length === 0) {
+      showAlert({
+        variant: 'danger',
+        title: 'No Changes',
+        message: 'No reviews to save. Please make some decisions first.'
+      });
+      return;
+    }
+
+    // Validate all disapproved items have reasons
+    const invalidReviews = pendingKeys.filter(key => {
+      const review = pendingReviews[key];
+      return review.decision === 'disapproved' && !review.reason.trim();
+    });
+
+    if (invalidReviews.length > 0) {
       showAlert({
         variant: 'danger',
         title: 'Validation Error',
-        message: 'Please select a decision and provide a reason'
+        message: 'Please provide reasons for all disapproved items.'
       });
       return;
     }
 
     openModal({
       variant: 'confirm',
-      title: 'Confirm Review',
-      message: `Are you sure you want to ${approvalDecision === 'approved' ? 'approve' : 'disapprove'} this item?`,
-      confirmLabel: 'Yes, Submit',
+      title: 'Save Reviews',
+      message: `Are you sure you want to save ${pendingKeys.length} review${pendingKeys.length !== 1 ? 's' : ''}?`,
+      confirmLabel: 'Yes, Save',
       onConfirm: async () => {
-        await performItemReview();
+        try {
+          setLoading(true);
+          const token = localStorage.getItem('token');
+          
+          // Process all pending reviews
+          await Promise.all(
+            pendingKeys.map(async (itemKey) => {
+              const [requestId, itemId] = itemKey.split('-');
+              const review = pendingReviews[itemKey];
+              
+              await axios.put(
+                API_ENDPOINTS.admin.requestReview(requestId, itemId),
+                {
+                  approvalStatus: review.decision,
+                  approvalReason: review.reason
+                },
+                {
+                  headers: { 'x-auth-token': token }
+                }
+              );
+            })
+          );
+
+          showAlert({
+            variant: 'success',
+            title: 'Reviews Saved',
+            message: `Successfully saved ${pendingKeys.length} review${pendingKeys.length !== 1 ? 's' : ''}!`,
+            autoCloseDelay: 2000
+          });
+          
+          // Clear pending reviews
+          setPendingReviews({});
+          
+          // Refresh requests and office stats
+          await fetchSubmittedRequests();
+          await fetchOfficeStats();
+          
+          // Refresh the selected unit group
+          if (selectedUnitGroup) {
+            const token = localStorage.getItem('token');
+            const updatedRequests = await Promise.all(
+              selectedUnitGroup.requests.map(request =>
+                axios.get(
+                  API_ENDPOINTS.admin.getRequest(request._id),
+                  { headers: { 'x-auth-token': token } }
+                ).then(res => res.data)
+              )
+            );
+            setSelectedUnitGroup({
+              ...selectedUnitGroup,
+              requests: updatedRequests
+            });
+          }
+        } catch (err) {
+          console.error('Error saving reviews:', err);
+          showAlert({
+            variant: 'danger',
+            title: 'Save Failed',
+            message: 'Failed to save reviews: ' + (err.response?.data?.message || err.message)
+          });
+        } finally {
+          setLoading(false);
+        }
       }
     });
   };
@@ -428,6 +466,7 @@ const Offices = () => {
               <button
                 onClick={() => {
                   setSelectedUnitGroup(null);
+                  setItemsCurrentPage(1); // Reset to first page when closing
                 }}
                 className="mr-4 text-gray-600 hover:text-gray-900"
               >
@@ -547,22 +586,32 @@ const Offices = () => {
             </div>
             <div className="overflow-x-auto">
               {allGroupItems.length > 0 ? (
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Request Title</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Quantity</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {allGroupItems.map((item, index) => (
+                <>
+                {/* Pagination calculations */}
+                {(() => {
+                  const totalPages = Math.ceil(allGroupItems.length / itemsPerPage);
+                  const startIndex = (itemsCurrentPage - 1) * itemsPerPage;
+                  const endIndex = startIndex + itemsPerPage;
+                  const paginatedItems = allGroupItems.slice(startIndex, endIndex);
+                  
+                  return (
+                    <>
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Request Title</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Quantity</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {paginatedItems.map((item, index) => (
                       <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
                           <div className="text-sm font-medium text-gray-900 max-w-xs break-words">{item.requestTitle}</div>
@@ -606,17 +655,41 @@ const Offices = () => {
                             {item.purpose || <span className="text-gray-400">—</span>}
                           </div>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                        <td className="px-4 py-3 whitespace-nowrap">
                           {item.approvalStatus === 'pending' ? (
-                            <button
-                              onClick={() => {
-                                setReviewingItem({ ...item, requestId: item.requestId });
-                                setShowReviewModal(true);
-                              }}
-                              className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium rounded-md transition-colors"
-                            >
-                              Review
-                            </button>
+                            <div className="flex flex-col gap-2 min-w-[140px]">
+                              <div className="flex gap-1.5">
+                                <button
+                                  onClick={() => handleItemDecision(item, 'approved')}
+                                  className={`flex-1 px-2 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                                    pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'approved'
+                                      ? 'bg-green-600 text-white shadow-md'
+                                      : 'bg-green-50 text-green-700 hover:bg-green-100 border border-green-200'
+                                  }`}
+                                >
+                                  ✓ Approve
+                                </button>
+                                <button
+                                  onClick={() => handleItemDecision(item, 'disapproved')}
+                                  className={`flex-1 px-2 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                                    pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'disapproved'
+                                      ? 'bg-red-600 text-white shadow-md'
+                                      : 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
+                                  }`}
+                                >
+                                  ✗ Disapprove
+                                </button>
+                              </div>
+                              {pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'disapproved' && (
+                                <textarea
+                                  value={pendingReviews[`${item.requestId}-${item.id}`]?.reason || ''}
+                                  onChange={(e) => handleReasonChange(item, e.target.value)}
+                                  placeholder="Reason for disapproval..."
+                                  rows="2"
+                                  className="w-full px-2 py-1.5 text-xs border border-red-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
+                                />
+                              )}
+                            </div>
                           ) : item.approvalReason ? (
                             <div className="text-xs text-gray-600 max-w-xs">
                               <div className="font-medium mb-1">Reason:</div>
@@ -627,9 +700,69 @@ const Offices = () => {
                           )}
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        ))}
+                      </tbody>
+                    </table>
+                    {totalPages > 1 && (
+                      <div className="bg-gray-50 px-4 py-3 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+                        <div className="text-sm text-gray-700">
+                          Showing <span className="font-medium">{startIndex + 1}</span> to{' '}
+                          <span className="font-medium">{Math.min(endIndex, allGroupItems.length)}</span> of{' '}
+                          <span className="font-medium">{allGroupItems.length}</span> items
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setItemsCurrentPage(prev => Math.max(1, prev - 1))}
+                            disabled={itemsCurrentPage === 1}
+                            className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            Previous
+                          </button>
+                          
+                          {/* Page Numbers */}
+                          <div className="flex gap-1">
+                            {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+                              let pageNum;
+                              if (totalPages <= 5) {
+                                pageNum = i + 1;
+                              } else if (itemsCurrentPage <= 3) {
+                                pageNum = i + 1;
+                              } else if (itemsCurrentPage >= totalPages - 2) {
+                                pageNum = totalPages - 4 + i;
+                              } else {
+                                pageNum = itemsCurrentPage - 2 + i;
+                              }
+                              
+                              return (
+                                <button
+                                  key={pageNum}
+                                  onClick={() => setItemsCurrentPage(pageNum)}
+                                  className={`px-3 py-2 text-sm font-medium rounded-md transition-colors ${
+                                    itemsCurrentPage === pageNum
+                                      ? 'bg-gray-900 text-white'
+                                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {pageNum}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          
+                          <button
+                            onClick={() => setItemsCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                            disabled={itemsCurrentPage === totalPages}
+                            className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    </>
+                  );
+                })()}
+                </>
               ) : (
                 <div className="text-center py-12">
                   <p className="text-gray-500">No items in this group</p>
@@ -639,10 +772,39 @@ const Offices = () => {
           </div>
 
           {/* Action Buttons */}
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 pt-4 border-t border-gray-200">
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 pt-4 border-t border-gray-200 bg-gray-50 px-6 py-4">
             <div className="text-sm text-gray-600">
-              {allGroupItems.filter(item => item.approvalStatus === 'pending').length} items pending review
+              <span className="font-semibold">{allGroupItems.filter(item => item.approvalStatus === 'pending').length}</span> items pending review
+              {Object.keys(pendingReviews).length > 0 && (
+                <span className="ml-2 text-blue-600 font-semibold">
+                  • {Object.keys(pendingReviews).length} unsaved change{Object.keys(pendingReviews).length !== 1 ? 's' : ''}
+                </span>
+              )}
             </div>
+            {Object.keys(pendingReviews).length > 0 && (
+              <button
+                onClick={handleSaveReviews}
+                disabled={loading}
+                className="px-6 py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {loading ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Save Reviews
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       ) : (
@@ -812,10 +974,10 @@ const Offices = () => {
                 className="w-full sm:w-auto px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-400 focus:border-gray-400 text-sm font-medium text-gray-700 bg-white"
               >
                 <option value="">All Years</option>
-                <option value="2024-2027">2024-2027</option>
-                <option value="2027-2030">2027-2030</option>
-                <option value="2030-2033">2030-2033</option>
-                <option value="2033-2036">2033-2036</option>
+                <option value="2024-2026">2024-2026</option>
+                <option value="2027-2029">2027-2029</option>
+                <option value="2030-2032">2030-2032</option>
+                <option value="2033-2035">2033-2035</option>
               </select>
               <select 
                 value={statusFilter}
@@ -949,6 +1111,7 @@ const Offices = () => {
                     <button 
                       onClick={() => {
                         setSelectedUnitGroup(group);
+                        setItemsCurrentPage(1); // Reset to first page when selecting new unit
                       }}
                       className="px-4 py-2 bg-gray-200 text-gray-700 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors"
                     >
@@ -964,110 +1127,6 @@ const Offices = () => {
         </>
       )}
 
-      {/* Review Item Modal */}
-      {showReviewModal && reviewingItem && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg p-4 sm:p-6 max-w-2xl w-full shadow-xl max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg sm:text-xl font-semibold text-gray-900 mb-4 break-words">Review Item: {reviewingItem.item}</h3>
-            
-            <div className="space-y-4">
-              <div className="bg-gray-50 p-3 sm:p-4 rounded-lg">
-                <p className="text-xs sm:text-sm text-gray-600">Quantity: <span className="font-medium text-gray-900">{reviewingItem.quantity}</span></p>
-                <p className="text-xs sm:text-sm text-gray-600 mt-1">Range: <span className="font-medium text-gray-900">{reviewingItem.range}</span></p>
-                {reviewingItem.specification && (
-                  <p className="text-xs sm:text-sm text-gray-600 mt-1 break-words">Specification: <span className="font-medium text-gray-900">{reviewingItem.specification}</span></p>
-                )}
-                {reviewingItem.purpose && (
-                  <p className="text-xs sm:text-sm text-gray-600 mt-1 break-words">Purpose: <span className="font-medium text-gray-900">{reviewingItem.purpose}</span></p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">Decision *</label>
-                <div className="flex flex-col sm:flex-row gap-2 sm:gap-4">
-                  <button
-                    onClick={() => {
-                      setApprovalDecision('approved');
-                      setApprovalReason('Approved'); // Auto-set reason for approval
-                    }}
-                    className={`btn-responsive flex-1 ${
-                      approvalDecision === 'approved'
-                        ? 'bg-gray-200 text-gray-800'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    ✓ Approve
-                  </button>
-                  <button
-                    onClick={() => {
-                      setApprovalDecision('disapproved');
-                      setApprovalReason(''); // Clear reason when switching to disapprove
-                    }}
-                    className={`btn-responsive flex-1 ${
-                      approvalDecision === 'disapproved'
-                        ? 'bg-gray-200 text-gray-800'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    ✗ Disapprove
-                  </button>
-                </div>
-              </div>
-
-              {/* Only show reason textarea if disapproved is selected */}
-              {approvalDecision === 'disapproved' && (
-                <div>
-                  <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">Reason for Disapproval *</label>
-                  <textarea
-                    value={approvalReason}
-                    onChange={(e) => setApprovalReason(e.target.value)}
-                    rows="4"
-                    className="input-responsive tap-target w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                    placeholder="Enter reason for disapproval..."
-                  ></textarea>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-0 mt-4 sm:mt-6">
-              <button
-                onClick={() => {
-                  // If user made changes, confirm before closing
-                  if (approvalDecision || approvalReason.trim()) {
-                    openModal({
-                      variant: 'confirm',
-                      title: 'Discard Changes?',
-                      message: 'You have unsaved changes. Are you sure you want to cancel?',
-                      confirmLabel: 'Yes, Discard',
-                      onConfirm: () => {
-                        setShowReviewModal(false);
-                        setReviewingItem(null);
-                        setApprovalDecision('');
-                        setApprovalReason('');
-                      }
-                    });
-                  } else {
-                    setShowReviewModal(false);
-                    setReviewingItem(null);
-                    setApprovalDecision('');
-                    setApprovalReason('');
-                  }
-                }}
-                className="btn-responsive text-gray-700 bg-gray-100 hover:bg-gray-200 w-full sm:w-auto"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleItemReview}
-                disabled={!approvalDecision || !approvalReason.trim() || loading}
-                className="btn-responsive bg-gray-200 hover:bg-gray-300 text-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed w-full sm:w-auto"
-              >
-                {loading ? 'Submitting...' : 'Submit Review'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Confirmation Modal */}
       <Modal

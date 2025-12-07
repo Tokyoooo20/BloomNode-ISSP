@@ -29,16 +29,85 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(async () => {
-  console.log(`Connected to MongoDB`);
-  // Seed admin user after successful database connection
-  await seedAdminUser();
-})
-.catch((err) => console.error('MongoDB connection error:', err));
+const connectMongoDB = async () => {
+  const mongoUri = process.env.MONGODB_URI;
+
+  if (!mongoUri) {
+    console.error('ERROR: MONGODB_URI environment variable is not set!');
+    console.error('Please set MONGODB_URI in your .env file or environment variables.');
+    process.exit(1);
+  }
+
+  // Validate connection string format
+  const isAtlas = mongoUri.startsWith('mongodb+srv://');
+  const isLocal = mongoUri.startsWith('mongodb://') && mongoUri.includes('localhost');
+  
+  // Extract database name for logging (without exposing credentials)
+  let dbName = 'unknown';
+  try {
+    const uriMatch = mongoUri.match(/\/([^?]+)/);
+    if (uriMatch) {
+      dbName = uriMatch[1];
+    }
+  } catch (e) {
+    // Ignore parsing errors
+  }
+
+  // Silent connection - no console output during connection
+
+  try {
+    await mongoose.connect(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 10000, // 10 seconds timeout
+      socketTimeoutMS: 45000, // 45 seconds socket timeout
+    });
+
+    const connectionState = mongoose.connection.readyState;
+    const connectionHost = mongoose.connection.host;
+    const connectionName = mongoose.connection.name;
+
+    if (connectionState === 1) {
+      console.log('Successfully connected to MongoDB');
+      if (isLocal) {
+        console.warn('WARNING: Using LOCAL MongoDB - Switch to Atlas for deployment!');
+      }
+    }
+
+    // Seed admin user after successful database connection
+    await seedAdminUser();
+  } catch (error) {
+    console.error('MongoDB connection error:', error.message);
+    
+    if (error.message.includes('authentication failed')) {
+      console.error('Tip: Check your MongoDB Atlas username and password');
+    } else if (error.message.includes('ENOTFOUND') || error.message.includes('getaddrinfo')) {
+      console.error('Tip: Check your MongoDB Atlas cluster URL');
+      console.error('Tip: Verify Network Access in Atlas allows your IP (0.0.0.0/0 for all)');
+    } else if (error.message.includes('timeout')) {
+      console.error('Tip: Connection timeout - check your internet connection');
+      console.error('Tip: Verify MongoDB Atlas cluster is running');
+    }
+    
+    process.exit(1);
+  }
+};
+
+// Handle connection events
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('MongoDB disconnected. Attempting to reconnect...');
+});
+
+mongoose.connection.on('reconnected', () => {
+  // Silent reconnection
+});
+
+// Connect to MongoDB
+connectMongoDB();
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -53,6 +122,57 @@ app.use('/api/test', require('./routes/test-email')); // Test route for debuggin
 // Basic route
 app.get('/', (req, res) => {
   res.json({ message: 'BloomNode Backend API is running!' });
+});
+
+// Health check route with MongoDB connection info
+app.get('/api/health', (req, res) => {
+  const mongoState = mongoose.connection.readyState;
+  const states = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting'
+  };
+
+  const mongoUri = process.env.MONGODB_URI || 'not set';
+  const isAtlas = mongoUri.startsWith('mongodb+srv://');
+  const isLocal = mongoUri.startsWith('mongodb://') && mongoUri.includes('localhost');
+
+  // Extract database name (without exposing credentials)
+  let dbName = 'unknown';
+  let connectionType = 'unknown';
+  
+  try {
+    const uriMatch = mongoUri.match(/\/([^?]+)/);
+    if (uriMatch) {
+      dbName = uriMatch[1];
+    }
+    
+    if (isAtlas) {
+      connectionType = 'MongoDB Atlas (Cloud)';
+    } else if (isLocal) {
+      connectionType = 'Local MongoDB';
+    } else if (mongoUri.startsWith('mongodb://')) {
+      connectionType = 'MongoDB (Other)';
+    }
+  } catch (e) {
+    // Ignore parsing errors
+  }
+
+  res.json({
+    status: 'ok',
+    server: 'running',
+    mongodb: {
+      state: states[mongoState] || 'unknown',
+      connected: mongoState === 1,
+      connectionType: connectionType,
+      database: dbName,
+      host: mongoose.connection.host || 'unknown',
+      usingAtlas: isAtlas,
+      usingLocal: isLocal
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
 const PORT = process.env.PORT || 5000;

@@ -3,11 +3,9 @@ const axios = require('axios');
 
 const router = express.Router();
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct';
-const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || 'http://localhost:3000';
-const OPENROUTER_APP_TITLE = process.env.OPENROUTER_APP_TITLE || 'BloomNode';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-pro';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 const normalizeArray = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean);
@@ -29,35 +27,150 @@ const safeJsonParse = (text) => {
   }
 };
 
-const callOpenRouter = async (messages) => {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error('OpenRouter API key not configured. Add OPENROUTER_API_KEY to your .env file.');
+// Helper function to get available models
+const getAvailableModels = async () => {
+  try {
+    const response = await axios.get(
+      `${GEMINI_API_BASE}/models?key=${GEMINI_API_KEY}`,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      }
+    );
+    const models = response.data?.models || [];
+    console.log('Fetched models:', models.length, 'total');
+    if (models.length > 0) {
+      console.log('First few models:', models.slice(0, 5).map(m => ({ name: m.name, methods: m.supportedGenerationMethods })));
+    }
+    return models;
+  } catch (error) {
+    console.error('Error fetching available models:', error.message);
+    return [];
+  }
+};
+
+const callGemini = async (messages) => {
+  if (!GEMINI_API_KEY) {
+    throw new Error('Gemini API key not configured. Add GEMINI_API_KEY to your .env file.');
   }
 
   try {
-    const response = await axios.post(
-      OPENROUTER_CHAT_URL,
-      {
-        model: OPENROUTER_MODEL,
-        messages,
+    // Extract system message if present
+    const systemMessage = messages.find(msg => msg.role === 'system');
+    const userMessages = messages.filter(msg => msg.role !== 'system');
+
+    // Convert messages format from OpenAI-style to Gemini format
+    const contents = [];
+    
+    // Build conversation history
+    for (const msg of userMessages) {
+      const role = msg.role === 'assistant' ? 'model' : 'user';
+      contents.push({
+        role: role,
+        parts: [{ text: msg.content }]
+      });
+    }
+
+    const requestBody = {
+      contents: contents,
+      generationConfig: {
         temperature: 0.4,
-        max_tokens: 700,
-        top_p: 0.95,
-        stream: false
-      },
+        maxOutputTokens: 2048,
+        topP: 0.95
+      }
+    };
+
+    // Add system instruction if present (v1beta supports systemInstruction)
+    if (systemMessage) {
+      requestBody.systemInstruction = {
+        parts: [{ text: systemMessage.content }]
+      };
+    }
+
+    // Get available models and use the first one that supports generateContent
+    let modelToUse = null;
+    const availableModels = await getAvailableModels();
+    
+    if (availableModels.length > 0) {
+      // Find the first model that supports generateContent
+      const supportedModel = availableModels.find(m => 
+        m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent')
+      );
+      
+      if (supportedModel) {
+        // Remove 'models/' prefix if present
+        modelToUse = supportedModel.name.replace(/^models\//, '');
+        console.log(`Using model: ${modelToUse}`);
+      } else {
+        // Fallback: try common model names from the list
+        const fallbackModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-pro-latest', 'gemini-flash-latest'];
+        for (const fallback of fallbackModels) {
+          const found = availableModels.find(m => m.name && m.name.includes(fallback));
+          if (found) {
+            modelToUse = found.name.replace(/^models\//, '');
+            console.log(`Using fallback model: ${modelToUse}`);
+            break;
+          }
+        }
+      }
+    }
+
+    // If no model found, throw error
+    if (!modelToUse) {
+      throw new Error('No available Gemini model found that supports generateContent. Please check your API key permissions.');
+    }
+
+    // Use the determined model
+    const apiUrl = `${GEMINI_API_BASE}/models/${modelToUse}:generateContent?key=${GEMINI_API_KEY}`;
+    console.log(`Calling Gemini API with model: ${modelToUse}, URL: ${apiUrl.replace(GEMINI_API_KEY, 'KEY_HIDDEN')}`);
+    
+    const response = await axios.post(
+      apiUrl,
+      requestBody,
       {
         headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          'HTTP-Referer': OPENROUTER_SITE_URL,
-          'X-Title': OPENROUTER_APP_TITLE,
           'Content-Type': 'application/json'
         },
         timeout: 60000
       }
     );
 
-    const message = response.data?.choices?.[0]?.message?.content;
-    return message || '';
+    // Handle Gemini API response - check multiple possible structures
+    const candidate = response.data?.candidates?.[0];
+    if (!candidate) {
+      console.error('No candidates in Gemini response:', JSON.stringify(response.data, null, 2));
+      throw new Error('No candidates in Gemini API response');
+    }
+
+    // Check for finish reason
+    if (candidate.finishReason === 'MAX_TOKENS') {
+      console.warn('Warning: Response hit MAX_TOKENS limit. Consider increasing maxOutputTokens.');
+    }
+
+    // Get text from response - check if parts array exists and has content
+    let message = null;
+    if (candidate.content?.parts && Array.isArray(candidate.content.parts) && candidate.content.parts.length > 0) {
+      // Standard format: parts array
+      const textPart = candidate.content.parts.find(part => part && part.text);
+      message = textPart?.text;
+    } else if (candidate.content?.text) {
+      // Alternative format: direct text property
+      message = candidate.content.text;
+    } else if (candidate.text) {
+      // Another alternative format
+      message = candidate.text;
+    }
+
+    if (!message || !message.trim()) {
+      console.error('Gemini API response structure:', JSON.stringify(response.data, null, 2));
+      console.error('Candidate content:', JSON.stringify(candidate.content, null, 2));
+      if (candidate.finishReason === 'MAX_TOKENS') {
+        throw new Error('Response was truncated due to token limit. The model response exceeded the maximum output tokens. Try reducing the prompt length or increasing maxOutputTokens.');
+      }
+      throw new Error(`No response text found in Gemini API response. Finish reason: ${candidate.finishReason || 'unknown'}`);
+    }
+    
+    return message.trim();
   } catch (error) {
     const status = error.response?.status;
     const errPayload = error.response?.data;
@@ -68,8 +181,7 @@ const callOpenRouter = async (messages) => {
       errPayload?.message ||
       (errPayload ? JSON.stringify(errPayload) : '') ||
       error.message ||
-      (error.response?.data?.error?.code === 'insufficient_quota' ? 'OpenRouter free-tier limit reached.' : '') ||
-      'Failed to fetch insights from OpenRouter';
+      'Failed to fetch insights from Gemini';
     throw new Error(errMessage);
   }
 };
@@ -100,7 +212,7 @@ Respond strictly in minified JSON using this schema:
 Do not include any text outside the JSON object.
 `;
 
-    const rawText = await callOpenRouter([
+    const rawText = await callGemini([
       {
         role: 'system',
         content: 'You are an ISSP procurement assistant that responds ONLY with JSON matching the provided schema.'
@@ -158,7 +270,7 @@ router.post('/chat', async (req, res) => {
       ...sanitizedMessages
     ];
 
-    const reply = await callOpenRouter(chatMessages);
+    const reply = await callGemini(chatMessages);
 
     return res.json({
       reply: (reply || '').trim() || 'I was unable to generate a response just now.'

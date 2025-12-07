@@ -96,7 +96,7 @@ const convertFrameworkObjectToArray = (data = {}) =>
   Object.entries(data).map(([key, value]) => ({ key, value }));
 
 const DEV_PROJECT_SCHEDULE_ROWS = 5;
-const DEV_SUMMARY_ROWS = 3;
+const DEV_SUMMARY_ROWS = 100; // Increased to accommodate all items from all units
 const DEV_COST_BREAKDOWN_ROWS = 10;
 
 const createDevProjectRow = () => ({
@@ -149,12 +149,15 @@ const normalizeDevProjectSchedule = (data = [], rowCount = DEV_PROJECT_SCHEDULE_
 };
 
 const normalizeDevSummaryRows = (data = []) => {
-  const normalized = data.slice(0, DEV_SUMMARY_ROWS).map((row) => ({
+  // Don't truncate - keep all data rows, but ensure minimum rows for display
+  const normalized = data.map((row) => ({
     ...createDevSummaryRow(),
     ...row
   }));
 
-  while (normalized.length < DEV_SUMMARY_ROWS) {
+  // Only add empty rows if we have less than minimum, but don't limit to DEV_SUMMARY_ROWS
+  const minRows = Math.min(DEV_SUMMARY_ROWS, 10); // Minimum 10 rows for display
+  while (normalized.length < minRows) {
     normalized.push(createDevSummaryRow());
   }
 
@@ -1028,6 +1031,12 @@ const ISSP = () => {
   const [selectedUnitRequest, setSelectedUnitRequest] = useState(null);
   const [selectedUnitForRequests, setSelectedUnitForRequests] = useState(null);
   const [unitRequestsGrouped, setUnitRequestsGrouped] = useState({});
+  // Pagination for Request Details items table
+  const [itemsCurrentPage, setItemsCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+  // Price and Specification editing state for Request Details - track multiple pending edits
+  const [pendingPriceEdits, setPendingPriceEdits] = useState({}); // { "requestId-itemId": priceValue }
+  const [pendingSpecificationEdits, setPendingSpecificationEdits] = useState({}); // { "requestId-itemId": specificationValue }
   const [showDictStatusModal, setShowDictStatusModal] = useState(false);
   const [dictStatusForm, setDictStatusForm] = useState({ status: '', notes: '' });
   const [updatingDictStatus, setUpdatingDictStatus] = useState(false);
@@ -1036,7 +1045,23 @@ const ISSP = () => {
   const [updatingAcceptingEntries, setUpdatingAcceptingEntries] = useState(false);
   const orgProfileAutoSaveTimerRef = useRef(null);
   const orgProfileDirtyRef = useRef(false);
-  const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2027');
+  const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2026');
+  
+  // Helper function to extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
+  const getYearsFromCycle = (cycle) => {
+    if (!cycle || typeof cycle !== 'string') return [];
+    const parts = cycle.split('-');
+    if (parts.length !== 2) return [];
+    const startYear = parseInt(parts[0], 10);
+    const endYear = parseInt(parts[1], 10);
+    if (isNaN(startYear) || isNaN(endYear)) return [];
+    const years = [];
+    for (let year = startYear; year <= endYear; year++) {
+      years.push(year);
+    }
+    return years;
+  };
+  
   // Unit Submission Status - Search, Filter, and Pagination
   const [unitSearchQuery, setUnitSearchQuery] = useState('');
   const [unitStatusFilter, setUnitStatusFilter] = useState('all'); // 'all', 'submitted', 'pending'
@@ -1224,18 +1249,47 @@ const ISSP = () => {
       console.log('Fetched submitted requests:', response.data);
       setSubmittedRequests(response.data);
       
-      // Group requests by unit, filtering out requests without a valid unit
+      // Group requests by unit AND campus, filtering out requests without a valid unit
+      // Store ALL requests grouped by unit+campus (not filtered by year cycle)
+      // Use request.unit and request.campus fields first, then fallback to userId.unit and userId.campus
       const grouped = response.data.reduce((acc, request) => {
-        const unit = request.userId?.unit;
-        if (unit && unit.trim() !== '') {
-          if (!acc[unit]) {
-            acc[unit] = [];
+        // Try request.unit first (set by pre-save hook), then userId.unit (from populated user)
+        const unit = (request.unit && request.unit.trim()) 
+          ? request.unit.trim() 
+          : (request.userId?.unit && request.userId.unit.trim()) 
+            ? request.userId.unit.trim() 
+            : null;
+        
+        // Try request.campus first, then userId.campus, default to 'Main' if empty/null
+        const campus = (request.campus && request.campus.trim()) 
+          ? request.campus.trim() 
+          : (request.userId?.campus && request.userId.campus.trim()) 
+            ? request.userId.campus.trim() 
+            : 'Main';
+        
+        // Normalize campus (empty/null = 'Main')
+        const normalizedCampus = campus || 'Main';
+            
+        if (unit) {
+          // Use unit+campus as the key to separate units by campus
+          const key = `${unit}|||${normalizedCampus}`;
+          if (!acc[key]) {
+            acc[key] = [];
           }
-          acc[unit].push(request);
+          acc[key].push(request);
         }
         return acc;
       }, {});
       
+      // Debug: Log year cycles for each unit
+      Object.keys(grouped).forEach(unit => {
+        const years = grouped[unit].map(r => r.year).filter(Boolean);
+        const uniqueYears = [...new Set(years)];
+        console.log(`Unit ${unit}: ${grouped[unit].length} requests, years:`, uniqueYears);
+      });
+      
+      console.log('All units with requests:', Object.keys(grouped));
+      console.log('Total units:', Object.keys(grouped).length);
       setUnitRequestsGrouped(grouped);
     } catch (error) {
       console.error('Error fetching submitted requests:', error);
@@ -1249,26 +1303,62 @@ const ISSP = () => {
   // Filter requests based on selected year cycle
   const filteredUnitRequestsGrouped = useMemo(() => {
     const filtered = {};
-    Object.keys(unitRequestsGrouped).forEach(unit => {
-      const unitRequests = unitRequestsGrouped[unit].filter(
+    Object.keys(unitRequestsGrouped).forEach(unitKey => {
+      const unitRequests = unitRequestsGrouped[unitKey].filter(
         request => request.year === selectedYearCycle
       );
       if (unitRequests.length > 0) {
-        filtered[unit] = unitRequests;
+        filtered[unitKey] = unitRequests;
       }
     });
     return filtered;
   }, [unitRequestsGrouped, selectedYearCycle]);
 
   // Process units for table display with search, filter, and pagination
+  // Show ALL units, not just those with requests for the selected year cycle
   const processedUnits = useMemo(() => {
-    const units = Object.keys(filteredUnitRequestsGrouped).map(unitName => {
-      const requests = filteredUnitRequestsGrouped[unitName];
-      const firstRequest = requests[0];
-      const campus = firstRequest?.userId?.campus || 'N/A';
+    // Get all unit+campus keys from unitRequestsGrouped (all year cycles)
+    const allUnitKeys = Object.keys(unitRequestsGrouped);
+    
+    const units = allUnitKeys.map(unitKey => {
+      // Parse unit and campus from the key (format: "unit|||campus")
+      const [unitName, campus] = unitKey.split('|||');
+      
+      // Get all requests for this unit+campus (all year cycles)
+      const allUnitRequests = unitRequestsGrouped[unitKey] || [];
+      
+      // Filter requests for the selected year cycle (trim and normalize for comparison)
+      const requestsForSelectedCycle = allUnitRequests.filter(request => {
+        const requestYear = request.year ? String(request.year).trim() : '';
+        const selectedYear = String(selectedYearCycle).trim();
+        const matches = requestYear === selectedYear;
+        
+        // Debug logging for first unit to help diagnose
+        if (unitName === 'BSBA' && allUnitRequests.length > 0 && allUnitRequests.indexOf(request) === 0) {
+          console.log(`[DEBUG BSBA] Total requests: ${allUnitRequests.length}`);
+          console.log(`[DEBUG BSBA] Request year: "${requestYear}", Selected: "${selectedYear}", Matches: ${matches}`);
+          console.log(`[DEBUG BSBA] All request years:`, allUnitRequests.map(r => r.year));
+        }
+        
+        return matches;
+      });
+      
+      // Count only requests that have items (not empty requests)
+      const requestsWithItemsForCycle = requestsForSelectedCycle.filter(request => {
+        const items = request.items && Array.isArray(request.items) ? request.items : [];
+        return items.length > 0;
+      });
+      
+      // Use requests for selected cycle if available, otherwise use all requests
+      const requestsToUse = requestsForSelectedCycle.length > 0 
+        ? requestsForSelectedCycle 
+        : allUnitRequests;
+      
+      // Normalize campus display (empty/null = 'Main')
+      const normalizedCampus = (campus && campus.trim()) || 'Main';
       
       // Prioritize resubmitted requests, then sort by most recent
-      const sortedRequests = requests.sort((a, b) => {
+      const sortedRequests = requestsToUse.sort((a, b) => {
         const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
         const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
         if (aResubmitted && !bResubmitted) return -1;
@@ -1280,27 +1370,42 @@ const ISSP = () => {
       const lastUpdated = latestRequest ? (latestRequest.revisedAt || latestRequest.updatedAt || latestRequest.createdAt) : null;
       
       // Determine status - prioritize resubmitted, then use actual status
-      let status = 'Complete';
-      if (latestRequest) {
-        if (latestRequest.status === 'resubmitted' || latestRequest.revisionStatus === 'resubmitted') {
+      // Use the latest request from selected cycle if available, otherwise from all requests
+      const statusRequest = requestsForSelectedCycle.length > 0 
+        ? requestsForSelectedCycle.sort((a, b) => {
+            const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
+            const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
+            if (aResubmitted && !bResubmitted) return -1;
+            if (!aResubmitted && bResubmitted) return 1;
+            return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+          })[0] || latestRequest
+        : latestRequest;
+      
+      let status = 'No Request';
+      if (statusRequest) {
+        if (statusRequest.status === 'resubmitted' || statusRequest.revisionStatus === 'resubmitted') {
           status = 'Resubmitted';
-        } else if (latestRequest.status === 'submitted') {
+        } else if (statusRequest.status === 'submitted') {
           status = 'Submitted';
-        } else if (latestRequest.status === 'approved') {
+        } else if (statusRequest.status === 'approved') {
           status = 'Approved';
-        } else if (latestRequest.status === 'rejected') {
+        } else if (statusRequest.status === 'rejected') {
           status = 'Rejected';
         } else {
-          status = latestRequest.status.charAt(0).toUpperCase() + latestRequest.status.slice(1);
+          status = statusRequest.status ? statusRequest.status.charAt(0).toUpperCase() + statusRequest.status.slice(1) : 'No Request';
         }
       }
+      
+      // Count requests with items for the selected cycle
+      const requestCount = requestsWithItemsForCycle.length;
       
       return {
         unitName,
         campus,
-        requestCount: requests.length,
+        requestCount: requestCount, // Show count of requests with items for selected cycle
         lastUpdated,
-        status
+        status,
+        hasRequestsForSelectedCycle: requestsForSelectedCycle.length > 0
       };
     });
 
@@ -1322,11 +1427,18 @@ const ISSP = () => {
       );
     }
 
-    // Sort alphabetically by unit name
-    filtered.sort((a, b) => a.unitName.localeCompare(b.unitName));
+    // Filter out units that don't have requests for the selected year cycle
+    const unitsWithRequestsForCycle = filtered.filter(unit => unit.hasRequestsForSelectedCycle);
+    
+    // Sort alphabetically by unit name, then by campus
+    unitsWithRequestsForCycle.sort((a, b) => {
+      const unitCompare = a.unitName.localeCompare(b.unitName);
+      if (unitCompare !== 0) return unitCompare;
+      return a.campus.localeCompare(b.campus);
+    });
 
-    return filtered;
-  }, [filteredUnitRequestsGrouped, unitSearchQuery, unitStatusFilter]);
+    return unitsWithRequestsForCycle;
+  }, [unitRequestsGrouped, selectedYearCycle, unitSearchQuery, unitStatusFilter]);
 
   // Calculate summary statistics
   const unitSummaryStats = useMemo(() => {
@@ -1384,7 +1496,9 @@ const ISSP = () => {
   }, [showAlert]);
 
   // Handle viewing unit request details (inline view, not modal)
-  const handleViewUnitRequest = useCallback(async (unitName) => {
+  const handleViewUnitRequest = useCallback(async (unitKey) => {
+    // Parse unit and campus from the key (format: "unit|||campus")
+    const [unitName, campus] = unitKey.split('|||');
     try {
       const token = localStorage.getItem('token');
       if (!token) {
@@ -1396,10 +1510,16 @@ const ISSP = () => {
         return;
       }
 
-      // Get requests for this unit from the grouped data
-      const unitRequests = filteredUnitRequestsGrouped[unitName] || [];
+      // Get ALL requests for this unit+campus from the grouped data (all year cycles)
+      // Use the full key (unit|||campus) to get the correct requests
+      const allUnitRequests = unitRequestsGrouped[unitKey] || [];
       
-      if (unitRequests.length === 0) {
+      // Filter requests for the selected year cycle
+      const unitRequests = allUnitRequests.filter(
+        request => request.year === selectedYearCycle
+      );
+      
+      if (allUnitRequests.length === 0) {
         showAlert({
           variant: 'default',
           title: 'No Requests',
@@ -1407,19 +1527,317 @@ const ISSP = () => {
         });
         return;
       }
+      
+      if (unitRequests.length === 0) {
+        showAlert({
+          variant: 'default',
+          title: 'No Requests for Selected Year Cycle',
+          message: `${unitName} has ${allUnitRequests.length} request(s), but none for ${selectedYearCycle}. Please select a different year cycle.`
+        });
+        return;
+      }
 
-      // Prioritize resubmitted requests, then sort by most recent
-      const selectedRequest = unitRequests.sort((a, b) => {
-        // First, prioritize resubmitted requests
-        const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
-        const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
-        if (aResubmitted && !bResubmitted) return -1;
-        if (!aResubmitted && bResubmitted) return 1;
-        // Then sort by most recent
-        return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
-      })[0];
+      // Fetch full details for ALL requests from this unit
+      try {
+        console.log(`Fetching details for ${unitRequests.length} requests for unit: ${unitName}`);
+        
+        const allRequestsData = await Promise.all(
+          unitRequests.map(async (request) => {
+            try {
+              const response = await axios.get(API_ENDPOINTS.admin.getRequest(request._id), {
+                headers: { 'x-auth-token': token }
+              });
+              const requestData = response.data;
+              console.log(`Request ${request._id} (${request.requestTitle || request.title || 'Untitled'}):`, {
+                totalItems: requestData.items?.length || 0,
+                items: requestData.items,
+                hasItems: !!requestData.items,
+                itemsIsArray: Array.isArray(requestData.items)
+              });
+              // Ensure items is always an array
+              if (!Array.isArray(requestData.items)) {
+                console.warn(`Request ${request._id} items is not an array:`, requestData.items);
+                requestData.items = request.items && Array.isArray(request.items) ? request.items : [];
+              }
+              return requestData;
+            } catch (error) {
+              console.error(`Error fetching request ${request._id}:`, error);
+              console.log(`Using cached request data for ${request._id}, items count:`, request.items?.length || 0);
+              // Ensure cached request has items as array
+              const fallbackRequest = {
+                ...request,
+                items: request.items && Array.isArray(request.items) ? request.items : []
+              };
+              return fallbackRequest;
+            }
+          })
+        );
 
-      setSelectedUnitRequest(selectedRequest);
+        // Filter out requests with no items, then combine all items from remaining requests - FILTER TO ONLY PENDING ITEMS
+        const requestsWithItems = allRequestsData.filter(request => {
+          const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
+          return requestItems.length > 0;
+        });
+
+        const allItems = [];
+        requestsWithItems.forEach((request, index) => {
+          const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
+          console.log(`Request ${index + 1} (${request.requestTitle || request.title || request._id}):`, {
+            totalItems: requestItems.length,
+            pendingItems: requestItems.filter(item => item.approvalStatus === 'pending' || !item.approvalStatus).length,
+            allStatuses: requestItems.map(item => item.approvalStatus || 'no status')
+          });
+          
+          requestItems.forEach(item => {
+            // Only include items with pending approval status
+            if (item.approvalStatus === 'pending' || !item.approvalStatus) {
+              allItems.push({
+                ...item,
+                requestId: request._id,
+                requestTitle: request.requestTitle || request.title,
+                requestYear: request.year,
+                requestStatus: request.status,
+                requestCreatedAt: request.createdAt,
+                requestUpdatedAt: request.updatedAt
+              });
+            }
+          });
+        });
+        
+        // Combine items with the same name and specification
+        // Group by item name + specification (if specifications differ, keep separate)
+        const itemGroups = {};
+        allItems.forEach(item => {
+          const itemName = (item.item || '').trim().toLowerCase();
+          const specification = (item.specification || '').trim();
+          // Create a key from item name and specification
+          const groupKey = `${itemName}|||${specification}`;
+          
+          if (!itemGroups[groupKey]) {
+            itemGroups[groupKey] = {
+              item: item.item, // Keep original casing
+              specification: item.specification || '',
+              range: item.range || 'mid',
+              price: item.price || 0,
+              approvalStatus: item.approvalStatus || 'pending',
+              approvalReason: item.approvalReason || '',
+              purpose: item.purpose || '',
+              quantityByYear: {},
+              requestIds: new Set(), // Track which requests this combined item comes from
+              requestTitles: new Set(), // Track request titles
+              // Keep the first item's other properties as base
+              id: item.id || `combined-${Date.now()}`,
+              itemStatus: item.itemStatus,
+              itemStatusRemarks: item.itemStatusRemarks,
+              itemStatusUpdatedAt: item.itemStatusUpdatedAt
+            };
+          }
+          
+          // Add this item's request info
+          itemGroups[groupKey].requestIds.add(item.requestId);
+          if (item.requestTitle) {
+            itemGroups[groupKey].requestTitles.add(item.requestTitle);
+          }
+          
+          // Sum up quantities by year
+          const existingQtyByYear = itemGroups[groupKey].quantityByYear;
+          const itemQtyByYear = item.quantityByYear || {};
+          
+          // If item has quantityByYear, sum them up
+          if (itemQtyByYear && typeof itemQtyByYear === 'object' && Object.keys(itemQtyByYear).length > 0) {
+            Object.keys(itemQtyByYear).forEach(year => {
+              const yearNum = parseInt(year, 10);
+              const yearStr = yearNum.toString();
+              const quantity = Number(itemQtyByYear[year]) || 0;
+              
+              // Use yearStr as key for consistency
+              if (!existingQtyByYear[yearStr]) {
+                existingQtyByYear[yearStr] = 0;
+              }
+              existingQtyByYear[yearStr] += quantity;
+            });
+          } else if (item.quantity) {
+            // Fallback: if no quantityByYear, distribute total quantity to first year
+            // This is a fallback for old items without year-by-year data
+            const firstYear = selectedYearCycle ? selectedYearCycle.split('-')[0] : '2024';
+            if (!existingQtyByYear[firstYear]) {
+              existingQtyByYear[firstYear] = 0;
+            }
+            existingQtyByYear[firstYear] += Number(item.quantity) || 0;
+          }
+          
+          // Use the highest price if multiple items have prices
+          if (item.price && item.price > 0) {
+            if (!itemGroups[groupKey].price || item.price > itemGroups[groupKey].price) {
+              itemGroups[groupKey].price = item.price;
+            }
+          }
+        });
+        
+        // Convert grouped items back to array
+        const combinedItems = Object.values(itemGroups).map(group => ({
+          ...group,
+          requestId: Array.from(group.requestIds)[0], // Use first request ID for reference
+          requestTitle: Array.from(group.requestTitles).join(', '), // Combine request titles
+          quantityByYear: group.quantityByYear,
+          // Calculate total quantity from quantityByYear
+          quantity: Object.values(group.quantityByYear).reduce((sum, qty) => sum + (Number(qty) || 0), 0)
+        }));
+        
+        console.log(`Combined ${allItems.length} items into ${combinedItems.length} unique items`);
+
+        console.log(`=== SUMMARY for ${unitName} ===`);
+        console.log(`Total requests fetched: ${allRequestsData.length}`);
+        console.log(`Requests with items: ${requestsWithItems.length}`);
+        console.log(`Total pending items before combining: ${allItems.length}`);
+        console.log(`Total items after combining: ${combinedItems.length}`);
+        console.log(`Combined items:`, combinedItems);
+
+        // Get the first request with items as base (for userId, unit info, etc.)
+        const baseRequest = requestsWithItems[0] || allRequestsData[0];
+        
+        // Ensure unit is set on the combined request (use request.unit or userId.unit)
+        const unitForRequest = (baseRequest.unit && baseRequest.unit.trim()) 
+          ? baseRequest.unit.trim() 
+          : (baseRequest.userId?.unit && baseRequest.userId.unit.trim()) 
+            ? baseRequest.userId.unit.trim() 
+            : unitName;
+        
+        // Create a combined request object with combined items
+        const combinedRequest = {
+          ...baseRequest,
+          _id: `combined-${unitName}-${selectedYearCycle}`, // Combined ID
+          unit: unitForRequest, // Ensure unit is set
+          items: combinedItems, // Use combined items instead of allItems
+          requestCount: requestsWithItems.length,
+          allRequests: requestsWithItems // Keep reference only to requests with items
+        };
+
+        // Use the combined request data with all items
+        setSelectedUnitRequest(combinedRequest);
+        // Reset to first page when viewing new unit
+        setItemsCurrentPage(1);
+        // Reset editing states
+        setPendingPriceEdits({});
+        setPendingSpecificationEdits({});
+      } catch (fetchError) {
+        console.error('Error fetching request details:', fetchError);
+        // Fallback: filter out requests with no items, then combine items from cached requests - FILTER TO ONLY PENDING ITEMS
+        // Use allUnitRequests for fallback, but still filter by selected year cycle
+        const fallbackRequests = allUnitRequests.filter(
+          request => request.year === selectedYearCycle
+        );
+        const requestsWithItems = fallbackRequests.filter(request => {
+          const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
+          return requestItems.length > 0;
+        });
+        
+        const allItems = [];
+        requestsWithItems.forEach(request => {
+          if (request.items && Array.isArray(request.items)) {
+            request.items.forEach(item => {
+              // Only include items with pending approval status
+              if (item.approvalStatus === 'pending' || !item.approvalStatus) {
+                allItems.push({
+                  ...item,
+                  requestId: request._id,
+                  requestTitle: request.requestTitle || request.title,
+                  requestYear: request.year,
+                  requestStatus: request.status
+                });
+              }
+            });
+          }
+        });
+
+        const baseRequest = requestsWithItems[0] || fallbackRequests[0] || allUnitRequests[0];
+        
+        // Ensure unit is set on the combined request (use request.unit or userId.unit)
+        const unitForRequest = (baseRequest.unit && baseRequest.unit.trim()) 
+          ? baseRequest.unit.trim() 
+          : (baseRequest.userId?.unit && baseRequest.userId.unit.trim()) 
+            ? baseRequest.userId.unit.trim() 
+            : unitName;
+        
+        // Combine items with the same name and specification (same logic as main path)
+        const fallbackItemGroups = {};
+        allItems.forEach(item => {
+          const itemName = (item.item || '').trim().toLowerCase();
+          const specification = (item.specification || '').trim();
+          const groupKey = `${itemName}|||${specification}`;
+          
+          if (!fallbackItemGroups[groupKey]) {
+            fallbackItemGroups[groupKey] = {
+              item: item.item,
+              specification: item.specification || '',
+              range: item.range || 'mid',
+              price: item.price || 0,
+              approvalStatus: item.approvalStatus || 'pending',
+              approvalReason: item.approvalReason || '',
+              purpose: item.purpose || '',
+              quantityByYear: {},
+              requestIds: new Set(),
+              requestTitles: new Set(),
+              id: item.id || `combined-${Date.now()}`,
+              itemStatus: item.itemStatus,
+              itemStatusRemarks: item.itemStatusRemarks,
+              itemStatusUpdatedAt: item.itemStatusUpdatedAt
+            };
+          }
+          
+          fallbackItemGroups[groupKey].requestIds.add(item.requestId);
+          if (item.requestTitle) {
+            fallbackItemGroups[groupKey].requestTitles.add(item.requestTitle);
+          }
+          
+          const existingQtyByYear = fallbackItemGroups[groupKey].quantityByYear;
+          const itemQtyByYear = item.quantityByYear || {};
+          
+          if (itemQtyByYear && typeof itemQtyByYear === 'object' && Object.keys(itemQtyByYear).length > 0) {
+            Object.keys(itemQtyByYear).forEach(year => {
+              const yearNum = parseInt(year, 10);
+              const yearStr = yearNum.toString();
+              const quantity = Number(itemQtyByYear[year]) || 0;
+              
+              if (!existingQtyByYear[yearStr]) {
+                existingQtyByYear[yearStr] = 0;
+              }
+              existingQtyByYear[yearStr] += quantity;
+            });
+          } else if (item.quantity) {
+            const firstYear = selectedYearCycle ? selectedYearCycle.split('-')[0] : '2024';
+            if (!existingQtyByYear[firstYear]) {
+              existingQtyByYear[firstYear] = 0;
+            }
+            existingQtyByYear[firstYear] += Number(item.quantity) || 0;
+          }
+          
+          if (item.price && item.price > 0) {
+            if (!fallbackItemGroups[groupKey].price || item.price > fallbackItemGroups[groupKey].price) {
+              fallbackItemGroups[groupKey].price = item.price;
+            }
+          }
+        });
+        
+        const fallbackCombinedItems = Object.values(fallbackItemGroups).map(group => ({
+          ...group,
+          requestId: Array.from(group.requestIds)[0],
+          requestTitle: Array.from(group.requestTitles).join(', '),
+          quantityByYear: group.quantityByYear,
+          quantity: Object.values(group.quantityByYear).reduce((sum, qty) => sum + (Number(qty) || 0), 0)
+        }));
+        
+        const combinedRequest = {
+          ...baseRequest,
+          _id: `combined-${unitName}-${selectedYearCycle}`,
+          unit: unitForRequest, // Ensure unit is set
+          items: fallbackCombinedItems, // Use combined items instead of allItems
+          requestCount: requestsWithItems.length,
+          allRequests: requestsWithItems
+        };
+        
+        setSelectedUnitRequest(combinedRequest);
+      }
     } catch (error) {
       console.error('Error viewing unit request:', error);
       showAlert({
@@ -1428,7 +1846,7 @@ const ISSP = () => {
         message: error.response?.data?.message || error.message || 'Failed to load request details.'
       });
     }
-  }, [filteredUnitRequestsGrouped, showAlert]);
+  }, [unitRequestsGrouped, selectedYearCycle, showAlert]);
 
   const handleUpdateDictStatus = useCallback(async () => {
     if (!selectedUnitRequest || !dictStatusForm.status) {
@@ -1524,7 +1942,8 @@ const ISSP = () => {
         API_ENDPOINTS.issp.dictApproval(isspData._id),
         {
           status: dictStatusForm.status,
-          notes: dictStatusForm.notes || ''
+          notes: dictStatusForm.notes || '',
+          yearCycle: selectedYearCycle
         },
         {
           headers: { 'x-auth-token': token }
@@ -1630,7 +2049,7 @@ const ISSP = () => {
     }));
   };
 
-  const handleDeleteItem = useCallback(async (itemId, requestId, itemName) => {
+  const handleDeleteItem = useCallback(async (itemId, requestId, itemName, unitName = null) => {
     // Show confirmation modal
     openModal({
       variant: 'danger',
@@ -1662,9 +2081,6 @@ const ISSP = () => {
           
           console.log('Delete response:', response.data);
 
-          // Update the selected request
-          setSelectedUnitRequest(response.data.request);
-
           // Update in grouped requests
           setUnitRequestsGrouped(prev => {
             const updated = { ...prev };
@@ -1675,6 +2091,35 @@ const ISSP = () => {
             });
             return updated;
           });
+
+          // Refresh the unit request view to get updated data
+          // Find the unit name and campus from selectedUnitRequest
+          const unitNameToRefresh = selectedUnitRequest.userId?.unit || 
+                                    selectedUnitRequest.unit || 
+                                    unitName;
+          const campusToRefresh = selectedUnitRequest.campus || 
+                                  selectedUnitRequest.userId?.campus || 
+                                  'Main';
+          
+          // Re-fetch the unit request view if we have a unit name
+          if (unitNameToRefresh) {
+            // Call handleViewUnitRequest to refresh the view (use unit+campus key)
+            setTimeout(() => {
+              handleViewUnitRequest(`${unitNameToRefresh}|||${campusToRefresh}`);
+            }, 300);
+          } else {
+            // Fallback: manually update selectedUnitRequest by removing the deleted item
+            setSelectedUnitRequest(prev => {
+              if (!prev || !prev.items) return prev;
+              const updatedItems = prev.items.filter(item => 
+                !(item.id === itemId && item.requestId === requestId)
+              );
+              return {
+                ...prev,
+                items: updatedItems
+              };
+            });
+          }
 
           closeModal();
           showAlert({
@@ -1695,7 +2140,7 @@ const ISSP = () => {
       },
       onClose: () => closeModal()
     });
-  }, [openModal, showAlert, closeModal]);
+  }, [openModal, showAlert, closeModal, filteredUnitRequestsGrouped, handleViewUnitRequest, selectedUnitRequest]);
 
   const updateItemPrice = async (itemId, requestId, price) => {
     try {
@@ -1751,12 +2196,30 @@ const ISSP = () => {
         return updated;
       });
 
+      // Update the item in selectedUnitRequest state (for Request Details view)
+      if (selectedUnitRequest) {
+        setSelectedUnitRequest(prev => {
+          if (!prev || !prev.items) return prev;
+          return {
+            ...prev,
+            items: prev.items.map(item =>
+              item.id === itemId && item.requestId === requestId
+                ? { ...item, price: priceNum }
+                : item
+            )
+          };
+        });
+      }
+
       // Clear the editing state
       setEditingPrices(prev => {
         const newState = { ...prev };
         delete newState[`${requestId}-${itemId}`];
         return newState;
       });
+
+      // Clear inline editing state (if using old method)
+      // Note: This is now handled by pendingPriceEdits state
 
       showAlert({
         variant: 'success',
@@ -1940,6 +2403,137 @@ useEffect(() => {
     };
   }, []);
 
+  // Recalculate SUMMARY OF INVESTMENTS when year cycle changes or submittedRequests loads (if viewing DEVELOPMENT section)
+  useEffect(() => {
+    if (selectedItem?.title === "DEVELOPMENT AND INVESTMENT PROGRAM" && submittedRequests.length > 0) {
+      // Only recalculate if there's no saved data (to avoid overwriting manual edits)
+      // Check if current data has meaningful content (excluding totals, empty rows, and placeholder data)
+      const currentData = devSummaryInvestments;
+      const hasSavedData = currentData.some(row => {
+        const item = row.item?.toString().trim() || '';
+        // Ignore placeholder/sample data
+        if (item.toUpperCase().includes('SAMPLE') || item.toUpperCase().includes('UPDATE') || item === '') {
+          return false;
+        }
+        // Must have actual data and not be TOTAL
+        return item.toUpperCase() !== 'TOTAL' &&
+               (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost);
+      });
+      
+      console.log('[SUMMARY] Recalculation trigger - hasSavedData:', hasSavedData, 'submittedRequests.length:', submittedRequests.length);
+      
+      if (!hasSavedData) {
+        console.log('[SUMMARY] Recalculating for year cycle:', selectedYearCycle);
+        // Reuse the same logic from fetchFullISSPData
+        const cycleYears = getYearsFromCycle(selectedYearCycle);
+        const itemGroups = {};
+        
+        // Filter requests for selected year cycle
+        const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
+        
+        requestsForCycle.forEach(request => {
+          if (request.items && Array.isArray(request.items)) {
+            request.items.forEach(item => {
+              if (item.item && item.item.trim() !== '') {
+                const itemName = item.item.trim().toLowerCase();
+                
+                if (!itemGroups[itemName]) {
+                  itemGroups[itemName] = {
+                    quantities: {},
+                    costs: {}
+                  };
+                  cycleYears.forEach(year => {
+                    itemGroups[itemName].quantities[year] = 0;
+                    itemGroups[itemName].costs[year] = 0;
+                  });
+                }
+                
+                const quantityByYear = item.quantityByYear || {};
+                const adminPrice = Number(item.price) || 0;
+                
+                // Sum quantities and costs by year (cost = quantity × admin-set price)
+                cycleYears.forEach(year => {
+                  const yearKey = year.toString();
+                  const qty = Number(quantityByYear[yearKey]) || 0;
+                  itemGroups[itemName].quantities[year] += qty;
+                  // Calculate cost for this item instance: quantity × admin-set price
+                  itemGroups[itemName].costs[year] += qty * adminPrice;
+                });
+              }
+            });
+          }
+        });
+        
+        const summaryRows = [];
+        const sortedItemNames = Object.keys(itemGroups).sort();
+        
+        sortedItemNames.forEach(itemNameKey => {
+          const itemData = itemGroups[itemNameKey];
+          const hasQuantities = cycleYears.some(year => itemData.quantities[year] > 0);
+          if (!hasQuantities) return;
+          
+          const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+          
+          // Get quantities and costs (already calculated per year)
+          const year1Qty = itemData.quantities[cycleYears[0]] || 0;
+          const year1Cost = itemData.costs[cycleYears[0]] || 0;
+          const year2Qty = itemData.quantities[cycleYears[1]] || 0;
+          const year2Cost = itemData.costs[cycleYears[1]] || 0;
+          const year3Qty = itemData.quantities[cycleYears[2]] || 0;
+          const year3Cost = itemData.costs[cycleYears[2]] || 0;
+          
+          summaryRows.push({
+            item: displayItemName,
+            year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+            year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+            year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+            year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+            year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+            year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+          });
+        });
+        
+        let totalYear1Physical = 0, totalYear1Cost = 0;
+        let totalYear2Physical = 0, totalYear2Cost = 0;
+        let totalYear3Physical = 0, totalYear3Cost = 0;
+        
+        summaryRows.forEach(row => {
+          totalYear1Physical += Number(row.year1Physical) || 0;
+          totalYear1Cost += Number(row.year1Cost) || 0;
+          totalYear2Physical += Number(row.year2Physical) || 0;
+          totalYear2Cost += Number(row.year2Cost) || 0;
+          totalYear3Physical += Number(row.year3Physical) || 0;
+          totalYear3Cost += Number(row.year3Cost) || 0;
+        });
+        
+        summaryRows.push({
+          item: 'TOTAL',
+          year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+          year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+          year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+          year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+          year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+          year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
+          isTotalRow: true
+        });
+        
+        if (summaryRows.length > 0) {
+          const normalizedSummary = normalizeDevSummaryRows(summaryRows);
+          setDevSummaryInvestments(normalizedSummary);
+          console.log('[SUMMARY] Recalculated and set', summaryRows.length, 'items');
+          console.log('[SUMMARY] First few items:', summaryRows.slice(0, 3).map(r => ({ item: r.item, y1qty: r.year1Physical, y1cost: r.year1Cost })));
+        } else {
+          console.log('[SUMMARY] No items found for recalculation - requestsForCycle.length:', requestsForCycle.length);
+          if (requestsForCycle.length > 0) {
+            console.log('[SUMMARY] Sample request items:', requestsForCycle[0]?.items?.slice(0, 2));
+          }
+        }
+      } else {
+        console.log('[SUMMARY] Skipping recalculation - has saved data');
+      }
+    }
+  }, [selectedYearCycle, selectedItem, submittedRequests]);
+
   // Fetch full ISSP data when a section is selected
   useEffect(() => {
     const fetchFullISSPData = async () => {
@@ -2006,26 +2600,122 @@ useEffect(() => {
                                 resource.pageA.deploymentData.some(row => row.item && row.item.trim() !== '');
             
             if (!hasSavedData && submittedRequests.length > 0) {
-              // Collect all items from all submitted requests
-              const itemsFromRequests = [];
-              submittedRequests.forEach(request => {
-                const unitName = request.userId?.unit || 'N/A';
+              // Group items by name (case-insensitive) and campus, matching PDF format
+              const cycleYears = getYearsFromCycle(selectedYearCycle);
+              const itemGroups = {};
+              
+              // Filter requests for selected year cycle
+              const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
+              
+              requestsForCycle.forEach(request => {
+                const userCampus = request.userId?.campus || '';
+                // Identify Main Campus: empty, null, or undefined campus field
+                const campus = (!userCampus || userCampus.trim() === '') ? 'DOrSU Main Campus' : userCampus;
+                
                 if (request.items && Array.isArray(request.items)) {
                   request.items.forEach(item => {
                     if (item.item && item.item.trim() !== '') {
-                      itemsFromRequests.push({
-                        item: item.item,
-                        office: unitName,
-                        year1: '',
-                        year2: '',
-                        year3: ''
+                      // Normalize item name to lowercase for grouping
+                      const itemName = item.item.trim().toLowerCase();
+                      
+                      // Initialize item group if not exists
+                      if (!itemGroups[itemName]) {
+                        itemGroups[itemName] = {};
+                      }
+                      
+                      // Initialize campus group if not exists
+                      if (!itemGroups[itemName][campus]) {
+                        itemGroups[itemName][campus] = {};
+                        cycleYears.forEach(year => {
+                          itemGroups[itemName][campus][year] = 0;
+                        });
+                      }
+                      
+                      // Sum quantities by year from quantityByYear
+                      const quantityByYear = item.quantityByYear || {};
+                      cycleYears.forEach(year => {
+                        const yearKey = year.toString();
+                        const qty = Number(quantityByYear[yearKey]) || 0;
+                        itemGroups[itemName][campus][year] += qty;
                       });
                     }
                   });
                 }
               });
               
-              // Populate the table with items from requests
+              // Convert grouped data to table format (matching PDF)
+              const itemsFromRequests = [];
+              
+              // Sort item names alphabetically
+              const sortedItemNames = Object.keys(itemGroups).sort();
+              
+              sortedItemNames.forEach(itemNameKey => {
+                const campusData = itemGroups[itemNameKey];
+                
+                // Filter out campuses with 0 quantities across all years
+                const campusesWithData = Object.keys(campusData).filter(campus => {
+                  return cycleYears.some(year => campusData[campus][year] > 0);
+                });
+                
+                // Sort campuses: Main Campus first, then others alphabetically
+                campusesWithData.sort((a, b) => {
+                  if (a === 'DOrSU Main Campus') return -1;
+                  if (b === 'DOrSU Main Campus') return 1;
+                  return a.localeCompare(b);
+                });
+                
+                // Capitalize first letter for display
+                const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+                
+                // Add item header row
+                itemsFromRequests.push({
+                  item: displayItemName,
+                  office: '',
+                  year1: '',
+                  year2: '',
+                  year3: '',
+                  isItemHeader: true
+                });
+                
+                // Add campus rows
+                let itemTotal = {};
+                cycleYears.forEach(year => {
+                  itemTotal[year] = 0;
+                });
+                
+                campusesWithData.forEach(campus => {
+                  const yearValues = cycleYears.map(year => {
+                    const qty = campusData[campus][year] || 0;
+                    itemTotal[year] += qty;
+                    return qty > 0 ? qty.toString() : '';
+                  });
+                  
+                  itemsFromRequests.push({
+                    item: '',
+                    office: campus,
+                    year1: yearValues[0] || '',
+                    year2: yearValues[1] || '',
+                    year3: yearValues[2] || ''
+                  });
+                });
+                
+                // Add item total row
+                const itemTotalValues = cycleYears.map(year => {
+                  const total = itemTotal[year] || 0;
+                  return total > 0 ? total.toString() : '';
+                });
+                
+                itemsFromRequests.push({
+                  item: 'TOTAL',
+                  office: '',
+                  year1: itemTotalValues[0] || '',
+                  year2: itemTotalValues[1] || '',
+                  year3: itemTotalValues[2] || '',
+                  isTotalRow: true
+                });
+              });
+              
+              // Populate the table with grouped items
               if (itemsFromRequests.length > 0) {
                 const populatedData = [...itemsFromRequests];
                 // Fill remaining rows with empty data
@@ -2089,9 +2779,273 @@ useEffect(() => {
               normalizeDevProjectSchedule(development.pageA?.isSchedule || [])
             );
 
-            setDevSummaryInvestments(
-              normalizeDevSummaryRows(development.pageB?.summaryInvestments || [])
-            );
+            // Auto-populate SUMMARY OF INVESTMENTS from submitted requests if no saved data
+            let summaryData = normalizeDevSummaryRows(development.pageB?.summaryInvestments || []);
+            
+            // Check if there's real saved data (not placeholder/sample data)
+            const hasSavedSummaryData = development.pageB?.summaryInvestments && 
+                                        development.pageB.summaryInvestments.length > 0 &&
+                                        development.pageB.summaryInvestments.some(row => {
+                                          const item = row.item?.toString().trim() || '';
+                                          // Ignore placeholder/sample data
+                                          if (item.toUpperCase().includes('SAMPLE') || item.toUpperCase().includes('UPDATE') || item === '') {
+                                            return false;
+                                          }
+                                          // Must have actual data and not be TOTAL
+                                          return item.toUpperCase() !== 'TOTAL' &&
+                                                 (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost);
+                                        });
+            
+            console.log('[SUMMARY] hasSavedSummaryData:', hasSavedSummaryData);
+            console.log('[SUMMARY] submittedRequests.length:', submittedRequests.length);
+            console.log('[SUMMARY] selectedYearCycle:', selectedYearCycle);
+            console.log('[SUMMARY] Current summaryData length:', summaryData.length);
+            
+            // Always recalculate from submitted requests if we have requests, unless there's real saved data
+            if (!hasSavedSummaryData && submittedRequests.length > 0) {
+              console.log('[SUMMARY] Starting auto-population...');
+              console.log('[SUMMARY] Auto-populating from submitted requests...');
+              // Group items by name (case-insensitive) across all units/campuses
+              const cycleYears = getYearsFromCycle(selectedYearCycle);
+              const itemGroups = {};
+              
+              // Filter requests for selected year cycle
+              const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
+              console.log('[SUMMARY] Requests for cycle', selectedYearCycle + ':', requestsForCycle.length);
+              
+              requestsForCycle.forEach(request => {
+                if (request.items && Array.isArray(request.items)) {
+                  request.items.forEach(item => {
+                    if (item.item && item.item.trim() !== '') {
+                      // Normalize item name to lowercase for grouping
+                      const itemName = item.item.trim().toLowerCase();
+                      
+                      // Initialize item group if not exists
+                      if (!itemGroups[itemName]) {
+                        itemGroups[itemName] = {
+                          quantities: {},
+                          costs: {}
+                        };
+                        cycleYears.forEach(year => {
+                          itemGroups[itemName].quantities[year] = 0;
+                          itemGroups[itemName].costs[year] = 0;
+                        });
+                      }
+                      
+                      // Sum quantities and costs by year (cost = quantity × admin-set price)
+                      const quantityByYear = item.quantityByYear || {};
+                      const adminPrice = Number(item.price) || 0;
+                      
+                      cycleYears.forEach(year => {
+                        const yearKey = year.toString();
+                        const qty = Number(quantityByYear[yearKey]) || 0;
+                        itemGroups[itemName].quantities[year] += qty;
+                        // Calculate cost for this item instance: quantity × admin-set price
+                        itemGroups[itemName].costs[year] += qty * adminPrice;
+                      });
+                    }
+                  });
+                }
+              });
+              
+              console.log('[SUMMARY] Item groups found:', Object.keys(itemGroups).length);
+              
+              // Convert grouped data to table format
+              const summaryRows = [];
+              
+              // Sort item names alphabetically
+              const sortedItemNames = Object.keys(itemGroups).sort();
+              
+              sortedItemNames.forEach(itemNameKey => {
+                const itemData = itemGroups[itemNameKey];
+                
+                // Skip items with no quantities
+                const hasQuantities = cycleYears.some(year => itemData.quantities[year] > 0);
+                if (!hasQuantities) {
+                  console.log('[SUMMARY] Skipping', itemNameKey, '- no quantities');
+                  return;
+                }
+                
+                console.log('[SUMMARY] Processing item:', itemNameKey, 'quantities:', itemData.quantities, 'costs:', itemData.costs);
+                
+                // Capitalize first letter for display
+                const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+                
+                // Get quantities and costs (already calculated per year)
+                const year1Qty = itemData.quantities[cycleYears[0]] || 0;
+                const year1Cost = itemData.costs[cycleYears[0]] || 0;
+                
+                const year2Qty = itemData.quantities[cycleYears[1]] || 0;
+                const year2Cost = itemData.costs[cycleYears[1]] || 0;
+                
+                const year3Qty = itemData.quantities[cycleYears[2]] || 0;
+                const year3Cost = itemData.costs[cycleYears[2]] || 0;
+                
+                summaryRows.push({
+                  item: displayItemName,
+                  year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+                  year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+                  year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+                  year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+                  year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+                  year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+                });
+              });
+              
+              // Calculate totals
+              let totalYear1Physical = 0;
+              let totalYear1Cost = 0;
+              let totalYear2Physical = 0;
+              let totalYear2Cost = 0;
+              let totalYear3Physical = 0;
+              let totalYear3Cost = 0;
+              
+              summaryRows.forEach(row => {
+                totalYear1Physical += Number(row.year1Physical) || 0;
+                totalYear1Cost += Number(row.year1Cost) || 0;
+                totalYear2Physical += Number(row.year2Physical) || 0;
+                totalYear2Cost += Number(row.year2Cost) || 0;
+                totalYear3Physical += Number(row.year3Physical) || 0;
+                totalYear3Cost += Number(row.year3Cost) || 0;
+              });
+              
+              // Add totals row
+              summaryRows.push({
+                item: 'TOTAL',
+                year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+                year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+                year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+                year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+                year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+                year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
+                isTotalRow: true
+              });
+              
+              // Normalize and set the data
+              if (summaryRows.length > 0) {
+                const normalizedSummary = normalizeDevSummaryRows(summaryRows);
+                summaryData = normalizedSummary;
+                console.log('[SUMMARY] Populated', summaryRows.length, 'items');
+                console.log('[SUMMARY] First few items:', summaryRows.slice(0, 3).map(r => ({ item: r.item, y1qty: r.year1Physical, y1cost: r.year1Cost })));
+              } else {
+                console.log('[SUMMARY] No items found to populate - requestsForCycle.length:', requestsForCycle.length);
+                if (requestsForCycle.length > 0) {
+                  console.log('[SUMMARY] Sample request items:', requestsForCycle[0]?.items?.slice(0, 2));
+                }
+              }
+            } else {
+              console.log('[SUMMARY] Skipping auto-population - hasSavedSummaryData:', hasSavedSummaryData, 'or no requests');
+            }
+            
+            // If we still have placeholder data and submitted requests, recalculate anyway
+            if (submittedRequests.length > 0) {
+              const hasOnlyPlaceholderData = summaryData.every(row => {
+                const item = row.item?.toString().trim() || '';
+                return item === '' || 
+                       item.toUpperCase().includes('SAMPLE') || 
+                       item.toUpperCase().includes('UPDATE') ||
+                       (!row.year1Physical && !row.year1Cost && !row.year2Physical && !row.year2Cost && !row.year3Physical && !row.year3Cost);
+              });
+              
+              if (hasOnlyPlaceholderData) {
+                console.log('[SUMMARY] Detected only placeholder data, recalculating from submitted requests...');
+                const cycleYears = getYearsFromCycle(selectedYearCycle);
+                const itemGroups = {};
+                
+                const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
+                
+                requestsForCycle.forEach(request => {
+                  if (request.items && Array.isArray(request.items)) {
+                    request.items.forEach(item => {
+                      if (item.item && item.item.trim() !== '') {
+                        const itemName = item.item.trim().toLowerCase();
+                        
+                        if (!itemGroups[itemName]) {
+                          itemGroups[itemName] = {
+                            quantities: {},
+                            costs: {}
+                          };
+                          cycleYears.forEach(year => {
+                            itemGroups[itemName].quantities[year] = 0;
+                            itemGroups[itemName].costs[year] = 0;
+                          });
+                        }
+                        
+                        const quantityByYear = item.quantityByYear || {};
+                        const adminPrice = Number(item.price) || 0;
+                        
+                        cycleYears.forEach(year => {
+                          const yearKey = year.toString();
+                          const qty = Number(quantityByYear[yearKey]) || 0;
+                          itemGroups[itemName].quantities[year] += qty;
+                          itemGroups[itemName].costs[year] += qty * adminPrice;
+                        });
+                      }
+                    });
+                  }
+                });
+                
+                const summaryRows = [];
+                const sortedItemNames = Object.keys(itemGroups).sort();
+                
+                sortedItemNames.forEach(itemNameKey => {
+                  const itemData = itemGroups[itemNameKey];
+                  const hasQuantities = cycleYears.some(year => itemData.quantities[year] > 0);
+                  if (!hasQuantities) return;
+                  
+                  const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+                  
+                  const year1Qty = itemData.quantities[cycleYears[0]] || 0;
+                  const year1Cost = itemData.costs[cycleYears[0]] || 0;
+                  const year2Qty = itemData.quantities[cycleYears[1]] || 0;
+                  const year2Cost = itemData.costs[cycleYears[1]] || 0;
+                  const year3Qty = itemData.quantities[cycleYears[2]] || 0;
+                  const year3Cost = itemData.costs[cycleYears[2]] || 0;
+                  
+                  summaryRows.push({
+                    item: displayItemName,
+                    year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+                    year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+                    year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+                    year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+                    year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+                    year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+                  });
+                });
+                
+                // Calculate totals
+                let totalYear1Physical = 0, totalYear1Cost = 0;
+                let totalYear2Physical = 0, totalYear2Cost = 0;
+                let totalYear3Physical = 0, totalYear3Cost = 0;
+                
+                summaryRows.forEach(row => {
+                  totalYear1Physical += Number(row.year1Physical) || 0;
+                  totalYear1Cost += Number(row.year1Cost) || 0;
+                  totalYear2Physical += Number(row.year2Physical) || 0;
+                  totalYear2Cost += Number(row.year2Cost) || 0;
+                  totalYear3Physical += Number(row.year3Physical) || 0;
+                  totalYear3Cost += Number(row.year3Cost) || 0;
+                });
+                
+                summaryRows.push({
+                  item: 'TOTAL',
+                  year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+                  year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+                  year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+                  year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+                  year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+                  year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
+                  isTotalRow: true
+                });
+                
+                if (summaryRows.length > 0) {
+                  summaryData = normalizeDevSummaryRows(summaryRows);
+                  console.log('[SUMMARY] Recalculated from placeholder data, got', summaryRows.length, 'items');
+                }
+              }
+            }
+
+            setDevSummaryInvestments(summaryData);
 
             setDevCostBreakdown(
               normalizeDevCostRows(development.pageC?.costBreakdown || [])
@@ -2104,7 +3058,7 @@ useEffect(() => {
       }
     };
     fetchFullISSPData();
-  }, [selectedItem]);
+  }, [selectedItem, submittedRequests, selectedYearCycle]);
 
   // Populate Resource Requirements table from submitted requests when section is selected
   useEffect(() => {
@@ -2116,22 +3070,119 @@ useEffect(() => {
       
       // Only populate if table is empty
       if (!hasData) {
-        const itemsFromRequests = [];
-        submittedRequests.forEach(request => {
-          const unitName = request.userId?.unit || 'N/A';
+        // Group items by name (case-insensitive) and campus, matching PDF format
+        const cycleYears = getYearsFromCycle(selectedYearCycle);
+        const itemGroups = {};
+        
+        // Filter requests for selected year cycle
+        const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
+        
+        requestsForCycle.forEach(request => {
+          const userCampus = request.userId?.campus || '';
+          // Identify Main Campus: empty, null, or undefined campus field
+          const campus = (!userCampus || userCampus.trim() === '') ? 'DOrSU Main Campus' : userCampus;
+          
           if (request.items && Array.isArray(request.items)) {
             request.items.forEach(item => {
               if (item.item && item.item.trim() !== '') {
-                itemsFromRequests.push({
-                  item: item.item,
-                  office: unitName,
-                  year1: '',
-                  year2: '',
-                  year3: ''
+                // Normalize item name to lowercase for grouping
+                const itemName = item.item.trim().toLowerCase();
+                
+                // Initialize item group if not exists
+                if (!itemGroups[itemName]) {
+                  itemGroups[itemName] = {};
+                }
+                
+                // Initialize campus group if not exists
+                if (!itemGroups[itemName][campus]) {
+                  itemGroups[itemName][campus] = {};
+                  cycleYears.forEach(year => {
+                    itemGroups[itemName][campus][year] = 0;
+                  });
+                }
+                
+                // Sum quantities by year from quantityByYear
+                const quantityByYear = item.quantityByYear || {};
+                cycleYears.forEach(year => {
+                  const yearKey = year.toString();
+                  const qty = Number(quantityByYear[yearKey]) || 0;
+                  itemGroups[itemName][campus][year] += qty;
                 });
               }
             });
           }
+        });
+        
+        // Convert grouped data to table format (matching PDF)
+        const itemsFromRequests = [];
+        
+        // Sort item names alphabetically
+        const sortedItemNames = Object.keys(itemGroups).sort();
+        
+        sortedItemNames.forEach(itemNameKey => {
+          const campusData = itemGroups[itemNameKey];
+          
+          // Filter out campuses with 0 quantities across all years
+          const campusesWithData = Object.keys(campusData).filter(campus => {
+            return cycleYears.some(year => campusData[campus][year] > 0);
+          });
+          
+          // Sort campuses: Main Campus first, then others alphabetically
+          campusesWithData.sort((a, b) => {
+            if (a === 'DOrSU Main Campus') return -1;
+            if (b === 'DOrSU Main Campus') return 1;
+            return a.localeCompare(b);
+          });
+          
+          // Capitalize first letter for display
+          const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+          
+          // Add item header row
+          itemsFromRequests.push({
+            item: displayItemName,
+            office: '',
+            year1: '',
+            year2: '',
+            year3: '',
+            isItemHeader: true
+          });
+          
+          // Add campus rows
+          let itemTotal = {};
+          cycleYears.forEach(year => {
+            itemTotal[year] = 0;
+          });
+          
+          campusesWithData.forEach(campus => {
+            const yearValues = cycleYears.map(year => {
+              const qty = campusData[campus][year] || 0;
+              itemTotal[year] += qty;
+              return qty > 0 ? qty.toString() : '';
+            });
+            
+            itemsFromRequests.push({
+              item: '',
+              office: campus,
+              year1: yearValues[0] || '',
+              year2: yearValues[1] || '',
+              year3: yearValues[2] || ''
+            });
+          });
+          
+          // Add item total row
+          const itemTotalValues = cycleYears.map(year => {
+            const total = itemTotal[year] || 0;
+            return total > 0 ? total.toString() : '';
+          });
+          
+          itemsFromRequests.push({
+            item: 'TOTAL',
+            office: '',
+            year1: itemTotalValues[0] || '',
+            year2: itemTotalValues[1] || '',
+            year3: itemTotalValues[2] || '',
+            isTotalRow: true
+          });
         });
         
         if (itemsFromRequests.length > 0) {
@@ -2633,8 +3684,13 @@ useEffect(() => {
         );
 
       const cleanedSummary = devSummaryInvestments
-        .map((row) => ({ ...row }))
+        .map((row) => {
+          // Remove isTotalRow flag before saving, but keep the row
+          const { isTotalRow, ...rowData } = row;
+          return rowData;
+        })
         .filter((row) =>
+          // Keep rows that have data (including TOTAL rows if they have data)
           Object.values(row).some((value) => value && value.toString().trim() !== '')
         );
 
@@ -3156,6 +4212,9 @@ useEffect(() => {
                 <button
                   onClick={() => {
                     setSelectedUnitRequest(null);
+                    setItemsCurrentPage(1); // Reset to first page when closing
+                    setPendingPriceEdits({}); // Reset price editing state
+                    setPendingSpecificationEdits({}); // Reset specification editing state
                   }}
                   className="mr-4 text-gray-600 hover:text-gray-900"
                 >
@@ -3182,73 +4241,8 @@ useEffect(() => {
               </button>
             </div>
             
-            {selectedUnitRequest.requestTitle && (
+            {selectedUnitRequest.requestTitle && selectedUnitRequest.requestCount === 1 && (
               <p className="text-sm text-gray-600 mb-4 -mt-4 ml-10">{selectedUnitRequest.requestTitle}</p>
-            )}
-            
-            {/* Revision Status Display */}
-            {(selectedUnitRequest.revisionStatus === 'resubmitted' || selectedUnitRequest.status === 'resubmitted') && (
-              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
-                <div className="flex items-start">
-                  <svg className="w-5 h-5 text-orange-600 mt-0.5 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                  </svg>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-2">
-                      <div>
-                        <span className="text-sm font-semibold text-orange-900">Revised Request Resubmitted</span>
-                        {selectedUnitRequest.revisedAt && (
-                          <span className="ml-3 text-xs text-orange-700">
-                            Resubmitted on: {new Date(selectedUnitRequest.revisedAt).toLocaleString()}
-                          </span>
-                        )}
-                      </div>
-                      <span className="px-3 py-1 text-xs font-semibold rounded-full bg-orange-200 text-orange-900">
-                        RESUBMITTED
-                      </span>
-                    </div>
-                    {selectedUnitRequest.revisionNotes && (
-                      <div className="mt-2 text-sm text-orange-800">
-                        <span className="font-medium">Revision Notes:</span> {selectedUnitRequest.revisionNotes}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {/* DICT Status Display */}
-            {selectedUnitRequest.dictApproval && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-sm font-medium text-blue-900">DICT Approval Status: </span>
-                    <span className={`px-3 py-1 text-sm font-semibold rounded-full ${
-                      selectedUnitRequest.dictApproval.status === 'approved_by_dict' ? 'bg-green-50 text-green-700' :
-                      selectedUnitRequest.dictApproval.status === 'revision_from_dict' ? 'bg-red-50 text-red-700' :
-                      selectedUnitRequest.dictApproval.status === 'approve_for_dict' ? 'bg-yellow-50 text-yellow-700' :
-                      selectedUnitRequest.dictApproval.status === 'collation_compilation' ? 'bg-purple-50 text-purple-700' :
-                      'bg-gray-50 text-gray-700'
-                    }`}>
-                      {selectedUnitRequest.dictApproval.status === 'approved_by_dict' ? 'Approved by DICT' :
-                       selectedUnitRequest.dictApproval.status === 'revision_from_dict' ? 'Revision from DICT' :
-                       selectedUnitRequest.dictApproval.status === 'approve_for_dict' ? 'Approve for DICT' :
-                       selectedUnitRequest.dictApproval.status === 'collation_compilation' ? 'Collation/Compilation' :
-                       'Pending'}
-                    </span>
-                  </div>
-                  {selectedUnitRequest.dictApproval.updatedAt && (
-                    <span className="text-xs text-blue-600">
-                      Updated: {new Date(selectedUnitRequest.dictApproval.updatedAt).toLocaleDateString()}
-                    </span>
-                  )}
-                </div>
-                {selectedUnitRequest.dictApproval.notes && (
-                  <div className="mt-2 text-sm text-blue-800">
-                    <span className="font-medium">Notes:</span> {selectedUnitRequest.dictApproval.notes}
-                  </div>
-                )}
-              </div>
             )}
             
             <div className="space-y-4 sm:space-y-6">
@@ -3256,31 +4250,64 @@ useEffect(() => {
               <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                 <div className="p-3 sm:p-4 border-b border-gray-200 bg-gray-50">
                   <h4 className="text-base sm:text-lg font-semibold text-gray-900">
-                    Items ({selectedUnitRequest.items?.length || 0})
+                    Pending Items ({selectedUnitRequest.items?.length || 0})
                   </h4>
                 </div>
                 <div className="overflow-x-auto">
-                  {selectedUnitRequest.items && selectedUnitRequest.items.length > 0 ? (
+                  {(() => {
+                    // Items are already filtered to pending only in handleViewUnitRequest
+                    const items = Array.isArray(selectedUnitRequest.items) ? selectedUnitRequest.items : [];
+                    console.log('Displaying pending items:', items);
+                    console.log('Pending items length:', items.length);
+                    
+                    if (items.length === 0) {
+                      return (
+                        <div className="p-8 text-center text-gray-500">
+                          <p className="text-sm">No pending items found in this request.</p>
+                          <p className="text-xs mt-2 text-gray-400">All items have been reviewed. Check the Offices section to review items.</p>
+                        </div>
+                      );
+                    }
+                    
+                    // Pagination calculations
+                    const totalPages = Math.ceil(items.length / itemsPerPage);
+                    const startIndex = (itemsCurrentPage - 1) * itemsPerPage;
+                    const endIndex = startIndex + itemsPerPage;
+                    const paginatedItems = items.slice(startIndex, endIndex);
+                    
+                    // Get years from the selected unit request's year cycle
+                    const requestYearCycle = selectedUnitRequest.year || selectedYearCycle;
+                    const cycleYears = getYearsFromCycle(requestYearCycle);
+                    
+                    return (
+                    <>
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Unit</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Item Status</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Quantity</th>
+                          {cycleYears.map(year => (
+                            <th key={year} className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                              {year}
+                            </th>
+                          ))}
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Status Details</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Action</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {selectedUnitRequest.items.map((item, index) => (
-                          <tr key={item.id || index} className="hover:bg-gray-50">
+                        {paginatedItems.map((item, index) => (
+                          <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
                             <td className="px-4 py-3 whitespace-nowrap">
-                              <div className="text-sm font-medium text-gray-900">{selectedUnitRequest.userId?.unit || 'N/A'}</div>
+                              <div className="text-sm font-medium text-gray-900">
+                                {(selectedUnitRequest.unit && selectedUnitRequest.unit.trim()) 
+                                  ? selectedUnitRequest.unit.trim() 
+                                  : (selectedUnitRequest.userId?.unit && selectedUnitRequest.userId.unit.trim()) 
+                                    ? selectedUnitRequest.userId.unit.trim() 
+                                    : 'N/A'}
+                              </div>
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap">
                               <div className="text-sm font-medium text-gray-900">{item.item}</div>
@@ -3294,34 +4321,65 @@ useEffect(() => {
                                 {(item.approvalStatus || 'pending').toUpperCase()}
                               </span>
                             </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-center">
-                              {item.approvalStatus === 'approved' && item.itemStatus ? (
-                                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                                  item.itemStatus === 'pr_created' ? 'bg-blue-50 text-blue-700' :
-                                  item.itemStatus === 'purchased' ? 'bg-purple-50 text-purple-700' :
-                                  item.itemStatus === 'received' ? 'bg-green-50 text-green-700' :
-                                  item.itemStatus === 'in_transit' ? 'bg-yellow-50 text-yellow-700' :
-                                  item.itemStatus === 'completed' ? 'bg-emerald-50 text-emerald-700' :
-                                  'bg-gray-50 text-gray-700'
-                                }`}>
-                                  {item.itemStatus === 'pr_created' ? 'PR CREATED' :
-                                   item.itemStatus === 'purchased' ? 'PURCHASED' :
-                                   item.itemStatus === 'received' ? 'RECEIVED' :
-                                   item.itemStatus === 'in_transit' ? 'IN TRANSIT' :
-                                   item.itemStatus === 'completed' ? 'COMPLETED' :
-                                   item.itemStatus.toUpperCase()}
-                                </span>
-                              ) : (
-                                <span className="text-xs text-gray-400">—</span>
-                              )}
+                            {cycleYears.map(year => {
+                              // Check if quantityByYear exists and has data for this year
+                              const hasQuantityByYear = item.quantityByYear && 
+                                                       typeof item.quantityByYear === 'object' && 
+                                                       Object.keys(item.quantityByYear).length > 0;
+                              const yearStr = year.toString();
+                              const yearNum = parseInt(year, 10);
+                              const yearQuantity = hasQuantityByYear 
+                                ? (item.quantityByYear[yearStr] !== undefined ? item.quantityByYear[yearStr] : item.quantityByYear[yearNum])
+                                : null;
+                              const displayValue = yearQuantity !== null && yearQuantity !== undefined 
+                                ? yearQuantity 
+                                : '—';
+                              
+                              return (
+                                <td key={year} className="px-4 py-3 whitespace-nowrap text-center">
+                                  <div className="text-sm text-gray-900">{displayValue}</div>
                             </td>
+                              );
+                            })}
                             <td className="px-4 py-3 whitespace-nowrap text-center">
-                              <div className="text-sm text-gray-900">{item.quantity}</div>
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-center">
-                              <div className="text-sm text-gray-900">
-                                {item.price > 0 ? item.price.toLocaleString() : 'N/A'}
+                              {(() => {
+                                const itemKey = `${item.requestId}-${item.id || index}`;
+                                const isEditing = itemKey in pendingPriceEdits;
+                                const displayPrice = isEditing ? pendingPriceEdits[itemKey] : (item.price > 0 ? item.price : '');
+                                
+                                return isEditing ? (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={displayPrice}
+                                    onChange={(e) => {
+                                      setPendingPriceEdits(prev => ({
+                                        ...prev,
+                                        [itemKey]: e.target.value
+                                      }));
+                                    }}
+                                    onBlur={() => {
+                                      // Keep the edit in pending state, don't clear on blur
+                                    }}
+                                    className="w-24 px-2 py-1 text-sm border-2 border-gray-400 rounded focus:outline-none focus:ring-2 focus:ring-gray-500"
+                                    placeholder="0.00"
+                                  />
+                                ) : (
+                                  <div 
+                                    className="text-sm text-gray-900 cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition-colors inline-block"
+                                    onClick={() => {
+                                      setPendingPriceEdits(prev => ({
+                                        ...prev,
+                                        [itemKey]: item.price > 0 ? item.price.toString() : ''
+                                      }));
+                                    }}
+                                    title="Click to edit price"
+                                  >
+                                    {item.price > 0 ? `₱${item.price.toLocaleString()}` : <span className="text-gray-400 italic">Set Price</span>}
                               </div>
+                                );
+                              })()}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-center">
                               <span className={`px-2 py-0.5 text-xs font-semibold rounded ${
@@ -3333,65 +4391,267 @@ useEffect(() => {
                               </span>
                             </td>
                             <td className="px-4 py-3">
-                              {item.approvalStatus === 'approved' && item.itemStatus ? (
-                                <div className="text-xs">
-                                  <div className="font-medium text-gray-700 mb-1">
-                                    {item.itemStatus === 'pr_created' ? 'Purchase Request (PR) Created' :
-                                     item.itemStatus === 'purchased' ? 'Item Purchased' :
-                                     item.itemStatus === 'received' ? 'Item Received' :
-                                     item.itemStatus === 'in_transit' ? 'Item In Transit' :
-                                     item.itemStatus === 'completed' ? 'Item Completed' :
-                                     item.itemStatus}
-                                  </div>
-                                  {item.itemStatusRemarks && (
-                                    <div className="text-gray-600 mt-1">
-                                      <span className="font-medium">Remarks:</span> {item.itemStatusRemarks}
-                                    </div>
-                                  )}
-                                  {item.itemStatusUpdatedAt && (
-                                    <div className="text-gray-500 mt-1">
-                                      Updated: {new Date(item.itemStatusUpdatedAt).toLocaleDateString()}
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-xs text-gray-400">—</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="text-sm text-gray-900 max-w-xs break-words">
-                                {item.specification || <span className="text-gray-400">—</span>}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-center">
-                              <button
+                              {(() => {
+                                const itemKey = `${item.requestId}-${item.id || index}`;
+                                const isEditing = itemKey in pendingSpecificationEdits;
+                                const displayValue = isEditing ? pendingSpecificationEdits[itemKey] : (item.specification || '');
+                                
+                                return isEditing ? (
+                                  <textarea
+                                    value={displayValue}
+                                    onChange={(e) => {
+                                      setPendingSpecificationEdits(prev => ({
+                                        ...prev,
+                                        [itemKey]: e.target.value
+                                      }));
+                                    }}
+                                    onBlur={() => {
+                                      // Keep the edit in pending state, don't clear on blur
+                                    }}
+                                    rows={2}
+                                    className="w-full px-2 py-1 text-sm border-2 border-gray-400 rounded focus:outline-none focus:ring-2 focus:ring-gray-500 resize-none"
+                                    placeholder="Enter specification..."
+                                  />
+                                ) : (
+                                  <div 
+                                    className="text-sm text-gray-900 max-w-xs break-words cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition-colors"
                                 onClick={() => {
-                                  const itemIdToDelete = item.id || item._id || `item-${index}`;
-                                  console.log('Delete button clicked:', { item, itemIdToDelete, selectedUnitRequest });
-                                  handleDeleteItem(itemIdToDelete, selectedUnitRequest._id, item.item);
-                                }}
-                                className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-md hover:bg-red-700 transition-colors duration-200 flex items-center gap-1.5 mx-auto"
-                                title="Delete item"
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                </svg>
-                                Delete
-                              </button>
+                                      setPendingSpecificationEdits(prev => ({
+                                        ...prev,
+                                        [itemKey]: item.specification || ''
+                                      }));
+                                    }}
+                                    title="Click to edit specification"
+                                  >
+                                    {item.specification || <span className="text-gray-400 italic">Set Specification</span>}
+                                  </div>
+                                );
+                              })()}
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                  ) : (
-                    <div className="p-8 text-center text-gray-500">
-                      <p className="text-sm">No items in this request</p>
+                    {totalPages > 1 && (
+                      <div className="bg-gray-50 px-4 py-3 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+                        <div className="text-sm text-gray-700">
+                          Showing <span className="font-medium">{startIndex + 1}</span> to{' '}
+                          <span className="font-medium">{Math.min(endIndex, items.length)}</span> of{' '}
+                          <span className="font-medium">{items.length}</span> items
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setItemsCurrentPage(prev => Math.max(1, prev - 1))}
+                            disabled={itemsCurrentPage === 1}
+                            className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            Previous
+                          </button>
+                          
+                          {/* Page Numbers */}
+                          <div className="flex gap-1">
+                            {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+                              let pageNum;
+                              if (totalPages <= 5) {
+                                pageNum = i + 1;
+                              } else if (itemsCurrentPage <= 3) {
+                                pageNum = i + 1;
+                              } else if (itemsCurrentPage >= totalPages - 2) {
+                                pageNum = totalPages - 4 + i;
+                              } else {
+                                pageNum = itemsCurrentPage - 2 + i;
+                              }
+                              
+                              return (
+                                <button
+                                  key={pageNum}
+                                  onClick={() => setItemsCurrentPage(pageNum)}
+                                  className={`px-3 py-2 text-sm font-medium rounded-md transition-colors ${
+                                    itemsCurrentPage === pageNum
+                                      ? 'bg-gray-900 text-white'
+                                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {pageNum}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          
+                          <button
+                            onClick={() => setItemsCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                            disabled={itemsCurrentPage === totalPages}
+                            className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            Next
+                          </button>
+                        </div>
                     </div>
                   )}
+                    </>
+                    );
+                  })()}
                 </div>
               </div>
 
-              <div className="flex justify-end pt-4 border-t border-gray-200">
+              <div className="flex justify-between items-center pt-4 border-t border-gray-200">
+                <div className="text-sm text-gray-600">
+                  {(() => {
+                    const priceCount = Object.keys(pendingPriceEdits).length;
+                    const specCount = Object.keys(pendingSpecificationEdits).length;
+                    const totalCount = priceCount + specCount;
+                    
+                    if (totalCount === 0) return null;
+                    
+                    const parts = [];
+                    if (priceCount > 0) {
+                      parts.push(`${priceCount} price${priceCount !== 1 ? 's' : ''}`);
+                    }
+                    if (specCount > 0) {
+                      parts.push(`${specCount} specification${specCount !== 1 ? 's' : ''}`);
+                    }
+                    
+                    return (
+                      <span className="text-orange-600 font-medium">
+                        {parts.join(' and ')} pending save
+                      </span>
+                    );
+                  })()}
+                </div>
+                {(Object.keys(pendingPriceEdits).length > 0 || Object.keys(pendingSpecificationEdits).length > 0) && (
+                  <button
+                    onClick={async () => {
+                      const token = localStorage.getItem('token');
+                      if (!token) {
+                        showAlert({
+                          variant: 'danger',
+                          title: 'Authentication Required',
+                          message: 'No authentication token found. Please login again.'
+                        });
+                        return;
+                      }
+
+                      let priceSuccessCount = 0;
+                      let specSuccessCount = 0;
+                      let priceErrorCount = 0;
+                      let specErrorCount = 0;
+                      const errors = [];
+
+                      // Save all pending price edits
+                      for (const [itemKey, priceValue] of Object.entries(pendingPriceEdits)) {
+                        try {
+                          const [requestId, itemId] = itemKey.split('-');
+                          const priceNum = parseFloat(priceValue);
+                          
+                          if (isNaN(priceNum) || priceNum < 0) {
+                            errors.push(`Invalid price for item ${itemId}`);
+                            priceErrorCount++;
+                            continue;
+                          }
+
+                          await axios.put(
+                            API_ENDPOINTS.admin.updateRequestItemPrice(requestId, itemId),
+                            { price: priceNum },
+                            { headers: { 'x-auth-token': token } }
+                          );
+
+                          priceSuccessCount++;
+                        } catch (error) {
+                          console.error(`Error updating price for ${itemKey}:`, error);
+                          errors.push(`Failed to update price: ${error.response?.data?.message || error.message}`);
+                          priceErrorCount++;
+                        }
+                      }
+
+                      // Save all pending specification edits
+                      for (const [itemKey, specificationValue] of Object.entries(pendingSpecificationEdits)) {
+                        try {
+                          const [requestId, itemId] = itemKey.split('-');
+                          
+                          await axios.put(
+                            API_ENDPOINTS.admin.updateRequestItemSpecification(requestId, itemId),
+                            { specification: specificationValue },
+                            { headers: { 'x-auth-token': token } }
+                          );
+
+                          specSuccessCount++;
+                        } catch (error) {
+                          console.error(`Error updating specification for ${itemKey}:`, error);
+                          errors.push(`Failed to update specification: ${error.response?.data?.message || error.message}`);
+                          specErrorCount++;
+                        }
+                      }
+
+                      // Refresh the request data by updating prices and specifications in selectedUnitRequest
+                      if (selectedUnitRequest && (priceSuccessCount > 0 || specSuccessCount > 0)) {
+                        setSelectedUnitRequest(prev => {
+                          if (!prev || !prev.items) return prev;
+                          const updatedItems = prev.items.map(item => {
+                            const itemKey = `${item.requestId}-${item.id || item._id}`;
+                            let updatedItem = { ...item };
+                            
+                            // Update price if edited
+                            if (itemKey in pendingPriceEdits) {
+                              const priceNum = parseFloat(pendingPriceEdits[itemKey]);
+                              if (!isNaN(priceNum) && priceNum >= 0) {
+                                updatedItem.price = priceNum;
+                              }
+                            }
+                            
+                            // Update specification if edited
+                            if (itemKey in pendingSpecificationEdits) {
+                              updatedItem.specification = pendingSpecificationEdits[itemKey];
+                            }
+                            
+                            return updatedItem;
+                          });
+                          return {
+                            ...prev,
+                            items: updatedItems
+                          };
+                        });
+                      }
+
+                      // Clear pending edits
+                      setPendingPriceEdits({});
+                      setPendingSpecificationEdits({});
+
+                      // Show result
+                      const totalSuccess = priceSuccessCount + specSuccessCount;
+                      const totalError = priceErrorCount + specErrorCount;
+                      
+                      if (totalError === 0) {
+                        const messages = [];
+                        if (priceSuccessCount > 0) {
+                          messages.push(`${priceSuccessCount} price${priceSuccessCount !== 1 ? 's' : ''}`);
+                        }
+                        if (specSuccessCount > 0) {
+                          messages.push(`${specSuccessCount} specification${specSuccessCount !== 1 ? 's' : ''}`);
+                        }
+                        
+                        showAlert({
+                          variant: 'success',
+                          title: 'Updates Saved',
+                          message: `Successfully updated ${messages.join(' and ')}!`,
+                          autoCloseDelay: 2000
+                        });
+                      } else {
+                        showAlert({
+                          variant: 'warning',
+                          title: 'Partial Update',
+                          message: `Updated ${totalSuccess} item${totalSuccess !== 1 ? 's' : ''}, but ${totalError} failed. ${errors.slice(0, 2).join(' ')}`,
+                          autoCloseDelay: 4000
+                        });
+                      }
+                    }}
+                    className="px-4 py-2 bg-gray-900 hover:bg-gray-800 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Save Changes
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -3808,10 +5068,10 @@ useEffect(() => {
                       onChange={(e) => setSelectedYearCycle(e.target.value)}
                       className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400 text-sm font-medium text-gray-700 bg-white"
                     >
-                      <option value="2024-2027">2024-2027</option>
-                      <option value="2027-2030">2027-2030</option>
-                      <option value="2030-2033">2030-2033</option>
-                      <option value="2033-2036">2033-2036</option>
+                      <option value="2024-2026">2024-2026</option>
+                      <option value="2027-2029">2027-2029</option>
+                      <option value="2030-2032">2030-2032</option>
+                      <option value="2033-2035">2033-2035</option>
                     </select>
                     </div>
                   </div>
@@ -3929,7 +5189,7 @@ useEffect(() => {
                           <tbody className="bg-white divide-y divide-gray-200">
                             {paginatedUnits.length > 0 ? (
                               paginatedUnits.map((unit) => (
-                                <tr key={unit.unitName} className="hover:bg-gray-50 transition-colors">
+                                <tr key={`${unit.unitName}|||${unit.campus}`} className="hover:bg-gray-50 transition-colors">
                                   <td className="px-6 py-4 whitespace-nowrap">
                                     <div className="text-sm font-medium text-gray-900">
                                       {unit.unitName}
@@ -3962,7 +5222,7 @@ useEffect(() => {
                                   </td>
                                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                                     <button
-                                      onClick={() => handleViewUnitRequest(unit.unitName)}
+                                      onClick={() => handleViewUnitRequest(`${unit.unitName}|||${unit.campus}`)}
                                       className="px-4 py-1 text-sm font-medium text-gray-700 bg-gray-200 hover:bg-gray-300 rounded-md transition-colors duration-200 cursor-pointer"
                                     >
                                       View
@@ -4245,67 +5505,80 @@ useEffect(() => {
 
               {/* DICT Approval Status Section */}
               <div className="mt-8">
-                <h2 className="text-lg font-bold text-gray-800 mb-4">DICT APPROVAL STATUS</h2>
+                <h2 className="text-lg font-bold text-gray-800 mb-4">DICT APPROVAL STATUS ({selectedYearCycle})</h2>
                 <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
                   {/* Status Header */}
-                  <div className={`px-6 py-4 border-b ${
-                    isspData?.dictApproval?.status === 'approved_by_dict' ? 'bg-emerald-50 border-emerald-200' :
-                    isspData?.dictApproval?.status === 'revision_from_dict' ? 'bg-red-50 border-red-200' :
-                    isspData?.dictApproval?.status === 'approve_for_dict' ? 'bg-yellow-50 border-yellow-200' :
-                    isspData?.dictApproval?.status === 'collation_compilation' ? 'bg-purple-50 border-purple-200' :
-                    'bg-gray-50 border-gray-200'
-                  }`}>
-                    <div className="flex items-center justify-between flex-wrap gap-4">
-                      <div className="flex items-center gap-3">
-                        <div>
-                          <p className="text-xs text-gray-600 font-medium mb-1">DICT Approval Status</p>
-                          <span className={`text-sm font-semibold px-4 py-1.5 rounded-full inline-block ${
-                            isspData?.dictApproval?.status === 'approved_by_dict' ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' :
-                            isspData?.dictApproval?.status === 'revision_from_dict' ? 'bg-red-100 text-red-700 border border-red-200' :
-                            isspData?.dictApproval?.status === 'approve_for_dict' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' :
-                            isspData?.dictApproval?.status === 'collation_compilation' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
-                            'bg-gray-100 text-gray-700 border border-gray-200'
-                          }`}>
-                            {isspData?.dictApproval?.status === 'approved_by_dict' ? 'Approved by DICT' :
-                             isspData?.dictApproval?.status === 'revision_from_dict' ? 'Revision from DICT' :
-                             isspData?.dictApproval?.status === 'approve_for_dict' ? 'Approve for DICT' :
-                             isspData?.dictApproval?.status === 'collation_compilation' ? 'Collation/Compilation' :
-                             'Pending'}
-                          </span>
+                  {(() => {
+                    // Handle Map structure - Mongoose Maps are converted to objects in JSON
+                    const dictApproval = isspData?.dictApproval;
+                    const yearCycleStatus = dictApproval && typeof dictApproval === 'object' && !Array.isArray(dictApproval) 
+                      ? dictApproval[selectedYearCycle] 
+                      : null;
+                    const currentStatus = yearCycleStatus?.status || 'pending'; // Default to 'pending'
+                    
+                    return (
+                      <>
+                        <div className={`px-6 py-4 border-b ${
+                          currentStatus === 'approved_by_dict' ? 'bg-emerald-50 border-emerald-200' :
+                          currentStatus === 'revision_from_dict' ? 'bg-red-50 border-red-200' :
+                          currentStatus === 'approve_for_dict' ? 'bg-yellow-50 border-yellow-200' :
+                          currentStatus === 'collation_compilation' ? 'bg-purple-50 border-purple-200' :
+                          'bg-gray-50 border-gray-200'
+                        }`}>
+                          <div className="flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center gap-3">
+                              <div>
+                                <p className="text-xs text-gray-600 font-medium mb-1">DICT Approval Status for {selectedYearCycle}</p>
+                                <span className={`text-sm font-semibold px-4 py-1.5 rounded-full inline-block ${
+                                  currentStatus === 'approved_by_dict' ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' :
+                                  currentStatus === 'revision_from_dict' ? 'bg-red-100 text-red-700 border border-red-200' :
+                                  currentStatus === 'approve_for_dict' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' :
+                                  currentStatus === 'collation_compilation' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
+                                  'bg-gray-100 text-gray-700 border border-gray-200'
+                                }`}>
+                                  {currentStatus === 'approved_by_dict' ? 'Approved by DICT' :
+                                   currentStatus === 'revision_from_dict' ? 'Revision from DICT' :
+                                   currentStatus === 'approve_for_dict' ? 'Approve for DICT' :
+                                   currentStatus === 'collation_compilation' ? 'Collation/Compilation' :
+                                   'Pending'}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setDictStatusForm({
+                                  status: currentStatus,
+                                  notes: yearCycleStatus?.notes || ''
+                                });
+                                setShowDictStatusModal(true);
+                              }}
+                              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors duration-200 flex items-center gap-2"
+                            >
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                              </svg>
+                              Update ISSP status
+                            </button>
+                          </div>
+                          {yearCycleStatus?.updatedAt && (
+                            <div className="text-xs text-gray-600 mt-2">
+                              Updated: {new Date(yearCycleStatus.updatedAt).toLocaleString()}
+                            </div>
+                          )}
                         </div>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setDictStatusForm({
-                            status: isspData?.dictApproval?.status || 'pending',
-                            notes: isspData?.dictApproval?.notes || ''
-                          });
-                          setShowDictStatusModal(true);
-                        }}
-                        className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors duration-200 flex items-center gap-2"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                        Update ISSP status
-                      </button>
-                    </div>
-                    {isspData?.dictApproval?.updatedAt && (
-                      <div className="text-xs text-gray-600 mt-2">
-                        Updated: {new Date(isspData.dictApproval.updatedAt).toLocaleString()}
-                      </div>
-                    )}
-                  </div>
 
-                  {/* Content Area */}
-                  <div className="p-6">
-                    {isspData?.dictApproval?.notes && (
-                      <div className="bg-white border border-gray-200 rounded-lg p-4">
-                        <p className="text-sm font-medium text-gray-700 mb-2">Notes:</p>
-                        <p className="text-sm text-gray-900">{isspData.dictApproval.notes}</p>
-                      </div>
-                    )}
-                  </div>
+                        {/* Content Area */}
+                        <div className="p-6">
+                          {yearCycleStatus?.notes && (
+                            <div className="bg-white border border-gray-200 rounded-lg p-4">
+                              <p className="text-sm font-medium text-gray-700 mb-2">Notes:</p>
+                              <p className="text-sm text-gray-900">{yearCycleStatus.notes}</p>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -4979,7 +6252,6 @@ useEffect(() => {
                           <th className="border border-gray-900 bg-white p-3 font-bold text-left align-top" rowSpan={2}>
                             <div>I T E M ₁</div>
                             <div className="text-xs font-normal mt-1">(Allotment Class/ Object of Expenditures)</div>
-                            <div className="italic font-normal mt-2">Examples:</div>
                           </th>
                           <th className="border border-gray-900 bg-white p-3 font-bold text-center align-top" rowSpan={2}>
                             <div>NAME OF OFFICE/</div>
@@ -4991,67 +6263,86 @@ useEffect(() => {
                           </th>
                         </tr>
                         <tr>
-                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">YEAR 1</th>
-                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">YEAR 2</th>
-                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">YEAR 3</th>
+                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">
+                            {getYearsFromCycle(selectedYearCycle)[0] || 'YEAR 1'}
+                          </th>
+                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">
+                            {getYearsFromCycle(selectedYearCycle)[1] || 'YEAR 2'}
+                          </th>
+                          <th className="border border-gray-900 bg-white p-3 font-bold text-center">
+                            {getYearsFromCycle(selectedYearCycle)[2] || 'YEAR 3'}
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
                         {/* Empty rows for user input */}
-                        {resourceDeploymentData.map((row, index) => (
-                          <tr key={index}>
-                            <td className="border border-gray-900 p-0">
-                              <input
-                                type="text"
-                                value={row.item}
-                                onChange={(event) =>
-                                  handleResourceDeploymentChange(index, 'item', event.target.value)
-                                }
-                                className="w-full p-2 border-0 focus:ring-0"
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <input
-                                type="text"
-                                value={row.office}
-                                onChange={(event) =>
-                                  handleResourceDeploymentChange(index, 'office', event.target.value)
-                                }
-                                className="w-full p-2 border-0 focus:ring-0"
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <input
-                                type="text"
-                                value={row.year1}
-                                onChange={(event) =>
-                                  handleResourceDeploymentChange(index, 'year1', event.target.value)
-                                }
-                                className="w-full p-2 border-0 focus:ring-0 text-center"
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <input
-                                type="text"
-                                value={row.year2}
-                                onChange={(event) =>
-                                  handleResourceDeploymentChange(index, 'year2', event.target.value)
-                                }
-                                className="w-full p-2 border-0 focus:ring-0 text-center"
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <input
-                                type="text"
-                                value={row.year3}
-                                onChange={(event) =>
-                                  handleResourceDeploymentChange(index, 'year3', event.target.value)
-                                }
-                                className="w-full p-2 border-0 focus:ring-0 text-center"
-                              />
-                            </td>
-                          </tr>
-                        ))}
+                        {resourceDeploymentData.map((row, index) => {
+                          const isTotalRow = row.isTotalRow === true || (row.item && row.item.toString().trim().toUpperCase() === 'TOTAL');
+                          const isItemHeader = row.isItemHeader === true;
+                          
+                          return (
+                            <tr 
+                              key={index}
+                              className={isTotalRow ? 'bg-gray-300 font-bold' : ''}
+                            >
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <input
+                                  type="text"
+                                  value={row.item}
+                                  onChange={(event) =>
+                                    handleResourceDeploymentChange(index, 'item', event.target.value)
+                                  }
+                                  className={`w-full p-2 border-0 focus:ring-0 ${isTotalRow ? 'font-bold bg-gray-300' : ''} ${isItemHeader ? 'font-semibold' : ''}`}
+                                  readOnly={isTotalRow || isItemHeader}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <input
+                                  type="text"
+                                  value={row.office}
+                                  onChange={(event) =>
+                                    handleResourceDeploymentChange(index, 'office', event.target.value)
+                                  }
+                                  className={`w-full p-2 border-0 focus:ring-0 ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  readOnly={isTotalRow || isItemHeader}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <input
+                                  type="text"
+                                  value={row.year1}
+                                  onChange={(event) =>
+                                    handleResourceDeploymentChange(index, 'year1', event.target.value)
+                                  }
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  readOnly={isTotalRow || isItemHeader}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <input
+                                  type="text"
+                                  value={row.year2}
+                                  onChange={(event) =>
+                                    handleResourceDeploymentChange(index, 'year2', event.target.value)
+                                  }
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  readOnly={isTotalRow || isItemHeader}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <input
+                                  type="text"
+                                  value={row.year3}
+                                  onChange={(event) =>
+                                    handleResourceDeploymentChange(index, 'year3', event.target.value)
+                                  }
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  readOnly={isTotalRow || isItemHeader}
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -6061,116 +7352,137 @@ useEffect(() => {
                     <table className="w-full border-collapse border border-gray-900 text-xs">
                       <thead>
                         <tr>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-left align-top" rowSpan={2}>
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-left align-top" rowSpan={2} style={{ width: '35%' }}>
                             <div>ITEM</div>
                             <div className="text-xs font-normal mt-1">(Allotment Class/Object of Expenditures)</div>
                           </th>
-                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2}>
-                            YEAR 1₁
+                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2} style={{ width: '21.67%' }}>
+                            {getYearsFromCycle(selectedYearCycle)[0] || 'YEAR 1₁'}
                           </th>
-                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2}>
-                            YEAR 2₂
+                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2} style={{ width: '21.67%' }}>
+                            {getYearsFromCycle(selectedYearCycle)[1] || 'YEAR 2₂'}
                           </th>
-                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2}>
-                            YEAR 3₃
+                          <th className="border border-gray-900 bg-gray-100 p-2 font-bold text-center" colSpan={2} style={{ width: '21.67%' }}>
+                            {getYearsFromCycle(selectedYearCycle)[2] || 'YEAR 3₃'}
                           </th>
                         </tr>
                         <tr>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             PHYSICAL<br />TARGETS
                           </th>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             COST
                           </th>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             PHYSICAL<br />TARGETS
                           </th>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             COST
                           </th>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             PHYSICAL<br />TARGETS
                           </th>
-                          <th className="border border-gray-900 bg-white p-2 font-bold text-center">
+                          <th className="border border-gray-900 bg-white p-2 font-bold text-center" style={{ width: '10.83%' }}>
                             COST
                           </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {devSummaryInvestments.map((row, index) => (
-                          <tr key={index}>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-sm resize-none"
-                                rows={8}
-                                value={row.item}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'item', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year1Physical}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year1Physical', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year1Cost}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year1Cost', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year2Physical}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year2Physical', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year2Cost}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year2Cost', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year3Physical}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year3Physical', event.target.value)
-                                }
-                              />
-                            </td>
-                            <td className="border border-gray-900 p-0">
-                              <textarea
-                                className="w-full p-2 border-0 focus:ring-0 text-center text-sm resize-none"
-                                rows={8}
-                                value={row.year3Cost}
-                                onChange={(event) =>
-                                  handleDevSummaryChange(index, 'year3Cost', event.target.value)
-                                }
-                              />
-                            </td>
-                          </tr>
-                        ))}
+                        {devSummaryInvestments.map((row, index) => {
+                          const isTotalRow = row.isTotalRow === true || (row.item && row.item.toString().trim().toUpperCase() === 'TOTAL');
+                          
+                          return (
+                            <tr 
+                              key={index}
+                              className={isTotalRow ? 'bg-gray-300 font-bold' : ''}
+                            >
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.item}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'item', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year1Physical}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year1Physical', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year1Cost}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year1Cost', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year2Physical}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year2Physical', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year2Cost}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year2Cost', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year3Physical}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year3Physical', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                              <td className={`border border-gray-900 p-0 ${isTotalRow ? 'bg-gray-300' : ''}`}>
+                                <textarea
+                                  className={`w-full p-2 border-0 focus:ring-0 text-center text-xs resize-none ${isTotalRow ? 'font-bold bg-gray-300' : ''}`}
+                                  rows={1}
+                                  style={{ minHeight: '38px', height: '38px', lineHeight: '1.5' }}
+                                  value={row.year3Cost}
+                                  onChange={(event) =>
+                                    handleDevSummaryChange(index, 'year3Cost', event.target.value)
+                                  }
+                                  readOnly={isTotalRow}
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
