@@ -219,6 +219,7 @@ const ActivityLog = ({ limit = 30, title = 'System Activity Log', filterByRole =
                 <div className="min-w-0 flex-1">
                   <p className="text-xs sm:text-sm text-gray-900 font-semibold break-words">{log.description}</p>
                   <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs text-gray-500 mt-1">
+                    {log.actor?.name && log.actor?.role?.toLowerCase() !== 'admin' && <span className="font-medium text-gray-700">{log.actor.name}</span>}
                     {log.actor?.email && <span className="truncate max-w-[150px] sm:max-w-none">{log.actor.email}</span>}
                     {log.actor?.role && (
                       <span className="inline-flex items-center px-2 py-0.5 bg-gray-100 rounded-full">

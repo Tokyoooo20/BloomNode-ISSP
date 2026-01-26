@@ -3,6 +3,13 @@ import { flushSync } from 'react-dom';
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
+import { connectSocket, disconnectSocket, subscribe, unsubscribe } from '../../utils/socket';
+
+// AI Assistant Configuration
+// NOTE: The Gemini API key is configured in the backend environment variables (GEMINI_API_KEY)
+// Current API key: AIzaSyCTEv0VfRoEqqBGVtyi2eD-d8kCTS8TilQ
+// The frontend calls the backend API endpoint which uses the key from environment variables
+// Never expose API keys directly in frontend code
 
 const statusBadges = {
   loading: { label: 'Fetching...', styles: 'bg-blue-50 text-blue-600 border-blue-100' },
@@ -10,6 +17,89 @@ const statusBadges = {
   error: { label: 'Needs Attention', styles: 'bg-red-50 text-red-600 border-red-100' },
   typing: { label: 'Preparing', styles: 'bg-amber-50 text-amber-600 border-amber-100' },
   idle: { label: 'Idle', styles: 'bg-gray-100 text-gray-500 border-gray-200' }
+};
+
+// Cache for IT classification results to avoid repeated API calls
+const itClassificationCache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Validate if item is IT-related using AI (Gemini)
+const checkITRelatedWithAI = async (itemName) => {
+  if (!itemName || typeof itemName !== 'string' || !itemName.trim()) {
+    return { isValid: false, reason: 'Invalid item name', loading: false };
+  }
+
+  const trimmed = itemName.trim();
+  
+  // Check cache first
+  const cacheKey = trimmed.toLowerCase();
+  const cached = itClassificationCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
+    return { ...cached.result, loading: false };
+  }
+
+  // Return loading state - actual validation will be done asynchronously
+  return { isValid: null, reason: '', loading: true };
+};
+
+// Perform actual AI validation (called separately to handle async)
+const performITValidation = async (itemName) => {
+  const trimmed = (itemName || '').trim();
+  if (!trimmed) {
+    return { isValid: false, reason: 'Invalid item name', loading: false };
+  }
+
+  const cacheKey = trimmed.toLowerCase();
+  
+  // Check cache
+  const cached = itClassificationCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < CACHE_DURATION) {
+    return { ...cached.result, loading: false };
+  }
+
+  try {
+    const token = localStorage.getItem('token');
+    const headers = token ? { 'x-auth-token': token } : undefined;
+    
+    const response = await axios.post(
+      API_ENDPOINTS.ai.checkITRelated,
+      { itemName: trimmed },
+      { headers }
+    );
+
+    const result = {
+      isValid: response.data.isValid === true,
+      reason: response.data.reason || '',
+      loading: false
+    };
+
+    // Cache the result
+    itClassificationCache.set(cacheKey, {
+      result,
+      timestamp: Date.now()
+    });
+
+    return result;
+  } catch (error) {
+    console.error('IT classification error:', error);
+    
+    // On error, we'll be lenient and allow the item (but show a warning)
+    // This prevents blocking users if AI service is down
+    const result = {
+      isValid: true, // Allow on error to not block users
+      reason: 'Unable to verify item classification. Please ensure this is IT-related equipment.',
+      loading: false,
+      error: true
+    };
+
+    // Cache error result for shorter duration (1 minute)
+    itClassificationCache.set(cacheKey, {
+      result,
+      timestamp: Date.now() - (CACHE_DURATION - 60000) // Expire in 1 minute
+    });
+
+    return result;
+  }
 };
 
 const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
@@ -78,7 +168,7 @@ const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
               <button
                 type="button"
                 onClick={onRetry}
-                className="inline-flex items-center space-x-1 text-red-700 font-semibold"
+                className="inline-flex items-center space-x-1 text-red-700 font-semibold hover:text-red-800 transition-colors"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path
@@ -107,10 +197,32 @@ const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
 
             {Array.isArray(insights.specs) && insights.specs.length > 0 && (
               <div className="bg-white border border-gray-200 rounded-2xl p-4">
-                <p className="text-xs text-gray-900 uppercase tracking-widest mb-2">Representative Specs</p>
-                <ul className="space-y-1 text-gray-900 text-sm list-disc list-inside">
+                <p className="text-xs text-gray-900 uppercase tracking-widest mb-2">Full Technical Specifications</p>
+                <ul className="space-y-2 text-gray-900 text-sm">
                   {insights.specs.map((spec, idx) => (
-                    <li key={`${spec}-${idx}`}>{spec}</li>
+                    <li key={`${spec}-${idx}`} className="flex items-start">
+                      <span className="text-blue-600 mr-2 mt-0.5 flex-shrink-0">•</span>
+                      <span className="break-words">{spec}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Sources */}
+            {Array.isArray(insights.sources) && insights.sources.length > 0 && (
+              <div className="bg-white border border-gray-200 rounded-2xl p-4">
+                <p className="text-xs text-gray-900 uppercase tracking-widest mb-3">Sources</p>
+                <ul className="space-y-2">
+                  {insights.sources.map((source, idx) => (
+                    <li key={`${source}-${idx}`} className="text-sm text-gray-700">
+                      <div className="flex items-start space-x-2">
+                        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 font-semibold text-xs">
+                          {idx + 1}
+                        </span>
+                        <span className="break-words">{source}</span>
+                      </div>
+                    </li>
                   ))}
                 </ul>
               </div>
@@ -149,6 +261,9 @@ const Request = ({ onRequestUpdate }) => {
     specification: '',
     purpose: ''
   });
+  const [itemValidationError, setItemValidationError] = useState('');
+  const [itemValidationLoading, setItemValidationLoading] = useState(false);
+  const [itemValidationResult, setItemValidationResult] = useState(null);
 
   // Helper function to extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
   const getYearsFromCycle = (cycle) => {
@@ -201,6 +316,7 @@ const Request = ({ onRequestUpdate }) => {
   const latestQueriedItemRef = useRef('');
   const aiStatusRef = useRef('idle');
   const aiRequestIdRef = useRef(0);
+  const isSubmittingRef = useRef(false); // Prevent double submission
   const [statusUpdateModal, setStatusUpdateModal] = useState({ show: false, requestId: null, itemId: null, itemName: '' });
   const [statusUpdateForm, setStatusUpdateForm] = useState({ itemStatus: '', remarks: '' });
   const [updatingStatus, setUpdatingStatus] = useState(false);
@@ -208,10 +324,29 @@ const Request = ({ onRequestUpdate }) => {
   const [revisingRequest, setRevisingRequest] = useState(null);
   const [revisionNotes, setRevisionNotes] = useState('');
   const [selectedYearGroup, setSelectedYearGroup] = useState(null); // { year, requests }
+  const [editingRevisionItemIndex, setEditingRevisionItemIndex] = useState(null); // Track which item is being edited for AI insights
+  const [revisionItemInsights, setRevisionItemInsights] = useState(null); // AI insights for revision item
+  const [revisionAiStatus, setRevisionAiStatus] = useState('idle'); // AI status for revision item
+  const [revisionAiError, setRevisionAiError] = useState(null); // AI error for revision item
+  const latestRevisionQueriedItemRef = useRef('');
+  const revisionAiStatusRef = useRef('idle');
+  const revisionAiRequestIdRef = useRef(0);
+  const [editingItem, setEditingItem] = useState(null); // { requestId, itemId } - DEPRECATED, using editItemModal now
+  const [editItemForms, setEditItemForms] = useState({}); // { [itemKey]: { item, quantityByYear, price, range, specification, purpose } } - DEPRECATED
+  const [editItemModal, setEditItemModal] = useState({ show: false, item: null, requestId: null, itemId: null });
+  const [editItemForm, setEditItemForm] = useState({ item: '', quantityByYear: {}, range: 'mid', specification: '', purpose: '' });
+  const [saveItemConfirmationModal, setSaveItemConfirmationModal] = useState({ show: false });
+  const [deleteItemModal, setDeleteItemModal] = useState({ show: false, requestId: null, itemId: null, itemName: '' });
+  const [deletingItem, setDeletingItem] = useState(false);
+  const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
 
   useEffect(() => {
     aiStatusRef.current = aiStatus;
   }, [aiStatus]);
+
+  useEffect(() => {
+    revisionAiStatusRef.current = revisionAiStatus;
+  }, [revisionAiStatus]);
 
   const fetchItemInsights = useCallback(
     async (name, options = {}) => {
@@ -244,13 +379,97 @@ const Request = ({ onRequestUpdate }) => {
       } catch (err) {
         if (aiRequestIdRef.current !== requestId) return;
         if (err.code === 'ERR_CANCELED') return;
-        const message = err.response?.data?.message || err.message || 'Failed to fetch item insights';
+        
+        let message = err.response?.data?.message || err.message || 'Failed to fetch item insights';
+        
+        // Check if it's a quota error and provide user-friendly message
+        const isQuotaError = 
+          err.response?.status === 429 ||
+          err.response?.data?.quotaExceeded ||
+          message.toLowerCase().includes('quota') ||
+          message.toLowerCase().includes('exceeded') ||
+          message.toLowerCase().includes('rate limit');
+        
+        if (isQuotaError) {
+          message = 'AI service is temporarily unavailable due to high usage. Please try again in a few minutes.';
+        }
+        
         setAiStatus('error');
         setAiError(message);
       }
     },
     []
   );
+
+  // Fetch AI insights for revision item
+  const fetchRevisionItemInsights = useCallback(
+    async (name, options = {}) => {
+      const trimmed = (name || '').trim();
+      if (!trimmed) {
+        setRevisionAiStatus('idle');
+        setRevisionItemInsights(null);
+        setRevisionAiError(null);
+        latestRevisionQueriedItemRef.current = '';
+        return;
+      }
+
+      if (!options.force && trimmed === latestRevisionQueriedItemRef.current && revisionAiStatusRef.current === 'ready') {
+        return;
+      }
+
+      const requestId = Date.now();
+      revisionAiRequestIdRef.current = requestId;
+      latestRevisionQueriedItemRef.current = trimmed;
+      setRevisionAiStatus('loading');
+      setRevisionAiError(null);
+
+      try {
+        const token = localStorage.getItem('token');
+        const headers = token ? { 'x-auth-token': token } : undefined;
+        const response = await axios.post(
+          API_ENDPOINTS.ai.itemInsights,
+          { itemName: trimmed },
+          { headers }
+        );
+
+        if (revisionAiRequestIdRef.current !== requestId) return;
+
+        setRevisionItemInsights(response.data);
+        setRevisionAiStatus('ready');
+      } catch (err) {
+        if (revisionAiRequestIdRef.current !== requestId) return;
+        if (err.code === 'ERR_CANCELED') return;
+        
+        let message = err.response?.data?.message || err.message || 'Failed to fetch item insights';
+        
+        // Check if it's a quota error and provide user-friendly message
+        const isQuotaError = 
+          err.response?.status === 429 ||
+          err.response?.data?.quotaExceeded ||
+          message.toLowerCase().includes('quota') ||
+          message.toLowerCase().includes('exceeded') ||
+          message.toLowerCase().includes('rate limit');
+        
+        if (isQuotaError) {
+          message = 'AI service is temporarily unavailable due to high usage. Please try again in a few minutes.';
+        }
+        
+        setRevisionAiStatus('error');
+        setRevisionAiError(message);
+      }
+    },
+    []
+  );
+
+  // Handle AI retry for revision item
+  const handleRevisionAiRetry = useCallback(() => {
+    if (editingRevisionItemIndex !== null && requestForm.items[editingRevisionItemIndex]) {
+      const itemName = requestForm.items[editingRevisionItemIndex].item;
+      if (itemName && itemName.trim()) {
+        fetchRevisionItemInsights(itemName.trim(), { force: true });
+      }
+    }
+  }, [editingRevisionItemIndex, requestForm.items, fetchRevisionItemInsights]);
 
 
   useEffect(() => {
@@ -269,6 +488,34 @@ const Request = ({ onRequestUpdate }) => {
 
     return () => clearTimeout(debounceId);
   }, [currentItem.item, fetchItemInsights]);
+
+  // Fetch AI insights when editing revision item name
+  useEffect(() => {
+    if (editingRevisionItemIndex === null || !requestForm.items[editingRevisionItemIndex]) {
+      setRevisionAiStatus('idle');
+      setRevisionItemInsights(null);
+      setRevisionAiError(null);
+      latestRevisionQueriedItemRef.current = '';
+      return;
+    }
+
+    const item = requestForm.items[editingRevisionItemIndex];
+    const trimmed = (item.item || '').trim();
+    
+    if (!trimmed) {
+      setRevisionAiStatus('idle');
+      setRevisionItemInsights(null);
+      setRevisionAiError(null);
+      latestRevisionQueriedItemRef.current = '';
+      return;
+    }
+
+    const debounceId = setTimeout(() => {
+      fetchRevisionItemInsights(trimmed);
+    }, 600);
+
+    return () => clearTimeout(debounceId);
+  }, [editingRevisionItemIndex, requestForm.items, fetchRevisionItemInsights]);
 
   const handleAiRetry = useCallback(() => {
     const trimmed = currentItem.item.trim();
@@ -303,6 +550,58 @@ const Request = ({ onRequestUpdate }) => {
     fetchRequests();
   }, []);
 
+  // Socket.io real-time updates
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userStr = localStorage.getItem('user');
+    
+    if (!token || !userStr) {
+      return;
+    }
+
+    try {
+      const user = JSON.parse(userStr);
+      connectSocket(token, user.id, user.role);
+
+      // Listen for item updates from admin
+      const handleItemUpdated = (data) => {
+        console.log('Item updated event received:', data);
+        // Only refresh if this update is for the current user's requests
+        if (data.unitUserId && data.unitUserId.toString() === user.id.toString()) {
+          fetchRequests();
+          // Trigger dashboard refresh if callback is provided
+          if (onRequestUpdate) {
+            onRequestUpdate();
+          }
+        }
+      };
+
+      // Listen for item review decisions from admin
+      const handleItemReviewed = (data) => {
+        console.log('Item reviewed event received:', data);
+        // Only refresh if this review is for the current user's requests
+        if (data.unitUserId && data.unitUserId.toString() === user.id.toString()) {
+          fetchRequests();
+          // Trigger dashboard refresh if callback is provided
+          if (onRequestUpdate) {
+            onRequestUpdate();
+          }
+        }
+      };
+
+      subscribe('item_updated', handleItemUpdated);
+      subscribe('item_reviewed', handleItemReviewed);
+
+      return () => {
+        unsubscribe('item_updated', handleItemUpdated);
+        unsubscribe('item_reviewed', handleItemReviewed);
+        // Don't disconnect socket here - other components might be using it
+      };
+    } catch (error) {
+      console.error('Error setting up Socket.io:', error);
+    }
+  }, [fetchRequests, onRequestUpdate]);
+
   // Group requests by year cycle
   const groupedRequests = useMemo(() => {
     const grouped = {};
@@ -316,20 +615,92 @@ const Request = ({ onRequestUpdate }) => {
     return grouped;
   }, [requests]);
 
+  // Helper function to check for rejected/disapproved items in a year group
+  const getRejectedItemsInfo = useCallback((yearRequests) => {
+    let rejectedCount = 0;
+    let rejectedRequests = [];
+    
+    yearRequests.forEach(request => {
+      if (request.items && request.items.length > 0) {
+        const rejectedItems = request.items.filter(item => 
+          item.approvalStatus === 'disapproved' || request.status === 'rejected'
+        );
+        if (rejectedItems.length > 0) {
+          rejectedCount += rejectedItems.length;
+          if (!rejectedRequests.find(r => r._id === request._id)) {
+            rejectedRequests.push(request);
+          }
+        }
+      }
+    });
+    
+    return { rejectedCount, rejectedRequests };
+  }, []);
+
+  // Handle entering revision mode for rejected requests
+  const handleEnterRevisionMode = useCallback((yearRequests) => {
+    const { rejectedRequests } = getRejectedItemsInfo(yearRequests);
+    
+    if (rejectedRequests.length === 0) {
+      setAlertModal({
+        show: true,
+        variant: 'warning',
+        title: 'No Rejected Items',
+        message: 'There are no rejected items to revise in this year group.'
+      });
+      return;
+    }
+    
+    // Use the first rejected request (or combine all if needed)
+    const requestToRevise = rejectedRequests[0];
+    
+    // Normalize items for the form
+    const normalizedItems = (requestToRevise.items || []).map((item, index) => ({
+      id: item.id || item._id || `item-${Date.now()}-${index}`,
+      item: item.item || '',
+      quantity: Number(item.quantity) || 0,
+      quantityByYear: item.quantityByYear || {},
+      price: item.price ? Number(item.price) : 0,
+      range: item.range || 'mid',
+      specification: item.specification || '',
+      purpose: item.purpose || '',
+      approvalStatus: item.approvalStatus || 'pending',
+      approvalReason: item.approvalReason || '',
+      isRejected: item.approvalStatus === 'disapproved' || requestToRevise.status === 'rejected'
+    }));
+    
+    // Set up revision mode
+    setRequestForm({
+      requestTitle: requestToRevise.requestTitle || requestToRevise.title || '',
+      priority: requestToRevise.priority || 'medium',
+      year: requestToRevise.year || '2024-2026',
+      description: requestToRevise.description || '',
+      items: normalizedItems
+    });
+    
+    setRevisingRequest(requestToRevise);
+    setIsRevisingRequest(true);
+    setSelectedYearGroup(null); // Close year group view if open
+  }, [getRejectedItemsInfo]);
+
   // Combine all items from all requests in the selected year group
+  // Items with the same name are combined by summing their quantities
   const allYearGroupItems = useMemo(() => {
     if (!selectedYearGroup) return [];
-    const items = [];
+    const itemsMap = new Map(); // Use Map to group items by name (case-insensitive)
     const cycleYears = getYearsFromCycle(selectedYearGroup.year);
     
     selectedYearGroup.requests.forEach(request => {
       if (request.items && request.items.length > 0) {
         request.items.forEach(item => {
+          // Normalize item name for comparison (case-insensitive, trimmed)
+          const itemNameKey = (item.item || '').trim().toLowerCase();
+          
+          if (!itemNameKey) return; // Skip items without names
+          
           // Ensure quantityByYear is preserved and properly formatted
           let quantityByYear = item.quantityByYear || {};
           
-          // If quantityByYear is empty but quantity exists, and we have cycle years,
-          // we could initialize it, but for now just preserve what's there
           // Convert any number keys to strings for consistency
           if (quantityByYear && typeof quantityByYear === 'object') {
             const normalizedQuantityByYear = {};
@@ -340,24 +711,70 @@ const Request = ({ onRequestUpdate }) => {
             quantityByYear = normalizedQuantityByYear;
           }
           
-          // Log for debugging
-          if (Object.keys(quantityByYear).length > 0) {
-            console.log('Item quantityByYear:', item.item, quantityByYear, 'Total quantity:', item.quantity);
-          } else if (item.quantity) {
-            console.log('Item without quantityByYear:', item.item, 'Total quantity:', item.quantity);
+          // If this item name already exists, combine quantities
+          if (itemsMap.has(itemNameKey)) {
+            const existingItem = itemsMap.get(itemNameKey);
+            
+            // Combine quantityByYear by summing values for each year
+            const combinedQuantityByYear = { ...existingItem.quantityByYear };
+            Object.keys(quantityByYear).forEach(year => {
+              const existingQty = Number(combinedQuantityByYear[year] || 0);
+              const newQty = Number(quantityByYear[year] || 0);
+              combinedQuantityByYear[year] = existingQty + newQty;
+            });
+            
+            // Also combine total quantity
+            const existingTotalQty = Number(existingItem.quantity || 0);
+            const newTotalQty = Number(item.quantity || 0);
+            const combinedTotalQty = existingTotalQty + newTotalQty;
+            
+            // Determine combined approval status:
+            // - If any is disapproved, show disapproved
+            // - If all are approved, show approved
+            // - Otherwise pending
+            let combinedApprovalStatus = 'pending';
+            const existingStatus = existingItem.approvalStatus || 'pending';
+            const newStatus = item.approvalStatus || 'pending';
+            if (existingStatus === 'disapproved' || newStatus === 'disapproved') {
+              combinedApprovalStatus = 'disapproved';
+            } else if (existingStatus === 'approved' && newStatus === 'approved') {
+              combinedApprovalStatus = 'approved';
+            }
+            
+            // Update the existing item with combined data
+            itemsMap.set(itemNameKey, {
+              ...existingItem,
+              quantity: combinedTotalQty,
+              quantityByYear: combinedQuantityByYear,
+              approvalStatus: combinedApprovalStatus,
+              // Keep the first non-empty specification, purpose, range, price
+              specification: existingItem.specification || item.specification || '',
+              purpose: existingItem.purpose || item.purpose || '',
+              range: existingItem.range || item.range || 'mid',
+              price: existingItem.price || item.price || 0,
+              // Keep itemStatus from the first approved item if available
+              itemStatus: existingItem.itemStatus || item.itemStatus || null,
+              itemStatusRemarks: existingItem.itemStatusRemarks || item.itemStatusRemarks || '',
+              itemStatusUpdatedAt: existingItem.itemStatusUpdatedAt || item.itemStatusUpdatedAt || null,
+              // Keep approvalReason from disapproved item
+              approvalReason: existingItem.approvalReason || item.approvalReason || '',
+            });
+          } else {
+            // First occurrence of this item name
+            itemsMap.set(itemNameKey, {
+              ...item,
+              quantityByYear: quantityByYear,
+              requestId: request._id,
+              requestTitle: request.requestTitle || request.title,
+              requestStatus: request.status
+            });
           }
-          
-          items.push({
-            ...item,
-            quantityByYear: quantityByYear,
-            requestId: request._id,
-            requestTitle: request.requestTitle || request.title,
-            requestStatus: request.status
-          });
         });
       }
     });
-    return items;
+    
+    // Convert Map to array
+    return Array.from(itemsMap.values());
   }, [selectedYearGroup]);
 
   // Get years from the selected year cycle for the table
@@ -473,6 +890,295 @@ const Request = ({ onRequestUpdate }) => {
     });
   };
 
+  // Handle editing an item (opens modal)
+  const handleEditItem = (item) => {
+    // Check if request is submitted, approved, rejected, or resubmitted - if so, cannot edit
+    const requestStatus = item.requestStatus || 'pending';
+    const isRequestSubmitted = ['submitted', 'approved', 'rejected', 'resubmitted'].includes(requestStatus);
+    
+    if (isRequestSubmitted) {
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Cannot Edit',
+        message: 'This request has been submitted and cannot be edited. Please contact the administrator if you need to make changes.'
+      });
+      return;
+    }
+    
+    // Get years from the selected year group
+    const cycleYears = selectedYearGroup ? getYearsFromCycle(selectedYearGroup.year) : [];
+    const quantityByYear = {};
+    
+    // Initialize quantityByYear with existing values or zeros
+    if (item.quantityByYear && typeof item.quantityByYear === 'object') {
+      cycleYears.forEach(year => {
+        const yearStr = year.toString();
+        quantityByYear[yearStr] = item.quantityByYear[yearStr] || item.quantityByYear[year] || 0;
+      });
+    } else {
+      cycleYears.forEach(year => {
+        quantityByYear[year.toString()] = 0;
+      });
+    }
+    
+    setEditItemForm({
+      item: item.item || '',
+      quantityByYear: quantityByYear,
+      range: item.range || 'mid',
+      specification: item.specification || '',
+      purpose: item.purpose || ''
+    });
+    
+    setEditItemModal({
+      show: true,
+      item: item,
+      requestId: item.requestId,
+      itemId: item.id || item._id
+    });
+  };
+
+  // Handle edit form field change
+  const handleEditFormChange = (field, value) => {
+    if (field.startsWith('quantityByYear.')) {
+      const year = field.split('.')[1];
+      const numValue = value === '' ? 0 : Math.max(0, parseInt(value, 10) || 0);
+      setEditItemForm(prev => ({
+        ...prev,
+        quantityByYear: {
+          ...prev.quantityByYear,
+          [year]: numValue
+        }
+      }));
+    } else {
+      setEditItemForm(prev => ({
+        ...prev,
+        [field]: value
+      }));
+    }
+  };
+
+  // Handle save button click - shows confirmation first
+  const handleSaveItemEdit = () => {
+    // Validate form first
+    if (!editItemForm.item || editItemForm.item.trim() === '') {
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Validation Error',
+        message: 'Item name is required.'
+      });
+      return;
+    }
+
+    // Check if at least one quantity is provided
+    const hasQuantity = Object.keys(editItemForm.quantityByYear || {}).length > 0
+      ? Object.values(editItemForm.quantityByYear).some(qty => Number(qty) > 0)
+      : false;
+
+    if (!hasQuantity) {
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Validation Error',
+        message: 'Please provide at least one quantity for a year.'
+      });
+      return;
+    }
+
+    // Show confirmation modal
+    setSaveItemConfirmationModal({ show: true });
+  };
+
+  // Actually perform the save after confirmation
+  const handleConfirmSaveItemEdit = async () => {
+    if (!editItemModal.item || !editItemModal.requestId || !editItemModal.itemId) return;
+
+    // Validate if item is IT-related using AI
+    const validation = await performITValidation(editItemForm.item);
+    if (!validation.isValid) {
+      setSaveItemConfirmationModal({ show: false });
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Non-IT Item Detected',
+        message: validation.reason
+      });
+      return; // Don't save the item
+    }
+
+    try {
+      setLoading(true);
+      const token = localStorage.getItem('token');
+      
+      // Find the request in selectedYearGroup
+      const request = selectedYearGroup.requests.find(r => r._id === editItemModal.requestId);
+      if (!request) {
+        setAlertModal({
+          show: true,
+          variant: 'danger',
+          title: 'Error',
+          message: 'Request not found.'
+        });
+        return;
+      }
+
+      // Calculate total quantity from quantityByYear
+      const totalQuantity = Object.values(editItemForm.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
+
+      // Update the item in the request's items array
+      const updatedItems = request.items.map(item => {
+        if ((item.id || item._id) === editItemModal.itemId) {
+          return {
+            ...item,
+            item: editItemForm.item,
+            quantity: totalQuantity,
+            quantityByYear: editItemForm.quantityByYear || {},
+            price: item.price || 0, // Keep existing price, don't allow editing
+            range: editItemForm.range,
+            specification: editItemForm.specification || '',
+            purpose: editItemForm.purpose || ''
+          };
+        }
+        return item;
+      });
+
+      // Update the request
+      const response = await axios.put(
+        API_ENDPOINTS.requests.get(editItemModal.requestId),
+        {
+          ...request,
+          items: updatedItems
+        },
+        {
+          headers: { 'x-auth-token': token }
+        }
+      );
+
+      // Update selectedYearGroup with the updated request
+      setSelectedYearGroup(prev => ({
+        ...prev,
+        requests: prev.requests.map(r => 
+          r._id === editItemModal.requestId ? response.data : r
+        )
+      }));
+
+      setAlertModal({
+        show: true,
+        variant: 'success',
+        title: 'Item Updated',
+        message: 'Item has been updated successfully!'
+      });
+
+      // Close modals and reset form
+      setSaveItemConfirmationModal({ show: false });
+      setEditItemModal({ show: false, item: null, requestId: null, itemId: null });
+      setEditItemForm({ item: '', quantityByYear: {}, range: 'mid', specification: '', purpose: '' });
+      await fetchRequests();
+    } catch (error) {
+      console.error('Error updating item:', error);
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Update Failed',
+        message: error.response?.data?.message || 'Failed to update item.'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle deleting an item
+  const handleDeleteItem = (item) => {
+    // Check if request is submitted, approved, rejected, or resubmitted - if so, cannot delete
+    const requestStatus = item.requestStatus || 'pending';
+    const isRequestSubmitted = ['submitted', 'approved', 'rejected', 'resubmitted'].includes(requestStatus);
+    
+    if (isRequestSubmitted) {
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Cannot Delete',
+        message: 'This request has been submitted and items cannot be deleted. Please contact the administrator if you need to make changes.'
+      });
+      return;
+    }
+    
+    setDeleteItemModal({
+      show: true,
+      requestId: item.requestId,
+      itemId: item.id || item._id,
+      itemName: item.item
+    });
+  };
+
+  // Confirm delete item
+  const handleConfirmDeleteItem = async () => {
+    if (!deleteItemModal.requestId || !deleteItemModal.itemId) return;
+
+    try {
+      setDeletingItem(true);
+      const token = localStorage.getItem('token');
+      
+      // Find the request in selectedYearGroup
+      const request = selectedYearGroup.requests.find(r => r._id === deleteItemModal.requestId);
+      if (!request) {
+        setAlertModal({
+          show: true,
+          variant: 'danger',
+          title: 'Error',
+          message: 'Request not found.'
+        });
+        return;
+      }
+
+      // Remove the item from the request's items array
+      const updatedItems = request.items.filter(item => 
+        (item.id || item._id) !== deleteItemModal.itemId
+      );
+
+      // Update the request
+      const response = await axios.put(
+        API_ENDPOINTS.requests.get(deleteItemModal.requestId),
+        {
+          ...request,
+          items: updatedItems
+        },
+        {
+          headers: { 'x-auth-token': token }
+        }
+      );
+
+      // Update selectedYearGroup with the updated request
+      setSelectedYearGroup(prev => ({
+        ...prev,
+        requests: prev.requests.map(r => 
+          r._id === deleteItemModal.requestId ? response.data : r
+        )
+      }));
+
+      setAlertModal({
+        show: true,
+        variant: 'success',
+        title: 'Item Deleted',
+        message: `Item "${deleteItemModal.itemName}" has been deleted successfully!`
+      });
+
+      setDeleteItemModal({ show: false, requestId: null, itemId: null, itemName: '' });
+      await fetchRequests();
+    } catch (error) {
+      console.error('Error deleting item:', error);
+      setAlertModal({
+        show: true,
+        variant: 'danger',
+        title: 'Delete Failed',
+        message: error.response?.data?.message || 'Failed to delete item.'
+      });
+    } finally {
+      setDeletingItem(false);
+    }
+  };
+
   // Debug: Track items changes
   useEffect(() => {
     console.log('requestForm.items changed:', requestForm.items);
@@ -493,7 +1199,77 @@ const Request = ({ onRequestUpdate }) => {
       ...prev,
       [name]: value
     }));
+    
+    // Clear validation error when user starts typing again
+    if (name === 'item' && itemValidationError) {
+      setItemValidationError('');
+      setItemValidationResult(null);
+    }
   };
+
+  // Shared validation function
+  const validateItem = async (itemName) => {
+    const trimmed = itemName.trim();
+    
+    // Don't validate if input is empty or too short
+    if (!trimmed || trimmed.length < 2) {
+      setItemValidationLoading(false);
+      setItemValidationResult(null);
+      setItemValidationError('');
+      return;
+    }
+
+    // Set loading state
+    setItemValidationLoading(true);
+    setItemValidationError('');
+    setItemValidationResult(null);
+
+    try {
+      const validation = await performITValidation(trimmed);
+      setItemValidationResult(validation);
+      
+      if (!validation.isValid) {
+        setItemValidationError(validation.reason);
+      } else {
+        setItemValidationError('');
+      }
+    } catch (error) {
+      console.error('Validation error:', error);
+      // On error, don't block the user
+      setItemValidationError('');
+      setItemValidationResult({ isValid: true, reason: '', loading: false, error: true });
+    } finally {
+      setItemValidationLoading(false);
+    }
+  };
+
+  // Validate item when user leaves the input field (onBlur)
+  const handleItemBlur = () => {
+    validateItem(currentItem.item);
+  };
+
+  // Auto-validate after user stops typing for 2.5 seconds (inactivity)
+  useEffect(() => {
+    const trimmed = currentItem.item.trim();
+    
+    // Don't validate if input is empty or too short
+    if (!trimmed || trimmed.length < 2) {
+      setItemValidationLoading(false);
+      setItemValidationResult(null);
+      setItemValidationError('');
+      return;
+    }
+
+    // Set loading state after inactivity period
+    const debounceId = setTimeout(() => {
+      // Only validate if input hasn't changed (user stopped typing)
+      if (currentItem.item.trim() === trimmed) {
+        validateItem(trimmed);
+      }
+    }, 2500); // 2.5 seconds of inactivity
+
+    return () => clearTimeout(debounceId);
+  }, [currentItem.item]);
 
   // Handle year-by-year quantity change
   const handleQuantityByYearChange = (year, value) => {
@@ -514,13 +1290,43 @@ const Request = ({ onRequestUpdate }) => {
     });
   };
 
-  const addItemToRequest = () => {
+  const addItemToRequest = async () => {
     // Calculate total from quantityByYear if available, otherwise use quantity
     const totalQuantity = Object.keys(currentItem.quantityByYear || {}).length > 0
       ? Object.values(currentItem.quantityByYear).reduce((sum, qty) => sum + (qty || 0), 0)
       : Number(currentItem.quantity) || 0;
 
     if (currentItem.item && totalQuantity > 0) {
+      // Validate if item is IT-related using AI
+      if (itemValidationLoading) {
+        setAlertModal({
+          show: true,
+          variant: 'warning',
+          title: 'Please Wait',
+          message: 'Validating item classification. Please wait a moment and try again.'
+        });
+        return;
+      }
+
+      // If we have a cached result, use it; otherwise perform validation
+      let validation = itemValidationResult;
+      if (!validation || validation.loading) {
+        validation = await performITValidation(currentItem.item);
+        setItemValidationResult(validation);
+      }
+      
+      if (!validation.isValid) {
+        // Show warning modal - item is not IT-related
+        setAlertModal({
+          show: true,
+          variant: 'danger',
+          title: 'Non-IT Item Detected',
+          message: validation.reason
+        });
+        setItemValidationError(validation.reason);
+        return; // Don't add the item
+      }
+
       const newItem = {
         id: Date.now().toString(),
         item: currentItem.item,
@@ -572,6 +1378,7 @@ const Request = ({ onRequestUpdate }) => {
         specification: '',
         purpose: ''
       });
+      setItemValidationError(''); // Clear validation error when item is successfully added
       setShowAddItemForm(false);
       } else {
       setAlertModal({
@@ -645,8 +1452,20 @@ const Request = ({ onRequestUpdate }) => {
   const handleSubmitRequest = async (e) => {
     e.preventDefault();
     
+    // Prevent double submission
+    if (isSubmittingRef.current || loading) {
+      console.log('Submission already in progress, ignoring duplicate click');
+      return;
+    }
+    
     // Small delay to ensure all state updates are complete
     await new Promise(resolve => setTimeout(resolve, 50));
+    
+    // Check again after delay (in case state changed)
+    if (isSubmittingRef.current || loading) {
+      console.log('Submission already in progress after delay, ignoring duplicate click');
+      return;
+    }
     
     console.log('=== SUBMIT REQUEST ===');
     // Use ref to get the latest state to avoid stale closures
@@ -668,6 +1487,8 @@ const Request = ({ onRequestUpdate }) => {
     }
     
     if (currentForm.items.length > 0) {
+      // Set submitting flag immediately to prevent double clicks
+      isSubmittingRef.current = true;
       try {
         setLoading(true);
         setError(null);
@@ -823,6 +1644,7 @@ const Request = ({ onRequestUpdate }) => {
         });
       } finally {
         setLoading(false);
+        isSubmittingRef.current = false; // Reset submitting flag
       }
     } else {
       setAlertModal({
@@ -877,7 +1699,19 @@ const Request = ({ onRequestUpdate }) => {
             ) : (
               <div className="space-y-4">
                 {Object.entries(groupedRequests).map(([year, yearRequests]) => {
-                  const totalItems = yearRequests.reduce((sum, req) => sum + (req.items?.length || 0), 0);
+                  // Count unique items by name (combining duplicates)
+                  const uniqueItemsMap = new Map();
+                  yearRequests.forEach(req => {
+                    if (req.items && req.items.length > 0) {
+                      req.items.forEach(item => {
+                        const itemNameKey = (item.item || '').trim().toLowerCase();
+                        if (itemNameKey) {
+                          uniqueItemsMap.set(itemNameKey, true);
+                        }
+                      });
+                    }
+                  });
+                  const totalItems = uniqueItemsMap.size;
                   const latestRequest = yearRequests.sort((a, b) => {
                     const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
                     const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
@@ -896,6 +1730,10 @@ const Request = ({ onRequestUpdate }) => {
                   else if (allApproved) overallStatus = 'approved';
                   else if (allRejected) overallStatus = 'rejected';
                   
+                  // Check for rejected items
+                  const { rejectedCount, rejectedRequests } = getRejectedItemsInfo(yearRequests);
+                  const hasRejectedItems = rejectedCount > 0;
+                  
                   return (
                     <div key={year} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
                       <div className="flex items-start justify-between mb-4">
@@ -905,11 +1743,16 @@ const Request = ({ onRequestUpdate }) => {
                           </h2>
                           <div className="space-y-1.5">
                             <div className="text-sm text-gray-700">
-                              <span className="font-medium">Requests:</span> {yearRequests.length} request{yearRequests.length !== 1 ? 's' : ''}
-                            </div>
-                            <div className="text-sm text-gray-700">
                               <span className="font-medium">Total Items:</span> {totalItems} item{totalItems !== 1 ? 's' : ''}
                             </div>
+                            {hasRejectedItems && (
+                              <div className="text-sm text-red-700 flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                                </svg>
+                                <span className="font-medium">{rejectedCount} item{rejectedCount !== 1 ? 's' : ''} need revision</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="ml-4 flex-shrink-0">
@@ -1019,6 +1862,19 @@ const Request = ({ onRequestUpdate }) => {
                             </button>
                           );
                         })()}
+                        {/* Revise Request button - shows when there are rejected items */}
+                        {hasRejectedItems && (
+                          <button
+                            onClick={() => handleEnterRevisionMode(yearRequests)}
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                            title={`Revise ${rejectedCount} rejected item${rejectedCount !== 1 ? 's' : ''}`}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                            <span>Revise Request {rejectedCount > 0 && `(${rejectedCount})`}</span>
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             setSelectedYearGroup({ year, requests: yearRequests });
@@ -1099,6 +1955,41 @@ const Request = ({ onRequestUpdate }) => {
             </div>
           </div>
 
+          {/* Rejected Items Alert Banner */}
+          {(() => {
+            const { rejectedCount, rejectedRequests } = getRejectedItemsInfo(selectedYearGroup.requests);
+            const hasRejectedItems = rejectedCount > 0;
+            
+            return hasRejectedItems && (
+              <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 shadow-sm">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start">
+                    <svg className="w-6 h-6 text-red-600 mt-0.5 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    <div className="flex-1">
+                      <h4 className="text-base font-semibold text-red-900 mb-1">
+                        Items Require Revision
+                      </h4>
+                      <p className="text-sm text-red-800 mb-3">
+                        {rejectedCount} item{rejectedCount !== 1 ? 's' : ''} {rejectedCount === 1 ? 'has' : 'have'} been rejected and need revision. Please review the rejection reasons and make necessary changes.
+                      </p>
+                      <button
+                        onClick={() => handleEnterRevisionMode(selectedYearGroup.requests)}
+                        className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                        <span>Revise Request ({rejectedCount} item{rejectedCount !== 1 ? 's' : ''})</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* All Items Table */}
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
@@ -1111,40 +2002,57 @@ const Request = ({ onRequestUpdate }) => {
             </div>
             <div className="overflow-x-auto">
               {allYearGroupItems.length > 0 ? (
-                  <table className="min-w-full divide-y divide-gray-200">
+                  <table className="min-w-full divide-y divide-gray-200 table-fixed">
                     <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider w-32">Item Name</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-28">Approval Status</th>
                         {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Item Status</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-28">Item Status</th>
                         )}
                         {cycleYears.map(year => (
-                          <th key={year} className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                          <th key={year} className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-20">
                             {year}
                           </th>
                         ))}
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-20">Range</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider w-80">Specification</th>
                         {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider w-64">Purpose</th>
                         )}
                         {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Remarks</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-48">Remarks</th>
                         )}
-                        {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
-                        )}
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-24">View</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {allYearGroupItems.map((item, index) => {
                         const isApproved = item.approvalStatus === 'approved';
+                        const isDisapproved = item.approvalStatus === 'disapproved';
+                        const itemKey = `${item.requestId}-${item.id || item._id}`;
+                        
                         return (
-                          <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 whitespace-nowrap">
-                              <div className="text-sm font-medium text-gray-900">{item.item}</div>
+                          <tr key={itemKey} className={`hover:bg-gray-50 ${isDisapproved ? 'bg-red-50 border-l-4 border-l-red-500' : ''}`}>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-medium text-gray-900 truncate" title={item.item}>
+                                  {item.item}
+                                </div>
+                                {isDisapproved && (
+                                  <div className="group relative flex-shrink-0">
+                                    <svg className="w-4 h-4 text-red-600 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                                    </svg>
+                                    {item.approvalReason && (
+                                      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 w-72 max-w-[90vw] p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl break-words border border-gray-700">
+                                        <div className="font-semibold mb-2 text-red-300">Rejection Reason:</div>
+                                        <div className="whitespace-pre-wrap">{item.approvalReason}</div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-center">
                               <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
@@ -1181,12 +2089,10 @@ const Request = ({ onRequestUpdate }) => {
                               </td>
                             )}
                             {cycleYears.map(year => {
-                              // Check if quantityByYear exists and has data for this year
-                              // Try both string and number keys for compatibility
+                              const yearStr = year.toString();
                               const hasQuantityByYear = item.quantityByYear && 
                                                        typeof item.quantityByYear === 'object' && 
                                                        Object.keys(item.quantityByYear).length > 0;
-                              const yearStr = year.toString();
                               const yearNum = parseInt(year, 10);
                               const yearQuantity = hasQuantityByYear 
                                 ? (item.quantityByYear[yearStr] !== undefined ? item.quantityByYear[yearStr] : item.quantityByYear[yearNum])
@@ -1194,11 +2100,6 @@ const Request = ({ onRequestUpdate }) => {
                               const displayValue = yearQuantity !== null && yearQuantity !== undefined 
                                 ? yearQuantity 
                                 : '—';
-                              
-                              // Debug logging
-                              if (hasQuantityByYear && yearQuantity === null) {
-                                console.log('Item:', item.item, 'quantityByYear:', item.quantityByYear, 'year:', year, 'yearStr:', yearStr);
-                              }
                               
                               return (
                                 <td key={year} className="px-4 py-3 whitespace-nowrap text-center">
@@ -1209,11 +2110,6 @@ const Request = ({ onRequestUpdate }) => {
                               );
                             })}
                           <td className="px-4 py-3 whitespace-nowrap text-center">
-                            <div className="text-sm text-gray-900">
-                              {item.price > 0 ? `₱${item.price.toLocaleString()}` : '—'}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-center">
                             <span className={`px-2 py-0.5 text-xs font-semibold rounded ${
                               item.range === 'high' ? 'bg-gray-200 text-gray-800' :
                               item.range === 'mid' ? 'bg-gray-100 text-gray-700' :
@@ -1223,41 +2119,80 @@ const Request = ({ onRequestUpdate }) => {
                             </span>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="text-sm text-gray-900 max-w-xs break-words">
-                              {item.specification || <span className="text-gray-400">—</span>}
+                            <div className="text-sm text-gray-900">
+                              {item.specification ? (
+                                <div className="group relative">
+                                  <div className="line-clamp-2 break-words cursor-help" title={item.specification.length > 150 ? item.specification : ''}>
+                                    {item.specification}
+                                  </div>
+                                  {item.specification.length > 150 && (
+                                    <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 w-96 max-w-[90vw] p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl break-words border border-gray-700">
+                                      <div className="font-semibold mb-2 text-gray-300">Full Specification:</div>
+                                      <div className="whitespace-pre-wrap">{item.specification}</div>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
                             </div>
                           </td>
                           {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
                             <td className="px-4 py-3">
-                              <div className="text-sm text-gray-900 max-w-xs break-words">
-                                {isApproved ? (item.purpose || <span className="text-gray-400">—</span>) : <span className="text-gray-400">—</span>}
+                              <div className="text-sm text-gray-900">
+                                {isApproved && item.purpose ? (
+                                  <div className="group relative">
+                                    <div className="line-clamp-2 break-words cursor-help" title={item.purpose.length > 100 ? item.purpose : ''}>
+                                      {item.purpose}
+                                    </div>
+                                    {item.purpose.length > 100 && (
+                                      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 w-80 max-w-[90vw] p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl break-words border border-gray-700">
+                                        <div className="font-semibold mb-2 text-gray-300">Purpose:</div>
+                                        <div className="whitespace-pre-wrap">{item.purpose}</div>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
                               </div>
                             </td>
                           )}
                           {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
                             <td className="px-4 py-3">
-                              <div className="text-sm text-gray-700 max-w-xs break-words">
-                                {isApproved ? (item.itemStatusRemarks || <span className="text-gray-400">—</span>) : <span className="text-gray-400">—</span>}
+                              <div className="text-sm text-gray-700">
+                                {isApproved && item.itemStatusRemarks ? (
+                                  <div className="group relative">
+                                    <div className="line-clamp-2 break-words cursor-help" title={item.itemStatusRemarks.length > 80 ? item.itemStatusRemarks : ''}>
+                                      {item.itemStatusRemarks}
+                                    </div>
+                                    {item.itemStatusRemarks.length > 80 && (
+                                      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 w-72 max-w-[90vw] p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl break-words border border-gray-700">
+                                        <div className="font-semibold mb-2 text-gray-300">Remarks:</div>
+                                        <div className="whitespace-pre-wrap">{item.itemStatusRemarks}</div>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-400">—</span>
+                                )}
                               </div>
                             </td>
                           )}
-                          {allYearGroupItems.some(i => i.approvalStatus === 'approved') && (
-                            <td className="px-4 py-3 whitespace-nowrap text-center">
-                              {isApproved && (
-                                <button
-                                  onClick={() => openStatusUpdateModal(item.requestId, item.id || item._id, item.item, item.itemStatus)}
-                                  className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                                >
-                                  {item.itemStatus ? 'Update Status' : 'Set Status'}
-                                </button>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <button
+                              onClick={() => setViewItemModal({ show: true, item: item })}
+                              className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+                              title="View full item details"
+                            >
+                              View
+                            </button>
+                          </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
               ) : (
                 <div className="text-center py-12">
                   <p className="text-gray-500">No items in this year group</p>
@@ -1277,6 +2212,10 @@ const Request = ({ onRequestUpdate }) => {
                 setIsRevisingRequest(false);
                 setRevisingRequest(null);
                 setRevisionNotes('');
+                setEditingRevisionItemIndex(null);
+                setRevisionItemInsights(null);
+                setRevisionAiStatus('idle');
+                setRevisionAiError(null);
                 setRequestForm({
                   requestTitle: '',
                   priority: 'medium',
@@ -1395,6 +2334,13 @@ const Request = ({ onRequestUpdate }) => {
                                   ...prev,
                                   items: prev.items.filter((_, i) => i !== index)
                                 }));
+                                // Reset editing index if this item was being edited
+                                if (editingRevisionItemIndex === index) {
+                                  setEditingRevisionItemIndex(null);
+                                  setRevisionItemInsights(null);
+                                  setRevisionAiStatus('idle');
+                                  setRevisionAiError(null);
+                                }
                               }}
                               className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition-colors flex items-center gap-1"
                             >
@@ -1407,21 +2353,29 @@ const Request = ({ onRequestUpdate }) => {
                         </div>
                         
                         {/* Item fields - editable only for rejected items */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className={`grid grid-cols-1${isRejected && item.item && item.item.trim() ? ' lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] gap-4 sm:gap-6' : ''}`}>
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Item Name</label>
-                            <input
-                              type="text"
-                              value={item.item}
-                              onChange={(e) => {
-                                const newItems = [...requestForm.items];
-                                newItems[index].item = e.target.value;
-                                setRequestForm(prev => ({ ...prev, items: newItems }));
-                              }}
-                              disabled={!isRejected}
-                              className={`w-full px-3 py-2 border border-gray-300 rounded-lg ${!isRejected ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}
-                            />
-                          </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Item Name</label>
+                                <input
+                                  type="text"
+                                  value={item.item}
+                                  onChange={(e) => {
+                                    const newItems = [...requestForm.items];
+                                    newItems[index].item = e.target.value;
+                                    setRequestForm(prev => ({ ...prev, items: newItems }));
+                                    // Track this item for AI insights
+                                    setEditingRevisionItemIndex(index);
+                                  }}
+                                  onFocus={() => {
+                                    // Track this item for AI insights when focused
+                                    setEditingRevisionItemIndex(index);
+                                  }}
+                                  disabled={!isRejected}
+                                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg ${!isRejected ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'}`}
+                                />
+                              </div>
                           <div>
                             <label className="block text-sm font-medium text-gray-700 mb-2">Quantity</label>
                             <input
@@ -1489,6 +2443,19 @@ const Request = ({ onRequestUpdate }) => {
                               </div>
                             </div>
                           )}
+                            </div>
+                          </div>
+                          
+                          {/* AI Assistant Sidebar - shows when editing rejected item name */}
+                          {isRejected && editingRevisionItemIndex === index && item.item && item.item.trim() && (
+                            <ItemInsightSidebar
+                              itemName={item.item}
+                              status={revisionAiStatus}
+                              insights={revisionItemInsights}
+                              error={revisionAiError}
+                              onRetry={handleRevisionAiRetry}
+                            />
+                          )}
                         </div>
                       </div>
                     );
@@ -1506,6 +2473,7 @@ const Request = ({ onRequestUpdate }) => {
                     type="button"
                     onClick={() => {
                       setCurrentItem({ item: '', quantity: '', quantityByYear: {}, price: '', range: 'mid', specification: '', purpose: '' });
+                      setItemValidationError('');
                       setShowAddItemForm(false);
                     }}
                     className="text-gray-400 hover:text-gray-600"
@@ -1520,15 +2488,43 @@ const Request = ({ onRequestUpdate }) => {
                   <div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 mb-4">
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Item Name *</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Item Name *
+                          {itemValidationLoading && (
+                            <span className="ml-2 text-xs text-blue-600 flex items-center">
+                              <svg className="w-3 h-3 animate-spin mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0119 9M5 15a7.5 7.5 0 0113.5 0" />
+                              </svg>
+                              Validating...
+                            </span>
+                          )}
+                        </label>
                         <input
                           type="text"
                           name="item"
                           value={currentItem.item}
                           onChange={handleCurrentItemChange}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                          onBlur={handleItemBlur}
+                          className={`w-full px-3 py-2 border rounded-lg focus:ring-2 ${
+                            itemValidationError 
+                              ? 'border-red-500 focus:ring-red-500 focus:border-red-500' 
+                              : itemValidationLoading
+                              ? 'border-blue-300 focus:ring-blue-400 focus:border-blue-400'
+                              : 'border-gray-300 focus:ring-gray-400 focus:border-gray-400'
+                          }`}
                           placeholder="e.g., Desktop Computers, Projectors"
+                          disabled={itemValidationLoading}
                         />
+                        {itemValidationError && (
+                          <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                            <div className="flex items-start">
+                              <svg className="w-5 h-5 text-red-600 mt-0.5 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                              </svg>
+                              <p className="text-sm text-red-800">{itemValidationError}</p>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Quantity by Year *</label>
@@ -1645,6 +2641,10 @@ const Request = ({ onRequestUpdate }) => {
                   setIsRevisingRequest(false);
                   setRevisingRequest(null);
                   setRevisionNotes('');
+                  setEditingRevisionItemIndex(null);
+                  setRevisionItemInsights(null);
+                  setRevisionAiStatus('idle');
+                  setRevisionAiError(null);
                 }}
                 className="px-6 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg font-medium transition-colors"
               >
@@ -1696,6 +2696,10 @@ const Request = ({ onRequestUpdate }) => {
                     setIsRevisingRequest(false);
                     setRevisingRequest(null);
                     setRevisionNotes('');
+                    setEditingRevisionItemIndex(null);
+                    setRevisionItemInsights(null);
+                    setRevisionAiStatus('idle');
+                    setRevisionAiError(null);
                     setRequestForm({
                       requestTitle: '',
                       priority: 'medium',
@@ -1814,15 +2818,43 @@ const Request = ({ onRequestUpdate }) => {
                     {/* Row 1: Item and Quantity */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Item Name *</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Item Name *
+                          {itemValidationLoading && (
+                            <span className="ml-2 text-xs text-blue-600 flex items-center">
+                              <svg className="w-3 h-3 animate-spin mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0119 9M5 15a7.5 7.5 0 0113.5 0" />
+                              </svg>
+                              Validating...
+                            </span>
+                          )}
+                        </label>
                         <input
                           type="text"
                           name="item"
                           value={currentItem.item}
                           onChange={handleCurrentItemChange}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                          onBlur={handleItemBlur}
+                          className={`w-full px-3 py-2 border rounded-lg focus:ring-2 ${
+                            itemValidationError 
+                              ? 'border-red-500 focus:ring-red-500 focus:border-red-500' 
+                              : itemValidationLoading
+                              ? 'border-blue-300 focus:ring-blue-400 focus:border-blue-400'
+                              : 'border-gray-300 focus:ring-gray-400 focus:border-gray-400'
+                          }`}
                           placeholder="e.g., Desktop Computers, Projectors"
+                          disabled={itemValidationLoading}
                         />
+                        {itemValidationError && (
+                          <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                            <div className="flex items-start">
+                              <svg className="w-5 h-5 text-red-600 mt-0.5 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                              </svg>
+                              <p className="text-sm text-red-800">{itemValidationError}</p>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       
                       <div>
@@ -1990,9 +3022,9 @@ const Request = ({ onRequestUpdate }) => {
                   </button>
                   <button
                     type="submit"
-                    disabled={requestForm.items.length === 0}
+                    disabled={requestForm.items.length === 0 || loading || isSubmittingRef.current}
                     className={`px-6 py-2 rounded-lg font-medium transition-colors duration-200 flex items-center space-x-2 ${
-                      requestForm.items.length > 0 
+                      requestForm.items.length > 0 && !loading && !isSubmittingRef.current
                         ? 'bg-gray-400 hover:bg-gray-500 text-white' 
                         : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     }`}
@@ -2000,7 +3032,7 @@ const Request = ({ onRequestUpdate }) => {
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                     </svg>
-                    <span>Submit Item ({requestForm.items.length} items)</span>
+                    <span>{loading || isSubmittingRef.current ? 'Submitting...' : `Submit Item (${requestForm.items.length} items)`}</span>
                   </button>
                 </div>
               </div>
@@ -2302,15 +3334,43 @@ const Request = ({ onRequestUpdate }) => {
                       <div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 mb-4">
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Item Name *</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                              Item Name *
+                              {itemValidationLoading && (
+                                <span className="ml-2 text-xs text-blue-600 flex items-center">
+                                  <svg className="w-3 h-3 animate-spin mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0119 9M5 15a7.5 7.5 0 0113.5 0" />
+                                  </svg>
+                                  Validating...
+                                </span>
+                              )}
+                            </label>
                             <input
                               type="text"
                               name="item"
                               value={currentItem.item}
                               onChange={handleCurrentItemChange}
-                              className="input-responsive tap-target"
+                              onBlur={handleItemBlur}
+                              className={`input-responsive tap-target ${
+                                itemValidationError 
+                                  ? 'border-red-500 focus:ring-red-500 focus:border-red-500' 
+                                  : itemValidationLoading
+                                  ? 'border-blue-300 focus:ring-blue-400 focus:border-blue-400'
+                                  : ''
+                              }`}
                               placeholder="e.g., Desktop Computers, Projectors"
+                              disabled={itemValidationLoading}
                             />
+                            {itemValidationError && (
+                              <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                                <div className="flex items-start">
+                                  <svg className="w-5 h-5 text-red-600 mt-0.5 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z" />
+                                  </svg>
+                                  <p className="text-sm text-red-800">{itemValidationError}</p>
+                                </div>
+                              </div>
+                            )}
                           </div>
                           <div>
                             <label className="block text-sm font-medium text-gray-700 mb-2">Quantity by Year *</label>
@@ -2436,12 +3496,17 @@ const Request = ({ onRequestUpdate }) => {
                     </button>
                     <button
                       type="submit"
-                      className="btn-responsive bg-gray-400 hover:bg-gray-500 text-white flex items-center justify-center space-x-2"
+                      disabled={loading || isSubmittingRef.current}
+                      className={`btn-responsive flex items-center justify-center space-x-2 ${
+                        loading || isSubmittingRef.current
+                          ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                          : 'bg-gray-400 hover:bg-gray-500 text-white'
+                      }`}
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      <span>Save Changes ({requestForm.items.length} {requestForm.items.length === 1 ? 'Item' : 'Items'})</span>
+                      <span>{loading || isSubmittingRef.current ? 'Saving...' : `Save Changes (${requestForm.items.length} ${requestForm.items.length === 1 ? 'Item' : 'Items'})`}</span>
                     </button>
                   </>
                 )}
@@ -2604,6 +3669,369 @@ const Request = ({ onRequestUpdate }) => {
             ></textarea>
           </div>
         </div>
+      </Modal>
+
+      {/* Delete Item Confirmation Modal */}
+      <Modal
+        isOpen={deleteItemModal.show}
+        variant="danger"
+        title="Delete Item"
+        message={`Are you sure you want to delete "${deleteItemModal.itemName}"? This action cannot be undone.`}
+        confirmLabel={deletingItem ? 'Deleting...' : 'Delete'}
+        cancelLabel="Cancel"
+        onConfirm={handleConfirmDeleteItem}
+        onClose={() => setDeleteItemModal({ show: false, requestId: null, itemId: null, itemName: '' })}
+      />
+
+      {/* Save Item Confirmation Modal */}
+      <Modal
+        isOpen={saveItemConfirmationModal.show}
+        variant="confirm"
+        title="Confirm Save Changes"
+        message={`Are you sure you want to save the changes to "${editItemForm.item}"?`}
+        confirmLabel={loading ? 'Saving...' : 'Yes, Save Changes'}
+        cancelLabel="Cancel"
+        onConfirm={handleConfirmSaveItemEdit}
+        onClose={() => setSaveItemConfirmationModal({ show: false })}
+        zIndex={100}
+      />
+
+      {/* Edit Item Modal */}
+      <Modal
+        isOpen={editItemModal.show}
+        variant="default"
+        title="Edit Item"
+        message="Update the item details below"
+        confirmLabel="Save Changes"
+        cancelLabel="Cancel"
+        onConfirm={handleSaveItemEdit}
+        onClose={() => {
+          setEditItemModal({ show: false, item: null, requestId: null, itemId: null });
+          setEditItemForm({ item: '', quantityByYear: {}, range: 'mid', specification: '', purpose: '' });
+        }}
+        closeOnOverlay={false}
+      >
+        <div className="space-y-4">
+          {/* Item Name */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Item Name *
+            </label>
+            <input
+              type="text"
+              value={editItemForm.item}
+              onChange={(e) => handleEditFormChange('item', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter item name"
+            />
+          </div>
+
+          {/* Quantity by Year */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Quantity by Year *
+            </label>
+            {selectedYearGroup && (() => {
+              const modalCycleYears = getYearsFromCycle(selectedYearGroup.year);
+              return modalCycleYears.length > 0 ? (
+                <div className="border border-gray-300 rounded-lg overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {modalCycleYears.map(year => (
+                          <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                            {year}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        {modalCycleYears.map(year => {
+                          const yearStr = year.toString();
+                          return (
+                            <td key={year} className="px-2 py-2 border-r border-gray-300 last:border-r-0">
+                              <input
+                                type="number"
+                                value={editItemForm.quantityByYear?.[yearStr] || ''}
+                                onChange={(e) => handleEditFormChange(`quantityByYear.${yearStr}`, e.target.value)}
+                                className="w-full px-2 py-1 text-sm text-center border border-gray-200 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="0"
+                                min="0"
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <input
+                  type="number"
+                  value={Object.values(editItemForm.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter quantity"
+                  min="1"
+                  disabled
+                />
+              );
+            })()}
+          </div>
+
+          {/* Range */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Range
+            </label>
+            <select
+              value={editItemForm.range}
+              onChange={(e) => handleEditFormChange('range', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="low">Low</option>
+              <option value="mid">Mid</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+
+          {/* Specification */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Specification
+            </label>
+            <textarea
+              value={editItemForm.specification}
+              onChange={(e) => handleEditFormChange('specification', e.target.value)}
+              rows="6"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              placeholder="Enter technical specifications for this item"
+            />
+          </div>
+
+          {/* Purpose */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Purpose
+            </label>
+            <textarea
+              value={editItemForm.purpose}
+              onChange={(e) => handleEditFormChange('purpose', e.target.value)}
+              rows="4"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              placeholder="Enter the purpose and intended use of this item"
+            />
+          </div>
+        </div>
+      </Modal>
+
+      {/* View Item Details Modal */}
+      <Modal
+        isOpen={viewItemModal.show}
+        variant="default"
+        title="Item Details"
+        message=""
+        confirmLabel="Close"
+        cancelLabel={null}
+        onConfirm={() => setViewItemModal({ show: false, item: null })}
+        onClose={() => setViewItemModal({ show: false, item: null })}
+        closeOnOverlay={true}
+        showCloseButton={true}
+        zIndex={100}
+      >
+        {viewItemModal.item && (
+          <div className="space-y-4">
+            {/* Item Name */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Item Name
+              </label>
+              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                {viewItemModal.item.item || '—'}
+              </div>
+            </div>
+
+            {/* Approval Status */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Approval Status
+              </label>
+              <div className="inline-block">
+                <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
+                  viewItemModal.item.approvalStatus === 'approved' ? 'bg-green-50 text-green-700' :
+                  viewItemModal.item.approvalStatus === 'disapproved' ? 'bg-red-50 text-red-700' :
+                  'bg-yellow-50 text-yellow-700'
+                }`}>
+                  {(viewItemModal.item.approvalStatus || 'pending').toUpperCase()}
+                </span>
+              </div>
+            </div>
+
+            {/* Item Status (if approved) */}
+            {viewItemModal.item.approvalStatus === 'approved' && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Item Status
+                </label>
+                <div className="inline-block">
+                  {viewItemModal.item.itemStatus ? (
+                    <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
+                      viewItemModal.item.itemStatus === 'pr_created' ? 'bg-blue-50 text-blue-700' :
+                      viewItemModal.item.itemStatus === 'purchased' ? 'bg-purple-50 text-purple-700' :
+                      viewItemModal.item.itemStatus === 'received' ? 'bg-green-50 text-green-700' :
+                      viewItemModal.item.itemStatus === 'in_transit' ? 'bg-yellow-50 text-yellow-700' :
+                      viewItemModal.item.itemStatus === 'completed' ? 'bg-emerald-50 text-emerald-700' :
+                      'bg-gray-50 text-gray-700'
+                    }`}>
+                      {viewItemModal.item.itemStatus === 'pr_created' ? 'PR CREATED' :
+                       viewItemModal.item.itemStatus === 'purchased' ? 'PURCHASED' :
+                       viewItemModal.item.itemStatus === 'received' ? 'RECEIVED' :
+                       viewItemModal.item.itemStatus === 'in_transit' ? 'IN TRANSIT' :
+                       viewItemModal.item.itemStatus === 'completed' ? 'COMPLETED' :
+                       viewItemModal.item.itemStatus.toUpperCase()}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-400">Not Set</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Quantity by Year */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Quantity by Year
+              </label>
+              {(() => {
+                const itemYearCycle = selectedYearGroup?.year || '2024-2026';
+                const modalCycleYears = getYearsFromCycle(itemYearCycle);
+                const hasQuantityByYear = viewItemModal.item.quantityByYear && 
+                                         typeof viewItemModal.item.quantityByYear === 'object' && 
+                                         Object.keys(viewItemModal.item.quantityByYear).length > 0;
+                
+                if (modalCycleYears.length > 0 && hasQuantityByYear) {
+                  return (
+                    <div className="border border-gray-300 rounded-lg overflow-hidden">
+                      <table className="w-full">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            {modalCycleYears.map(year => (
+                              <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                                {year}
+                              </th>
+                            ))}
+                            <th className="px-3 py-2 text-xs font-medium text-gray-700 text-center bg-gray-100">
+                              Total
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            {modalCycleYears.map(year => {
+                              const yearStr = year.toString();
+                              const yearNum = parseInt(year, 10);
+                              const yearQuantity = viewItemModal.item.quantityByYear[yearStr] !== undefined 
+                                ? viewItemModal.item.quantityByYear[yearStr] 
+                                : viewItemModal.item.quantityByYear[yearNum];
+                              return (
+                                <td key={year} className="px-3 py-2 text-sm text-center border-r border-gray-300 last:border-r-0">
+                                  {yearQuantity !== null && yearQuantity !== undefined ? yearQuantity : '—'}
+                                </td>
+                              );
+                            })}
+                            <td className="px-3 py-2 text-sm font-semibold text-center bg-gray-50">
+                              {viewItemModal.item.quantity || Object.values(viewItemModal.item.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0) || '—'}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                } else {
+                  return (
+                    <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                      {viewItemModal.item.quantity || '—'}
+                    </div>
+                  );
+                }
+              })()}
+            </div>
+
+            {/* Price */}
+            {viewItemModal.item.price && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Price
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                  ₱{parseFloat(viewItemModal.item.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              </div>
+            )}
+
+            {/* Range */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Range
+              </label>
+              <div className="inline-block">
+                <span className={`px-3 py-1 text-xs font-semibold rounded ${
+                  viewItemModal.item.range === 'high' ? 'bg-gray-200 text-gray-800' :
+                  viewItemModal.item.range === 'mid' ? 'bg-gray-100 text-gray-700' :
+                  'bg-gray-50 text-gray-600'
+                }`}>
+                  {viewItemModal.item.range ? viewItemModal.item.range.toUpperCase() : '—'}
+                </span>
+              </div>
+            </div>
+
+            {/* Specification */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Specification
+              </label>
+              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-60 overflow-y-auto whitespace-pre-wrap">
+                {viewItemModal.item.specification || '—'}
+              </div>
+            </div>
+
+            {/* Purpose (if approved) */}
+            {viewItemModal.item.approvalStatus === 'approved' && viewItemModal.item.purpose && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Purpose
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {viewItemModal.item.purpose}
+                </div>
+              </div>
+            )}
+
+            {/* Remarks (if approved) */}
+            {viewItemModal.item.approvalStatus === 'approved' && viewItemModal.item.itemStatusRemarks && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Remarks
+                </label>
+                <div className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {viewItemModal.item.itemStatusRemarks}
+                </div>
+              </div>
+            )}
+
+            {/* Request Title */}
+            {viewItemModal.item.requestTitle && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Request Title
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                  {viewItemModal.item.requestTitle}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
 
     </div>

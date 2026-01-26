@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
+import { connectSocket, disconnectSocket, subscribe, unsubscribe } from '../../utils/socket';
 
 const statusStyles = {
   draft: 'bg-gray-100 text-gray-700 border border-gray-200',
@@ -92,6 +93,37 @@ const PresISSP = () => {
 
   useEffect(() => {
     fetchIssps();
+  }, [fetchIssps]);
+
+  // Socket.io real-time updates
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userStr = localStorage.getItem('user');
+    
+    if (!token || !userStr) {
+      return;
+    }
+
+    try {
+      const user = JSON.parse(userStr);
+      connectSocket(token, user.id, user.role);
+
+      // Listen for ISSP sent from admin
+      const handleIsspSent = (data) => {
+        console.log('ISSP sent event received:', data);
+        // Refresh ISSP list
+        fetchIssps();
+      };
+
+      subscribe('issp_sent', handleIsspSent);
+
+      return () => {
+        unsubscribe('issp_sent', handleIsspSent);
+        // Don't disconnect socket here - other components might be using it
+      };
+    } catch (error) {
+      console.error('Error setting up Socket.io:', error);
+    }
   }, [fetchIssps]);
 
   const selectedIssp = useMemo(

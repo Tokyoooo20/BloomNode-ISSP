@@ -1,16 +1,23 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import Offices from './Offices';
 import Users from './Users';
 import ISSP from './ISSP';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
+import OfficeManagement from './OfficeManagement';
 import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 const Dashboard = () => {
-  const [activeSection, setActiveSection] = useState('dashboard');
+  const location = useLocation();
+  const [activeSection, setActiveSection] = useState(() => {
+    // Check if there's a section in location state
+    return location.state?.section || 'dashboard';
+  });
   const [animateReports, setAnimateReports] = useState(false);
   const [selectedYearRange, setSelectedYearRange] = useState('2024-2026');
+  const [hasInitializedYearRange, setHasInitializedYearRange] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [chartAnimation, setChartAnimation] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
@@ -114,35 +121,124 @@ const Dashboard = () => {
         });
       });
       
-      // Process filtered requests and count items by price range
+      // Process filtered requests and group items by name (like ISSP.js does)
+      // This deduplicates items across all requests - matching ISSP.js logic (lines 3273-3304)
+      const itemGroups = {}; // Group items by normalized item name
+      
+      // First pass: Collect all approved items and group by item name (across ALL requests)
+      // This ensures each unique item name is counted only ONCE, regardless of how many requests it appears in
+      let totalItemsFound = 0;
+      let approvedItemsFound = 0;
+      const itemNameMap = new Map(); // Track which items we've seen to ensure true deduplication
+      
       filteredRequests.forEach(request => {
         if (request.items && Array.isArray(request.items)) {
           request.items.forEach(item => {
-            // Only count approved items
-            if (item.approvalStatus === 'approved' && item.price) {
-              const price = Number(item.price) || 0;
+            totalItemsFound++;
+            // Only process approved items
+            if (item.approvalStatus === 'approved' && item.price && item.item && item.item.trim() !== '') {
+              approvedItemsFound++;
+              // Normalize item name: trim, lowercase, remove extra spaces
+              const itemName = item.item.trim().toLowerCase().replace(/\s+/g, ' ');
+              const adminPrice = Number(item.price) || 0;
               
-              // Find which range this price belongs to
-              const range = priceRanges.find(r => price >= r.min && price <= r.max);
-              if (range) {
-                range.count++;
-                range.totalValue += price;
-                
-                // Count by year from quantityByYear if available
-                if (item.quantityByYear) {
-                  cycleYears.forEach(year => {
-                    const yearKey = year.toString();
-                    const qty = Number(item.quantityByYear[yearKey]) || 0;
-                    if (qty > 0 && range.byYear[year]) {
-                      range.byYear[year].count += qty;
-                      range.byYear[year].totalValue += qty * price;
-                    }
-                  });
-                }
+              // Initialize item group if it doesn't exist (this ensures each unique item name is counted ONCE)
+              if (!itemGroups[itemName]) {
+                itemGroups[itemName] = {
+                  quantities: {},
+                  costs: {},
+                  price: adminPrice, // Use the admin-set price (should be same for same item name)
+                  requestCount: 0, // Track how many requests this item appears in (for debugging)
+                  itemIds: [] // Track item IDs for debugging
+                };
+                cycleYears.forEach(year => {
+                  itemGroups[itemName].quantities[year] = 0;
+                  itemGroups[itemName].costs[year] = 0;
+                });
               }
+              
+              // Track that this item name appeared in another request
+              itemGroups[itemName].requestCount++;
+              if (item._id || item.id) {
+                itemGroups[itemName].itemIds.push(item._id || item.id);
+              }
+              
+              // Sum quantities and costs by year (matching ISSP.js line 3300: costs[year] += qty * adminPrice)
+              // This accumulates across ALL requests - same item name from different requests gets summed
+              const quantityByYear = item.quantityByYear || {};
+              cycleYears.forEach(year => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                itemGroups[itemName].quantities[year] += qty;
+                itemGroups[itemName].costs[year] += qty * adminPrice;
+              });
             }
           });
         }
+      });
+      
+      // Second pass: Process each unique item name and categorize by total cost
+      Object.keys(itemGroups).forEach(itemNameKey => {
+        const itemData = itemGroups[itemNameKey];
+        
+        // Calculate total cost per unique item: sum of costs across all years
+        let totalItemCost = 0;
+        let hasQuantities = false;
+        cycleYears.forEach(year => {
+          totalItemCost += itemData.costs[year] || 0;
+          if ((itemData.quantities[year] || 0) > 0) {
+            hasQuantities = true;
+          }
+        });
+        
+        // If no cost calculated and no quantities, try using the price as fallback
+        if (totalItemCost === 0 && !hasQuantities && itemData.price > 0) {
+          totalItemCost = itemData.price;
+          // Distribute evenly across all years for display purposes
+          cycleYears.forEach(year => {
+            itemData.costs[year] = itemData.price / cycleYears.length;
+            itemData.quantities[year] = 1; // Count as 1 item per year for display
+          });
+        }
+        
+        // If still no cost, skip this item
+        if (totalItemCost === 0) {
+          console.warn('[Price Distribution] Skipping item with no cost:', itemNameKey);
+          return;
+        }
+        
+        // Categorize item by TOTAL COST (not unit price) - matching ISSP calculation
+        const range = priceRanges.find(r => totalItemCost >= r.min && totalItemCost <= r.max);
+        if (range) {
+          range.count++; // Count each unique item name once
+          range.totalValue += totalItemCost; // Add total cost
+          
+          // Count by year - item counts once per year if it has quantity > 0
+          cycleYears.forEach(year => {
+            const qty = itemData.quantities[year] || 0;
+            const yearCost = itemData.costs[year] || 0;
+            if (qty > 0 && range.byYear[year]) {
+              range.byYear[year].count += 1; // Count the ITEM once per year (not the quantity)
+              range.byYear[year].totalValue += yearCost; // Year cost (already calculated)
+            }
+          });
+        }
+      });
+      
+      const totalUniqueItems = Object.keys(itemGroups).length;
+      console.log('[Price Distribution] Debug info:', {
+        totalItemsFound,
+        approvedItemsFound,
+        totalUniqueItems,
+        filteredRequestsCount: filteredRequests.length,
+        itemGroupNames: Object.keys(itemGroups),
+        itemGroupsDetails: Object.keys(itemGroups).map(name => ({
+          name,
+          totalCost: cycleYears.reduce((sum, year) => sum + (itemGroups[name].costs[year] || 0), 0),
+          totalQuantities: cycleYears.reduce((sum, year) => sum + (itemGroups[name].quantities[year] || 0), 0),
+          appearsInRequests: itemGroups[name].requestCount, // How many requests this item appears in
+          itemIds: itemGroups[name].itemIds.length // How many item instances
+        }))
       });
       
       // Calculate totals and percentages
@@ -168,7 +264,15 @@ const Dashboard = () => {
       console.log('[Price Distribution] Setting distribution:', {
         totalItems,
         totalValue,
-        rangesCount: distribution.length
+        rangesCount: distribution.length,
+        totalUniqueItems,
+        itemGroupsCount: Object.keys(itemGroups).length,
+        filteredRequestsCount: filteredRequests.length,
+        totalsByYear: Object.keys(totalsByYear).map(year => ({
+          year,
+          count: totalsByYear[year].count,
+          totalValue: totalsByYear[year].totalValue
+        }))
       });
       
       setPriceDistribution({
@@ -220,37 +324,174 @@ const Dashboard = () => {
     }
   };
 
-  // Fetch dashboard statistics
+  // Handle location state changes (e.g., when navigating from EditUser)
   useEffect(() => {
-    const fetchDashboardStats = async () => {
-      try {
-        const token = localStorage.getItem('token');
-        const response = await axios.get(API_ENDPOINTS.admin.dashboardStats, {
-          headers: getAuthHeaders()
+    const sectionFromState = location.state?.section;
+    if (sectionFromState && sectionFromState !== activeSection) {
+      setActiveSection(sectionFromState);
+      // Clear the state to prevent it from persisting on refresh
+      // Use setTimeout to ensure state is read first
+      setTimeout(() => {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }, 0);
+    }
+  }, [location.state]);
+
+  // Fetch dashboard statistics
+  const fetchDashboardStats = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get(API_ENDPOINTS.admin.dashboardStats, {
+        headers: getAuthHeaders()
+      });
+      setStats(response.data);
+    } catch (err) {
+      console.error('Error fetching dashboard stats:', err);
+      setStats(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSection === 'dashboard') {
+      fetchDashboardStats();
+      fetchNotifications();
+      fetchUserData();
+      fetchPriceDistribution();
+      
+      // Refresh stats every 30 seconds when dashboard is active
+      const interval = setInterval(() => {
+        fetchDashboardStats();
+        fetchNotifications();
+        fetchPriceDistribution();
+      }, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [activeSection, fetchDashboardStats, fetchPriceDistribution]);
+
+  // Default year cycles (fallback if database is empty)
+  const defaultYearCycles = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
+  
+  // State for year cycles fetched from database - initialize with defaults so they're always visible
+  const [availableYearCycles, setAvailableYearCycles] = useState(defaultYearCycles);
+
+  // Ensure default year cycles exist in database
+  const ensureDefaultYearCycles = useCallback(async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+        headers: getAuthHeaders()
+      });
+      
+      const existingCycles = response.data || [];
+      const existingNames = existingCycles.map(cycle => cycle.name);
+      
+      // Find missing default cycles
+      const missingCycles = defaultYearCycles.filter(name => !existingNames.includes(name));
+      
+      // Create missing cycles
+      if (missingCycles.length > 0) {
+        for (const cycleName of missingCycles) {
+          const [startYear, endYear] = cycleName.split('-').map(Number);
+          const order = defaultYearCycles.indexOf(cycleName) + 1;
+          
+          try {
+            await axios.post(API_ENDPOINTS.organization.yearCycles.create, {
+              name: cycleName,
+              startYear,
+              endYear,
+              isActive: true,
+              order
+            }, {
+              headers: getAuthHeaders()
+            });
+            console.log(`Created default year cycle: ${cycleName}`);
+          } catch (createError) {
+            // Ignore if cycle already exists (race condition)
+            if (createError.response?.status !== 400 || !createError.response?.data?.message?.includes('already exists')) {
+              console.error(`Error creating year cycle ${cycleName}:`, createError);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error ensuring default year cycles:', error);
+    }
+  }, []);
+
+  // Fetch year cycles from database
+  const fetchYearCycles = useCallback(async () => {
+    try {
+      // First, ensure default cycles exist in database
+      await ensureDefaultYearCycles();
+      
+      // Then fetch all cycles from database
+      const response = await axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+        headers: getAuthHeaders()
+      });
+      
+      if (response.data && Array.isArray(response.data) && response.data.length > 0) {
+        // Sort by order and startYear, then extract names
+        const sortedCycles = [...response.data].sort((a, b) => {
+          if (a.order !== b.order) return a.order - b.order;
+          return (b.startYear || 0) - (a.startYear || 0);
         });
-        setStats(response.data);
+        const cycleNames = sortedCycles.map(cycle => cycle.name);
+        setAvailableYearCycles(cycleNames);
         
-        // Set first available year range as default if current is not in available cycles
-        const availableYearCycles = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
-        if (!availableYearCycles.includes(selectedYearRange)) {
+        // Set default selected year range if not set
+        if (!selectedYearRange && cycleNames.length > 0) {
+          setSelectedYearRange(cycleNames[0]);
+        }
+        if (!priceDistributionYearCycle && cycleNames.length > 0) {
+          setPriceDistributionYearCycle(cycleNames[0]);
+        }
+      } else {
+        // Fallback: use defaults if database is empty (shouldn't happen after ensureDefaultYearCycles)
+        setAvailableYearCycles(defaultYearCycles);
+        if (!selectedYearRange) {
+          setSelectedYearRange(defaultYearCycles[0]);
+        }
+        if (!priceDistributionYearCycle) {
+          setPriceDistributionYearCycle(defaultYearCycles[0]);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching year cycles:', error);
+      // On error, use default hardcoded cycles as fallback
+      setAvailableYearCycles(defaultYearCycles);
+      if (!selectedYearRange) {
+        setSelectedYearRange(defaultYearCycles[0]);
+      }
+      if (!priceDistributionYearCycle) {
+        setPriceDistributionYearCycle(defaultYearCycles[0]);
+      }
+    }
+  }, [ensureDefaultYearCycles]); // Removed selectedYearRange and priceDistributionYearCycle to prevent unnecessary re-creation
+
+  // Fetch year cycles when dashboard section is active
+  useEffect(() => {
+    if (activeSection === 'dashboard') {
+      fetchYearCycles();
+    }
+  }, [activeSection, fetchYearCycles]);
+
+  // Set default year range when stats are first loaded (only once)
+  useEffect(() => {
+    if (stats && stats.yearRangeStats && availableYearCycles.length > 0 && !hasInitializedYearRange) {
+      // Only initialize once, and only if selectedYearRange is not in availableYearCycles
+      // This prevents overriding user's manual selection
+      const currentRange = selectedYearRange;
+      if (!availableYearCycles.includes(currentRange)) {
+        // Find first year range with data, or use first available
+        const rangeWithData = availableYearCycles.find(range => stats.yearRangeStats[range]?.total > 0);
+        if (rangeWithData) {
+          setSelectedYearRange(rangeWithData);
+        } else {
           setSelectedYearRange(availableYearCycles[0]);
         }
-      } catch (err) {
-        console.error('Error fetching dashboard stats:', err);
       }
-    };
-    fetchDashboardStats();
-    fetchNotifications();
-    fetchUserData();
-    fetchPriceDistribution();
-    
-    // Refresh notifications every 30 seconds
-    const interval = setInterval(() => {
-      fetchNotifications();
-      fetchPriceDistribution();
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [fetchPriceDistribution]);
+      setHasInitializedYearRange(true);
+    }
+  }, [stats, availableYearCycles, hasInitializedYearRange]); // Removed selectedYearRange from dependencies
 
   // Refetch price distribution when year cycle changes
   useEffect(() => {
@@ -290,86 +531,112 @@ const Dashboard = () => {
     setChartAnimation(true);
   }, []);
 
-  // Define available year cycles
-  const availableYearCycles = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
-
-  // Year range data - merge real data with default structure, only for available cycles
-  const yearRangeData = stats ? availableYearCycles.reduce((acc, yearRange) => {
-    const data = stats.yearRangeStats[yearRange] || { total: 0 };
-    const [startYear, endYear] = yearRange.split('-').map(Number);
-    const yearCount = endYear - startYear + 1;
-    const years = [];
-    
-    for (let i = 0; i < yearCount; i++) {
-      const year = startYear + i;
-      const value = Math.floor(data.total / yearCount);
-      const percentage = data.total > 0 ? Math.round((value / data.total) * 100) : 0;
-      years.push({ year: year.toString(), value, percentage });
+  // Helper function to generate chart path from data
+  const generateChartPath = (years, maxValue, chartHeight = 160) => {
+    if (!years || years.length === 0) {
+      return `M 0 ${chartHeight} L 800 ${chartHeight} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
     }
     
-    acc[yearRange] = {
-      total: data.total,
-      years: years,
-      chartPath1: 'M 0 140 L 100 120 L 200 100 L 300 80 L 400 60 L 500 70 L 600 50 L 700 40 L 800 30 L 800 160 L 0 160 Z',
-      chartPath2: 'M 0 120 L 100 100 L 200 80 L 300 90 L 400 70 L 500 85 L 600 75 L 700 65 L 800 60 L 800 160 L 0 160 Z'
-    };
-    return acc;
-  }, {}) : {
-    '2024-2026': {
-      total: 1000,
-      years: [
-        { year: '2024', value: 300, percentage: 30 },
-        { year: '2025', value: 500, percentage: 50 },
-        { year: '2026', value: 200, percentage: 20 }
-      ],
-      chartPath1: 'M 0 140 L 100 120 L 200 100 L 300 80 L 400 60 L 500 70 L 600 50 L 700 40 L 800 30 L 800 160 L 0 160 Z',
-      chartPath2: 'M 0 120 L 100 100 L 200 80 L 300 90 L 400 70 L 500 85 L 600 75 L 700 65 L 800 60 L 800 160 L 0 160 Z'
-    },
-    '2027-2029': {
-      total: 2000,
-      years: [
-        { year: '2027', value: 800, percentage: 40 },
-        { year: '2028', value: 700, percentage: 35 },
-        { year: '2029', value: 500, percentage: 25 }
-      ],
-      chartPath1: 'M 0 120 L 100 110 L 200 90 L 300 70 L 400 50 L 500 60 L 600 40 L 700 30 L 800 20 L 800 160 L 0 160 Z',
-      chartPath2: 'M 0 100 L 100 90 L 200 70 L 300 80 L 400 60 L 500 75 L 600 65 L 700 55 L 800 50 L 800 160 L 0 160 Z'
-    },
-    '2030-2032': {
-      total: 1500,
-      years: [
-        { year: '2030', value: 400, percentage: 27 },
-        { year: '2031', value: 600, percentage: 40 },
-        { year: '2032', value: 500, percentage: 33 }
-      ],
-      chartPath1: 'M 0 130 L 100 125 L 200 110 L 300 95 L 400 80 L 500 85 L 600 70 L 700 60 L 800 50 L 800 160 L 0 160 Z',
-      chartPath2: 'M 0 110 L 100 105 L 200 90 L 300 100 L 400 85 L 500 95 L 600 85 L 700 75 L 800 70 L 800 160 L 0 160 Z'
-    },
-    '2033-2035': {
-      total: 1800,
-      years: [
-        { year: '2033', value: 600, percentage: 33 },
-        { year: '2034', value: 700, percentage: 39 },
-        { year: '2035', value: 500, percentage: 28 }
-      ],
-      chartPath1: 'M 0 125 L 100 115 L 200 100 L 300 85 L 400 70 L 500 75 L 600 65 L 700 55 L 800 45 L 800 160 L 0 160 Z',
-      chartPath2: 'M 0 105 L 100 95 L 200 80 L 300 90 L 400 75 L 500 90 L 600 80 L 700 70 L 800 65 L 800 160 L 0 160 Z'
-    }
+    const stepX = years.length > 1 ? 800 / (years.length - 1) : 400;
+    const normalizedMax = Math.max(...years.map(y => y.value || 0), 1);
+    const points = years.map((yearData, index) => {
+      const x = index * stepX;
+      const normalizedValue = normalizedMax > 0 ? (yearData.value || 0) / normalizedMax : 0;
+      const y = chartHeight - (normalizedValue * (chartHeight - 20)) - 20; // Reserve 20px at bottom
+      return `${x} ${y}`;
+    });
+    
+    const pathPoints = points.map((point, index) => index === 0 ? `M ${point}` : `L ${point}`).join(' ');
+    return `${pathPoints} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
   };
 
+  // Year range data - use actual database data
+  const yearRangeData = stats ? availableYearCycles.reduce((acc, yearRange) => {
+    // Check if this year range has data in stats
+    const hasData = stats.yearRangeStats && stats.yearRangeStats[yearRange];
+    const data = hasData ? stats.yearRangeStats[yearRange] : null;
+    
+    const [startYear, endYear] = yearRange.split('-').map(Number);
+    const yearCount = endYear - startYear + 1;
+    
+    // Use actual years data from API if available
+    let years = [];
+    if (hasData && data && data.years && Array.isArray(data.years) && data.years.length > 0) {
+      // Use actual data from API
+      years = data.years;
+    } else {
+      // Create empty structure for years with no data
+      for (let i = 0; i < yearCount; i++) {
+        const year = startYear + i;
+        years.push({ year: year.toString(), value: 0, percentage: 0 });
+      }
+    }
+    
+    // Calculate actual total from years data (this is the source of truth)
+    // The years array contains approved requests count per year
+    const actualTotal = years.reduce((sum, y) => sum + (y.value || 0), 0);
+    
+    // Always use actualTotal - if all years have 0 approved requests, total is 0
+    // This ensures accuracy: if no approved requests exist for this cycle, total = 0
+    // We don't use data.total because it counts ALL requests (pending, submitted, approved, rejected)
+    // but we only want to show approved requests count
+    const finalTotal = actualTotal;
+    
+    // If no approved data exists, set everything to 0
+    if (actualTotal === 0) {
+      const emptyPath = generateChartPath(years, 1);
+      acc[yearRange] = {
+        total: 0,
+        years: years,
+        chartPath1: emptyPath,
+        chartPath2: emptyPath
+      };
+      return acc;
+    }
+    
+    // Generate chart paths based on actual data
+    const maxValue = Math.max(...years.map(y => y.value || 0), 1);
+    const chartPath1 = generateChartPath(years, maxValue);
+    // For second path, use a slightly different visualization (e.g., pending/submitted)
+    const chartPath2 = generateChartPath(
+      years.map(y => ({ ...y, value: (y.value || 0) * 0.8 })), 
+      maxValue
+    );
+    
+    acc[yearRange] = {
+      total: finalTotal,
+      years: years,
+      chartPath1: chartPath1,
+      chartPath2: chartPath2
+    };
+    return acc;
+  }, {}) : {};
+
   const handleYearRangeChange = (yearRange) => {
-    setChartAnimation(false);
+    // Update state immediately
     setSelectedYearRange(yearRange);
     setIsDropdownOpen(false);
+    setChartAnimation(false);
     setTimeout(() => setChartAnimation(true), 100);
   };
 
-  const currentData = yearRangeData[selectedYearRange] || yearRangeData[Object.keys(yearRangeData)[0]] || {
-    total: 0,
-    years: [],
-    chartPath1: 'M 0 140 L 100 120 L 200 100 L 300 80 L 400 60 L 500 70 L 600 50 L 700 40 L 800 30 L 800 160 L 0 160 Z',
-    chartPath2: 'M 0 120 L 100 100 L 200 80 L 300 90 L 400 70 L 500 85 L 600 75 L 700 65 L 800 60 L 800 160 L 0 160 Z'
-  };
+  // Get current year range data or create empty structure
+  const currentData = yearRangeData[selectedYearRange] || (() => {
+    const [startYear, endYear] = selectedYearRange.split('-').map(Number);
+    const yearCount = endYear - startYear + 1;
+    const emptyYears = [];
+    for (let i = 0; i < yearCount; i++) {
+      const year = startYear + i;
+      emptyYears.push({ year: year.toString(), value: 0, percentage: 0 });
+    }
+    const emptyPath = generateChartPath(emptyYears, 1);
+    return {
+      total: 0,
+      years: emptyYears,
+      chartPath1: emptyPath,
+      chartPath2: emptyPath
+    };
+  })();
 
   const handleLogoutClick = () => {
     setShowLogoutConfirmation(true);
@@ -511,6 +778,23 @@ const Dashboard = () => {
 
             <button
               onClick={() => {
+                setActiveSection('officeManagement');
+                setSidebarOpen(false);
+              }}
+              className={`w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target ${
+                activeSection === 'officeManagement' 
+                  ? 'bg-gray-700 text-white' 
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+              </svg>
+              Office Management
+            </button>
+
+            <button
+              onClick={() => {
                 setActiveSection('profile');
                 setSidebarOpen(false);
               }}
@@ -557,7 +841,9 @@ const Dashboard = () => {
                 </svg>
               </button>
               <h1 className="text-xl sm:text-2xl font-bold text-gray-800">
-                {activeSection === 'issp' ? 'ISSP' : activeSection.charAt(0).toUpperCase() + activeSection.slice(1)}
+                {activeSection === 'issp' ? 'ISSP' : 
+                 activeSection === 'officeManagement' ? 'Office Management' :
+                 activeSection.charAt(0).toUpperCase() + activeSection.slice(1)}
               </h1>
             </div>
             {/* Notification Bell */}
@@ -697,17 +983,27 @@ const Dashboard = () => {
                           
                           {isDropdownOpen && (
                             <div className="absolute left-0 mt-2 w-40 sm:w-32 bg-white border border-gray-300 rounded-lg shadow-lg z-10 dropdown-responsive">
-                              {['2024-2026', '2027-2029', '2030-2032', '2033-2035'].map((yearRange) => (
-                                <button
-                                  key={yearRange}
-                                  onClick={() => handleYearRangeChange(yearRange)}
-                                  className={`w-full text-left px-3 sm:px-4 py-2.5 sm:py-2 text-xs sm:text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg tap-target ${
-                                    selectedYearRange === yearRange ? 'bg-gray-50 text-gray-700' : 'text-gray-700'
-                                  }`}
-                                >
-                                  {yearRange}
-                                </button>
-                              ))}
+                              {availableYearCycles.length === 0 ? (
+                                <div className="px-3 sm:px-4 py-2.5 sm:py-2 text-xs sm:text-sm text-gray-500">
+                                  No year cycles available
+                                </div>
+                              ) : (
+                                availableYearCycles.map((yearRange) => (
+                                  <button
+                                    key={yearRange}
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      handleYearRangeChange(yearRange);
+                                    }}
+                                    className={`w-full text-left px-3 sm:px-4 py-2.5 sm:py-2 text-xs sm:text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg tap-target ${
+                                      selectedYearRange === yearRange ? 'bg-gray-50 text-gray-700' : 'text-gray-700'
+                                    }`}
+                                  >
+                                    {yearRange}
+                                  </button>
+                                ))
+                              )}
                             </div>
                           )}
                         </div>
@@ -833,7 +1129,7 @@ const Dashboard = () => {
                         <span className="text-gray-700 font-semibold">{stats ? stats.submittedRequests : 0}</span>
                       </div>
                       <div className="w-full bg-gray-200 rounded-full h-2 mt-4">
-                        <div className="bg-gray-600 h-2 rounded-full transition-all duration-700" style={{width: stats && stats.totalRequests > 0 ? `${(stats.submittedRequests / stats.totalRequests) * 100}%` : '75%'}}></div>
+                        <div className="bg-gray-600 h-2 rounded-full transition-all duration-700" style={{width: stats && stats.totalRequests > 0 ? `${Math.round((stats.submittedRequests / stats.totalRequests) * 100)}%` : '0%'}}></div>
                       </div>
                     </div>
                   </div>
@@ -875,7 +1171,7 @@ const Dashboard = () => {
                             fill="none"
                             stroke="#9CA3AF"
                             strokeWidth="15"
-                            strokeDasharray={stats ? `${(stats.approvalRate / 100) * 219.8} ${219.8 - (stats.approvalRate / 100) * 219.8}` : "171.1 47.7"}
+                            strokeDasharray={stats && stats.totalReviewed > 0 ? `${(stats.approvalRate / 100) * 219.8} ${219.8 - (stats.approvalRate / 100) * 219.8}` : "0 219.8"}
                             strokeDashoffset={animateReports ? "0" : "218.8"}
                             className="transition-all duration-[1800ms] ease-out"
                           />
@@ -887,8 +1183,8 @@ const Dashboard = () => {
                             fill="none"
                             stroke="#6B7280"
                             strokeWidth="15"
-                            strokeDasharray={stats ? `${(stats.rejectionRate / 100) * 219.8} ${219.8 - (stats.rejectionRate / 100) * 219.8}` : "48.2 170.6"}
-                            strokeDashoffset={stats ? (animateReports ? `-${(stats.approvalRate / 100) * 219.8}` : `-${(stats.approvalRate / 100) * 219.8 - 219.8}`) : (animateReports ? "-171.1" : "-122.9")}
+                            strokeDasharray={stats && stats.totalReviewed > 0 ? `${(stats.rejectionRate / 100) * 219.8} ${219.8 - (stats.rejectionRate / 100) * 219.8}` : "0 219.8"}
+                            strokeDashoffset={stats && stats.totalReviewed > 0 ? (animateReports ? `-${(stats.approvalRate / 100) * 219.8}` : `-${(stats.approvalRate / 100) * 219.8 - 219.8}`) : "0"}
                             className="transition-all duration-[1800ms] ease-out"
                             style={{
                               transitionDelay: '400ms'
@@ -899,11 +1195,11 @@ const Dashboard = () => {
                       <div className="ml-4 space-y-2">
                         <div className="flex items-center">
                           <div className="w-3 h-3 bg-gray-300 rounded mr-2"></div>
-                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.approvalRate : 78}% Approved</span>
+                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.approvalRate : 0}% Approved</span>
                         </div>
                         <div className="flex items-center">
                           <div className="w-3 h-3 bg-gray-500 rounded mr-2"></div>
-                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.rejectionRate : 22}% Rejected</span>
+                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.rejectionRate : 0}% Rejected</span>
                         </div>
                       </div>
                     </div>
@@ -933,20 +1229,26 @@ const Dashboard = () => {
                     
                     {priceDistributionDropdownOpen && (
                       <div className="absolute right-0 mt-2 w-40 bg-white border border-gray-300 rounded-lg shadow-lg z-10">
-                        {['2024-2026', '2027-2029', '2030-2032', '2033-2035'].map((yearRange) => (
-                          <button
-                            key={yearRange}
-                            onClick={() => {
-                              setPriceDistributionYearCycle(yearRange);
-                              setPriceDistributionDropdownOpen(false);
-                            }}
-                            className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
-                              priceDistributionYearCycle === yearRange ? 'bg-gray-50 text-gray-700 font-medium' : 'text-gray-700'
-                            }`}
-                          >
-                            {yearRange}
-                          </button>
-                        ))}
+                        {availableYearCycles.length === 0 ? (
+                          <div className="px-4 py-2 text-sm text-gray-500">
+                            No year cycles available
+                          </div>
+                        ) : (
+                          availableYearCycles.map((yearRange) => (
+                            <button
+                              key={yearRange}
+                              onClick={() => {
+                                setPriceDistributionYearCycle(yearRange);
+                                setPriceDistributionDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
+                                priceDistributionYearCycle === yearRange ? 'bg-gray-50 text-gray-700 font-medium' : 'text-gray-700'
+                              }`}
+                            >
+                              {yearRange}
+                            </button>
+                          ))
+                        )}
                       </div>
                     )}
                   </div>
@@ -1105,6 +1407,10 @@ const Dashboard = () => {
 
           {activeSection === 'logs' && (
             <ActivityLog title="System Activity (Admin View)" />
+          )}
+
+          {activeSection === 'officeManagement' && (
+            <OfficeManagement />
           )}
 
           {activeSection === 'profile' && (

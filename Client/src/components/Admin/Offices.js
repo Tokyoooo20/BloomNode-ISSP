@@ -21,6 +21,18 @@ const Offices = () => {
   const [itemsCurrentPage, setItemsCurrentPage] = useState(1);
   const itemsPerPage = 10;
   
+  // View item modal state
+  const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
+  
+  // Return disapproved items modal state
+  const [returnDisapprovedModal, setReturnDisapprovedModal] = useState({ 
+    show: false, 
+    reason: '' 
+  });
+  
+  // Track requests being returned to prevent duplicate returns
+  const [returningRequests, setReturningRequests] = useState(new Set());
+  
   // Modal state for confirmation dialogs
   const [modalState, setModalState] = useState({
     isOpen: false,
@@ -175,7 +187,7 @@ const Offices = () => {
     fetchSubmittedRequests();
   }, []);
 
-  // Group requests by unit and year cycle
+  // Group requests by unit, campus, and year cycle
   const groupedRequests = useMemo(() => {
     const grouped = {};
     requests.forEach(request => {
@@ -185,12 +197,25 @@ const Offices = () => {
         : (request.userId?.unit && request.userId.unit.trim()) 
           ? request.userId.unit.trim() 
           : 'Unknown Unit';
+      
+      // Use request.campus first, then userId.campus, default to 'Main' if empty/null
+      const campus = (request.campus && request.campus.trim()) 
+        ? request.campus.trim() 
+        : (request.userId?.campus && request.userId.campus.trim()) 
+          ? request.userId.campus.trim() 
+          : 'Main';
+      
+      // Normalize campus (empty/null = 'Main')
+      const normalizedCampus = campus || 'Main';
       const year = request.year || 'Unknown Year';
-      const key = `${unitName}|||${year}`;
+      
+      // Use unit+campus+year as the key to separate units by campus
+      const key = `${unitName}|||${normalizedCampus}|||${year}`;
       
       if (!grouped[key]) {
         grouped[key] = {
           unitName,
+          campus: normalizedCampus,
           year,
           requests: []
         };
@@ -201,6 +226,7 @@ const Offices = () => {
   }, [requests]);
 
   // Filter grouped requests based on status, priority, year, and search query
+  // Exclude groups where all items are approved (they're displayed in ISSP.js instead)
   const filteredGroupedRequests = useMemo(() => {
     const filtered = {};
     const searchLower = searchQuery.toLowerCase().trim();
@@ -214,9 +240,10 @@ const Offices = () => {
         return matchesStatus && matchesPriority && matchesYear;
       });
       
-      // Apply search filter
+      // Apply search filter (including campus)
       const matchesSearch = !searchLower || 
         group.unitName.toLowerCase().includes(searchLower) ||
+        (group.campus && group.campus.toLowerCase().includes(searchLower)) ||
         group.year.toLowerCase().includes(searchLower) ||
         filteredRequests.some(req => 
           req.requestTitle?.toLowerCase().includes(searchLower) ||
@@ -224,7 +251,22 @@ const Offices = () => {
           req.userId?.email?.toLowerCase().includes(searchLower)
         );
       
-      if (filteredRequests.length > 0 && matchesSearch) {
+      // Check if all items in this group are approved (exclude from Offices.js)
+      // Collect all items from all requests in this group
+      const allItemsInGroup = [];
+      filteredRequests.forEach(request => {
+        if (request.items && request.items.length > 0) {
+          allItemsInGroup.push(...request.items);
+        }
+      });
+      
+      // If there are no items at all, still show the group (empty requests need attention)
+      // If there are items, check if ALL of them are approved
+      const allItemsApproved = allItemsInGroup.length > 0 && 
+        allItemsInGroup.every(item => item.approvalStatus === 'approved');
+      
+      // Only include groups that have items needing review (not all approved)
+      if (filteredRequests.length > 0 && matchesSearch && !allItemsApproved) {
         filtered[key] = {
           ...group,
           requests: filteredRequests
@@ -456,6 +498,222 @@ const Offices = () => {
     return items;
   }, [selectedUnitGroup]);
 
+  // Get all disapproved items (both saved and pending)
+  const disapprovedItems = useMemo(() => {
+    if (!selectedUnitGroup) return [];
+    const disapproved = [];
+    
+    // Get saved disapproved items
+    allGroupItems.forEach(item => {
+      if (item.approvalStatus === 'disapproved') {
+        disapproved.push({
+          ...item,
+          isPending: false
+        });
+      }
+    });
+    
+    // Get pending disapproved items (from pendingReviews)
+    Object.keys(pendingReviews).forEach(itemKey => {
+      const review = pendingReviews[itemKey];
+      if (review.decision === 'disapproved') {
+        const [requestId, itemId] = itemKey.split('-');
+        const item = allGroupItems.find(i => 
+          i.requestId === requestId && (i.id === itemId || i._id === itemId)
+        );
+        if (item) {
+          disapproved.push({
+            ...item,
+            isPending: true,
+            pendingReason: review.reason
+          });
+        }
+      }
+    });
+    
+    return disapproved;
+  }, [allGroupItems, pendingReviews, selectedUnitGroup]);
+
+  // Group disapproved items by request (excluding already rejected requests)
+  const disapprovedByRequest = useMemo(() => {
+    const grouped = {};
+    disapprovedItems.forEach(item => {
+      const requestId = item.requestId;
+      const request = selectedUnitGroup.requests.find(r => r._id === requestId);
+      // Exclude already rejected requests
+      if (request?.status === 'rejected') {
+        return;
+      }
+      if (!grouped[requestId]) {
+        grouped[requestId] = {
+          request: request,
+          items: []
+        };
+      }
+      grouped[requestId].items.push(item);
+    });
+    return grouped;
+  }, [disapprovedItems, selectedUnitGroup]);
+
+  // Get count of requests that can be returned (not already rejected)
+  const returnableRequestsCount = useMemo(() => {
+    return Object.keys(disapprovedByRequest).length;
+  }, [disapprovedByRequest]);
+
+  // Handle return disapproved items
+  const handleReturnDisapprovedItems = () => {
+    if (disapprovedItems.length === 0) {
+      showAlert({
+        variant: 'danger',
+        title: 'No Disapproved Items',
+        message: 'There are no disapproved items to return.'
+      });
+      return;
+    }
+    
+    // Check if there are any returnable requests (not already rejected)
+    if (returnableRequestsCount === 0) {
+      showAlert({
+        variant: 'warning',
+        title: 'No Requests to Return',
+        message: 'All requests containing disapproved items have already been returned.',
+        autoCloseDelay: 3000
+      });
+      return;
+    }
+    
+    setReturnDisapprovedModal({
+      show: true,
+      reason: ''
+    });
+  };
+
+  // Perform return disapproved items
+  const performReturnDisapprovedItems = async () => {
+    if (!returnDisapprovedModal.reason.trim()) {
+      showAlert({
+        variant: 'danger',
+        title: 'Validation Error',
+        message: 'Please provide a reason for returning these items.'
+      });
+      return;
+    }
+
+    // Filter out already rejected/approved requests and requests being returned
+    const requestIdsToReturn = Object.keys(disapprovedByRequest).filter(requestId => {
+      const request = disapprovedByRequest[requestId].request;
+      // Exclude already rejected requests
+      if (request?.status === 'rejected') {
+        return false;
+      }
+      // Exclude already approved requests
+      if (request?.status === 'approved') {
+        return false;
+      }
+      // Exclude requests currently being returned
+      if (returningRequests.has(requestId)) {
+        return false;
+      }
+      return true;
+    });
+
+    if (requestIdsToReturn.length === 0) {
+      showAlert({
+        variant: 'warning',
+        title: 'No Requests to Return',
+        message: 'All requests containing disapproved items have already been returned or are being processed.',
+        autoCloseDelay: 3000
+      });
+      setReturnDisapprovedModal({ show: false, reason: '' });
+      return;
+    }
+
+    // Check if already processing (prevent double-click)
+    const isProcessing = requestIdsToReturn.some(id => returningRequests.has(id));
+    if (isProcessing) {
+      showAlert({
+        variant: 'warning',
+        title: 'Already Processing',
+        message: 'Some requests are already being returned. Please wait...',
+        autoCloseDelay: 2000
+      });
+      return;
+    }
+
+    try {
+      // Add all request IDs to returning set to prevent duplicate clicks
+      setReturningRequests(prev => {
+        const newSet = new Set(prev);
+        requestIdsToReturn.forEach(id => newSet.add(id));
+        return newSet;
+      });
+      setLoading(true);
+      const token = localStorage.getItem('token');
+      
+      // Return all requests containing disapproved items (only non-rejected ones)
+      await Promise.all(
+        requestIdsToReturn.map(requestId =>
+          axios.put(
+            API_ENDPOINTS.admin.requestStatus(requestId),
+            {
+              status: 'rejected',
+              reason: returnDisapprovedModal.reason.trim()
+            },
+            {
+              headers: { 'x-auth-token': token }
+            }
+          )
+        )
+      );
+
+      showAlert({
+        variant: 'success',
+        title: 'Items Returned',
+        message: `Successfully returned ${requestIdsToReturn.length} request${requestIdsToReturn.length !== 1 ? 's' : ''} containing disapproved items. Users will be notified.`,
+        autoCloseDelay: 2000
+      });
+      
+      // Close modal and clear pending reviews for returned items
+      setReturnDisapprovedModal({ show: false, reason: '' });
+      setPendingReviews({});
+      
+      // Refresh requests and office stats
+      await fetchSubmittedRequests();
+      await fetchOfficeStats();
+      
+      // Refresh the selected unit group
+      if (selectedUnitGroup) {
+        const updatedRequests = await Promise.all(
+          selectedUnitGroup.requests.map(request =>
+            axios.get(
+              API_ENDPOINTS.admin.getRequest(request._id),
+              { headers: { 'x-auth-token': token } }
+            ).then(res => res.data)
+          )
+        );
+        setSelectedUnitGroup({
+          ...selectedUnitGroup,
+          requests: updatedRequests
+        });
+      }
+    } catch (err) {
+      console.error('Error returning disapproved items:', err);
+      showAlert({
+        variant: 'danger',
+        title: 'Return Failed',
+        message: 'Failed to return items: ' + (err.response?.data?.message || err.message)
+      });
+    } finally {
+      setLoading(false);
+      // Remove all request IDs from returning set
+      setReturningRequests(prev => {
+        const newSet = new Set(prev);
+        requestIdsToReturn.forEach(id => newSet.delete(id));
+        return newSet;
+      });
+    }
+  };
+
   return (
     <div className="space-y-4 sm:space-y-6">
       {selectedUnitGroup ? (
@@ -474,7 +732,10 @@ const Offices = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                 </svg>
               </button>
-              <h3 className="text-2xl font-bold text-gray-900">Review ISSP Requests - {selectedUnitGroup.unitName}</h3>
+              <h3 className="text-2xl font-bold text-gray-900">
+                Review ISSP Requests - {selectedUnitGroup.unitName}
+                {selectedUnitGroup.campus && selectedUnitGroup.campus !== 'Main' && ` - ${selectedUnitGroup.campus}`}
+              </h3>
             </div>
           </div>
 
@@ -483,7 +744,7 @@ const Offices = () => {
             <div className="flex items-center justify-between mb-6">
               <h4 className="text-xl font-bold text-gray-900">Group Information</h4>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
               <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                 <div className="flex items-center space-x-3">
                   <div className="flex-shrink-0">
@@ -499,6 +760,25 @@ const Offices = () => {
                   </div>
                 </div>
               </div>
+              
+              {selectedUnitGroup.campus && selectedUnitGroup.campus !== 'Main' && (
+                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <div className="flex items-center space-x-3">
+                    <div className="flex-shrink-0">
+                      <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
+                        <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Campus</p>
+                      <p className="text-lg font-bold text-gray-900 truncate">{selectedUnitGroup.campus}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
               
               <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                 <div className="flex items-center space-x-3">
@@ -574,6 +854,91 @@ const Offices = () => {
             </div>
           </div>
 
+          {/* Disapproved Items Summary */}
+          {disapprovedItems.length > 0 && (
+            <div className="bg-red-50 border-2 border-red-200 rounded-lg p-6 shadow-sm">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex-shrink-0">
+                    <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h4 className="text-lg font-semibold text-red-900">Disapproved Items Summary</h4>
+                    <p className="text-sm text-red-700 mt-1">
+                      {disapprovedItems.length} item{disapprovedItems.length !== 1 ? 's' : ''} marked as disapproved
+                      {returnableRequestsCount > 0 && (
+                        <> across {returnableRequestsCount} returnable request{returnableRequestsCount !== 1 ? 's' : ''}</>
+                      )}
+                      {returnableRequestsCount === 0 && Object.keys(disapprovedByRequest).length > 0 && (
+                        <> (all requests already returned)</>
+                      )}
+                    </p>
+                  </div>
+                </div>
+                {returnableRequestsCount > 0 && (
+                  <button
+                    onClick={handleReturnDisapprovedItems}
+                    disabled={loading || returningRequests.size > 0}
+                    className="px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 border border-red-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                    title={
+                      returningRequests.size > 0
+                        ? "Requests are being returned. Please wait..."
+                        : "Return all requests containing disapproved items"
+                    }
+                  >
+                    {loading || returningRequests.size > 0 ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Returning...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        Return Disapproved Items
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+              
+              <div className="mt-4 space-y-3">
+                {Object.entries(disapprovedByRequest).map(([requestId, group]) => (
+                  <div key={requestId} className="bg-white rounded-lg p-4 border border-red-200">
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1">
+                        <h5 className="text-sm font-semibold text-gray-900">{group.request?.requestTitle || 'Unknown Request'}</h5>
+                        <p className="text-xs text-gray-600 mt-1">
+                          {group.items.length} disapproved item{group.items.length !== 1 ? 's' : ''}
+                        </p>
+                      </div>
+                      <span className="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-700">
+                        {group.items.filter(i => i.isPending).length > 0 ? 'PENDING SAVE' : 'SAVED'}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {group.items.map((item, idx) => (
+                        <div key={idx} className="text-xs text-gray-700 flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                          <span className="font-medium">{item.item}</span>
+                          {item.isPending && (
+                            <span className="px-1.5 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded">Pending</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Items Table */}
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
@@ -584,7 +949,7 @@ const Offices = () => {
                 </span>
               </div>
             </div>
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto w-full">
               {allGroupItems.length > 0 ? (
                 <>
                 {/* Pagination calculations */}
@@ -596,10 +961,20 @@ const Offices = () => {
                   
                   return (
                     <>
-                    <table className="min-w-full divide-y divide-gray-200">
+                    <table className="w-full divide-y divide-gray-200" style={{ tableLayout: 'fixed', width: '100%' }}>
+                      <colgroup>
+                        <col style={{ width: '12%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '7%' }} />
+                        <col style={{ width: '8%' }} />
+                        <col style={{ width: '7%' }} />
+                        <col style={{ width: '20%' }} />
+                        <col style={{ width: '15%' }} />
+                        <col style={{ width: '11%' }} />
+                        <col style={{ width: '10%' }} />
+                      </colgroup>
                       <thead className="bg-gray-50">
                         <tr>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Request Title</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Item Name</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Approval Status</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Quantity</th>
@@ -608,18 +983,18 @@ const Offices = () => {
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Action</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">View</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
                         {paginatedItems.map((item, index) => (
                       <tr key={`${item.requestId}-${item.id || index}`} className="hover:bg-gray-50">
-                        <td className="px-4 py-3">
-                          <div className="text-sm font-medium text-gray-900 max-w-xs break-words">{item.requestTitle}</div>
+                        <td className="px-4 py-3" style={{ overflow: 'hidden', maxWidth: 0 }}>
+                          <div className="text-sm font-medium text-gray-900 line-clamp-2 break-words" title={item.item}>
+                            {item.item}
+                          </div>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <div className="text-sm font-medium text-gray-900">{item.item}</div>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
                           <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
                             item.approvalStatus === 'approved' ? 'bg-green-50 text-green-700' :
                             item.approvalStatus === 'disapproved' ? 'bg-red-50 text-red-700' :
@@ -628,15 +1003,15 @@ const Offices = () => {
                             {(item.approvalStatus || 'pending').toUpperCase()}
                           </span>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
                           <div className="text-sm text-gray-900">{item.quantity || '—'}</div>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
                           <div className="text-sm text-gray-900">
                             {item.price > 0 ? `₱${item.price.toLocaleString()}` : '—'}
                           </div>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
                           <span className={`px-2 py-0.5 text-xs font-semibold rounded ${
                             item.range === 'high' ? 'bg-gray-200 text-gray-800' :
                             item.range === 'mid' ? 'bg-gray-100 text-gray-700' :
@@ -645,59 +1020,81 @@ const Offices = () => {
                             {item.range ? item.range.toUpperCase() : '—'}
                           </span>
                         </td>
-                        <td className="px-4 py-3">
-                          <div className="text-sm text-gray-900 max-w-xs break-words">
-                            {item.specification || <span className="text-gray-400">—</span>}
+                        <td className="px-4 py-3" style={{ overflow: 'hidden', maxWidth: 0 }}>
+                          <div className="text-sm text-gray-900">
+                            {item.specification ? (
+                              <div className="line-clamp-2 break-words" title={item.specification}>
+                                {item.specification}
+                              </div>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
                           </div>
                         </td>
-                        <td className="px-4 py-3">
-                          <div className="text-sm text-gray-900 max-w-xs break-words">
-                            {item.purpose || <span className="text-gray-400">—</span>}
+                        <td className="px-4 py-3" style={{ overflow: 'hidden', maxWidth: 0 }}>
+                          <div className="text-sm text-gray-900">
+                            {item.purpose ? (
+                              <div className="line-clamp-2 break-words" title={item.purpose}>
+                                {item.purpose}
+                              </div>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
                           </div>
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
+                        <td className="px-4 py-3" style={{ overflow: 'hidden', maxWidth: 0 }}>
                           {item.approvalStatus === 'pending' ? (
-                            <div className="flex flex-col gap-2 min-w-[140px]">
-                              <div className="flex gap-1.5">
+                            <div className="flex flex-col gap-2" style={{ width: '100%', boxSizing: 'border-box' }}>
+                              <div className="flex flex-col gap-1.5">
                                 <button
                                   onClick={() => handleItemDecision(item, 'approved')}
-                                  className={`flex-1 px-2 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                                  className={`w-full px-2 py-1.5 text-xs font-semibold rounded-md transition-all whitespace-nowrap ${
                                     pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'approved'
                                       ? 'bg-green-600 text-white shadow-md'
                                       : 'bg-green-50 text-green-700 hover:bg-green-100 border border-green-200'
                                   }`}
                                 >
-                                  ✓ Approve
+                                  Approve
                                 </button>
                                 <button
                                   onClick={() => handleItemDecision(item, 'disapproved')}
-                                  className={`flex-1 px-2 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                                  className={`w-full px-2 py-1.5 text-xs font-semibold rounded-md transition-all whitespace-nowrap ${
                                     pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'disapproved'
                                       ? 'bg-red-600 text-white shadow-md'
                                       : 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
                                   }`}
                                 >
-                                  ✗ Disapprove
+                                  Disapprove
                                 </button>
                               </div>
                               {pendingReviews[`${item.requestId}-${item.id}`]?.decision === 'disapproved' && (
                                 <textarea
                                   value={pendingReviews[`${item.requestId}-${item.id}`]?.reason || ''}
                                   onChange={(e) => handleReasonChange(item, e.target.value)}
-                                  placeholder="Reason for disapproval..."
+                                  placeholder="Reason..."
                                   rows="2"
-                                  className="w-full px-2 py-1.5 text-xs border border-red-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
+                                  className="w-full px-2 py-1.5 text-xs border border-red-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none break-words"
+                                  style={{ width: '100%', boxSizing: 'border-box', minHeight: '50px' }}
                                 />
                               )}
                             </div>
                           ) : item.approvalReason ? (
-                            <div className="text-xs text-gray-600 max-w-xs">
+                            <div className="text-xs text-gray-600" style={{ width: '100%', boxSizing: 'border-box' }}>
                               <div className="font-medium mb-1">Reason:</div>
-                              <div className="break-words">{item.approvalReason}</div>
+                              <div className="line-clamp-2 break-words" title={item.approvalReason}>{item.approvalReason}</div>
                             </div>
                           ) : (
                             <span className="text-xs text-gray-400">—</span>
                           )}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
+                          <button
+                            onClick={() => setViewItemModal({ show: true, item: item })}
+                            className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+                            title="View full item details"
+                          >
+                            View
+                          </button>
                         </td>
                       </tr>
                         ))}
@@ -780,31 +1177,67 @@ const Offices = () => {
                   • {Object.keys(pendingReviews).length} unsaved change{Object.keys(pendingReviews).length !== 1 ? 's' : ''}
                 </span>
               )}
+              {disapprovedItems.length > 0 && (
+                <span className="ml-2 text-red-600 font-semibold">
+                  • {disapprovedItems.length} disapproved item{disapprovedItems.length !== 1 ? 's' : ''}
+                </span>
+              )}
             </div>
-            {Object.keys(pendingReviews).length > 0 && (
-              <button
-                onClick={handleSaveReviews}
-                disabled={loading}
-                className="px-6 py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {loading ? (
-                  <>
-                    <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Saving...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    Save Reviews
-                  </>
-                )}
-              </button>
-            )}
+            <div className="flex flex-col sm:flex-row gap-2">
+              {disapprovedItems.length > 0 && returnableRequestsCount > 0 && (
+                <button
+                  onClick={handleReturnDisapprovedItems}
+                  disabled={loading || returningRequests.size > 0}
+                  className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  title={
+                    returningRequests.size > 0
+                      ? "Requests are being returned. Please wait..."
+                      : "Return all requests containing disapproved items"
+                  }
+                >
+                  {loading || returningRequests.size > 0 ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Returning...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      Return Disapproved Items
+                    </>
+                  )}
+                </button>
+              )}
+              {Object.keys(pendingReviews).length > 0 && (
+                <button
+                  onClick={handleSaveReviews}
+                  disabled={loading}
+                  className="px-6 py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {loading ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Save Reviews
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       ) : (
@@ -1012,7 +1445,7 @@ const Offices = () => {
               </svg>
               <input
                 type="text"
-                placeholder="Search by unit name, year, request title, or user..."
+                placeholder="Search by unit name, campus, year, request title, or user..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-400 focus:border-gray-400 text-sm text-gray-700 bg-white"
@@ -1076,13 +1509,18 @@ const Offices = () => {
               else if (allRejected) overallStatus = 'rejected';
               
               return (
-                <div key={`${group.unitName}-${group.year}`} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+                <div key={`${group.unitName}|||${group.campus}|||${group.year}`} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
                   <div className="flex items-start justify-between mb-4">
                     <div className="flex-1">
                       <h2 className="text-lg font-bold text-gray-900 mb-3">
-                        {group.unitName} - {group.year}
+                        {group.unitName} {group.campus && group.campus !== 'Main' && `- ${group.campus}`} - {group.year}
                       </h2>
                       <div className="space-y-1.5">
+                        {group.campus && group.campus !== 'Main' && (
+                          <div className="text-sm text-gray-600">
+                            <span className="font-medium">Campus:</span> {group.campus}
+                          </div>
+                        )}
                         <div className="text-sm text-gray-700">
                           <span className="font-medium">Requests:</span> {group.requests.length} request{group.requests.length !== 1 ? 's' : ''}
                         </div>
@@ -1158,6 +1596,207 @@ const Offices = () => {
         showCloseButton={alertState.showCloseButton}
       >
         {alertState.children}
+      </Modal>
+
+      {/* View Item Details Modal */}
+      <Modal
+        isOpen={viewItemModal.show}
+        variant="default"
+        title="Item Details"
+        message=""
+        confirmLabel="Close"
+        cancelLabel={null}
+        onConfirm={() => setViewItemModal({ show: false, item: null })}
+        onClose={() => setViewItemModal({ show: false, item: null })}
+        closeOnOverlay={true}
+        showCloseButton={true}
+        zIndex={100}
+      >
+        {viewItemModal.item && (
+          <div className="space-y-4">
+            {/* Request Title */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Request Title
+              </label>
+              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                {viewItemModal.item.requestTitle || '—'}
+              </div>
+            </div>
+
+            {/* Item Name */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Item Name
+              </label>
+              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                {viewItemModal.item.item || '—'}
+              </div>
+            </div>
+
+            {/* Quantity */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Quantity
+              </label>
+              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                {viewItemModal.item.quantity || '—'}
+              </div>
+            </div>
+
+            {/* Price */}
+            {viewItemModal.item.price > 0 && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Price
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                  ₱{viewItemModal.item.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              </div>
+            )}
+
+            {/* Range */}
+            {viewItemModal.item.range && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Range
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
+                  {viewItemModal.item.range.toUpperCase()}
+                </div>
+              </div>
+            )}
+
+            {/* Approval Status */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-1">
+                Approval Status
+              </label>
+              <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
+                viewItemModal.item.approvalStatus === 'approved' 
+                  ? 'bg-green-50 text-green-700'
+                  : viewItemModal.item.approvalStatus === 'disapproved'
+                  ? 'bg-red-50 text-red-700'
+                  : 'bg-yellow-50 text-yellow-700'
+              }`}>
+                {(viewItemModal.item.approvalStatus || 'pending').toUpperCase()}
+              </span>
+            </div>
+
+            {/* Specification */}
+            {viewItemModal.item.specification && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Specification
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-60 overflow-y-auto whitespace-pre-wrap">
+                  {viewItemModal.item.specification}
+                </div>
+              </div>
+            )}
+
+            {/* Purpose */}
+            {viewItemModal.item.purpose && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Purpose
+                </label>
+                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {viewItemModal.item.purpose}
+                </div>
+              </div>
+            )}
+
+            {/* Approval Reason */}
+            {viewItemModal.item.approvalReason && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">
+                  Approval Reason
+                </label>
+                <div className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {viewItemModal.item.approvalReason}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Return Disapproved Items Modal */}
+      <Modal
+        isOpen={returnDisapprovedModal.show}
+        variant="default"
+        title="Return Disapproved Items"
+        message=""
+        confirmLabel="Return All Requests"
+        cancelLabel="Cancel"
+        onConfirm={performReturnDisapprovedItems}
+        onClose={() => setReturnDisapprovedModal({ show: false, reason: '' })}
+        closeOnOverlay={true}
+        showCloseButton={true}
+        zIndex={100}
+      >
+        <div className="space-y-4">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
+            <p className="text-sm text-red-800">
+              <strong>Warning:</strong> This will return all {returnableRequestsCount} request{returnableRequestsCount !== 1 ? 's' : ''} containing disapproved items. Users will be notified and will need to revise and resubmit.
+            </p>
+          </div>
+
+          {/* Disapproved Items Summary */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Requests to be Returned ({returnableRequestsCount} request{returnableRequestsCount !== 1 ? 's' : ''})
+            </label>
+            <div className="bg-gray-50 rounded-lg p-4 max-h-60 overflow-y-auto border border-gray-200">
+              <div className="space-y-3">
+                {Object.entries(disapprovedByRequest).map(([requestId, group]) => (
+                  <div key={requestId} className="bg-white rounded-lg p-3 border border-gray-200">
+                    <div className="flex items-start justify-between mb-2">
+                      <h5 className="text-sm font-semibold text-gray-900">{group.request?.requestTitle || 'Unknown Request'}</h5>
+                      <span className="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-700">
+                        {group.items.length} item{group.items.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {group.items.map((item, idx) => (
+                        <div key={idx} className="text-xs text-gray-700 flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                          <span>{item.item}</span>
+                          {item.isPending && (
+                            <span className="px-1.5 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded">Pending Save</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Reason for Return */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Reason for Return <span className="text-red-500">*</span>
+            </label>
+            <textarea
+              value={returnDisapprovedModal.reason}
+              onChange={(e) => setReturnDisapprovedModal({
+                ...returnDisapprovedModal,
+                reason: e.target.value
+              })}
+              placeholder="Please provide a detailed reason for returning these requests (e.g., errors found, items need revision, missing information, etc.)"
+              rows="5"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
+              required
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              This reason will be sent to all affected users along with the rejection notification.
+            </p>
+          </div>
+        </div>
       </Modal>
     </div>
   );

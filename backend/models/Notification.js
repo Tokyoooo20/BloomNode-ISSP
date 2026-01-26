@@ -15,7 +15,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['approved', 'rejected', 'disapproved', 'review_completed', 'item_approved', 'item_disapproved', 'request_submitted', 'issp_approved', 'issp_rejected', 'issp_submitted_for_review', 'dict_status_updated', 'item_status_updated'],
+    enum: ['approved', 'rejected', 'disapproved', 'review_completed', 'item_approved', 'item_disapproved', 'request_submitted', 'issp_approved', 'issp_rejected', 'issp_submitted_for_review', 'dict_status_updated', 'item_status_updated', 'item_updated'],
     required: true
   },
   isspId: {

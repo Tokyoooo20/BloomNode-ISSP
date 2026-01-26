@@ -19,7 +19,12 @@ router.get('/dashboard/stats', auth, async (req, res) => {
     const pendingRequests = allRequests.filter(r => r.status === 'pending').length;
     const submittedRequests = allRequests.filter(r => r.status === 'submitted').length;
     const approvedRequests = allRequests.filter(r => r.status === 'approved').length;
-    const rejectedRequests = allRequests.filter(r => r.status === 'rejected').length;
+    // Count rejected requests: currently rejected OR resubmitted (which means they were rejected before)
+    const rejectedRequests = allRequests.filter(r => 
+      r.status === 'rejected' || 
+      r.status === 'resubmitted' || 
+      r.revisionStatus === 'resubmitted'
+    ).length;
     
     // Group by year range and track approvals by actual calendar year
     const yearRangeStats = {};
@@ -41,7 +46,15 @@ router.get('/dashboard/stats', auth, async (req, res) => {
       }
       
       yearRangeStats[yearRange].total++;
-      yearRangeStats[yearRange][request.status]++;
+      
+      // Count resubmitted requests as rejected for statistics
+      if (request.status === 'resubmitted' || request.revisionStatus === 'resubmitted') {
+        yearRangeStats[yearRange].rejected++;
+      } else if (request.status === 'rejected') {
+        yearRangeStats[yearRange].rejected++;
+      } else if (['pending', 'submitted', 'approved'].includes(request.status)) {
+        yearRangeStats[yearRange][request.status]++;
+      }
       
       // Track approved requests by calendar year (from createdAt or updatedAt)
       if (request.status === 'approved') {
@@ -319,6 +332,25 @@ router.put('/requests/:requestId/items/:itemId/review', auth, async (req, res) =
       }
     });
 
+    // Emit Socket.io event to notify unit
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('item_reviewed', {
+          requestId: request._id,
+          itemId: itemId,
+          itemName: request.items[itemIndex].item,
+          approvalStatus: approvalStatus,
+          approvalReason: approvalReason,
+          requestStatus: request.status,
+          unitUserId: request.userId._id || request.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
+
     console.log(`Item ${itemId} in request ${requestId} ${approvalStatus}`);
     res.json(request);
   } catch (error) {
@@ -538,6 +570,23 @@ router.put('/requests/:requestId/items/:itemId/price', auth, async (req, res) =>
     request.items[itemIndex].price = priceNum;
     await request.save();
     
+    // Create notification for the unit user
+    try {
+      await request.populate('userId', 'unit');
+      await Notification.create({
+        userId: request.userId,
+        unit: request.unit || (request.userId?.unit) || null,
+        type: 'item_updated',
+        title: 'Item Updated',
+        message: `The price for item "${itemName}" in your request "${request.requestTitle}" has been updated from ₱${oldPrice.toLocaleString()} to ₱${priceNum.toLocaleString()}.`,
+        requestId: request._id,
+        itemId: itemId
+      });
+    } catch (notificationError) {
+      console.error('Error creating notification:', notificationError);
+      // Don't fail the request if notification creation fails
+    }
+    
     await logAuditEvent({
       actor: req.user,
       action: 'item_price_updated',
@@ -550,6 +599,25 @@ router.put('/requests/:requestId/items/:itemId/price', auth, async (req, res) =>
         newPrice: priceNum
       }
     });
+
+    // Emit Socket.io event to notify unit
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('item_updated', {
+          requestId: request._id,
+          itemId: itemId,
+          itemName: itemName,
+          updateType: 'price',
+          oldValue: oldPrice,
+          newValue: priceNum,
+          unitUserId: request.userId._id || request.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
     
     res.json({ item: request.items[itemIndex], request });
   } catch (error) {
@@ -562,7 +630,7 @@ router.put('/requests/:requestId/items/:itemId/price', auth, async (req, res) =>
 router.put('/requests/:requestId/items/:itemId/quantity', auth, async (req, res) => {
   try {
     const { requestId, itemId } = req.params;
-    const { quantity } = req.body;
+    const { quantity, quantityByYear } = req.body;
     
     if (quantity === undefined || quantity === null) {
       return res.status(400).json({ message: 'Quantity is required' });
@@ -591,7 +659,30 @@ router.put('/requests/:requestId/items/:itemId/quantity', auth, async (req, res)
     
     // Update the item's quantity
     request.items[itemIndex].quantity = quantityNum;
+    
+    // Update quantityByYear if provided
+    if (quantityByYear !== undefined && quantityByYear !== null) {
+      request.items[itemIndex].quantityByYear = quantityByYear;
+    }
+    
     await request.save();
+    
+    // Create notification for the unit user
+    try {
+      await request.populate('userId', 'unit');
+      await Notification.create({
+        userId: request.userId,
+        unit: request.unit || (request.userId?.unit) || null,
+        type: 'item_updated',
+        title: 'Item Updated',
+        message: `The quantity for item "${itemName}" in your request "${request.requestTitle}" has been updated from ${oldQuantity} to ${quantityNum}.`,
+        requestId: request._id,
+        itemId: itemId
+      });
+    } catch (notificationError) {
+      console.error('Error creating notification:', notificationError);
+      // Don't fail the request if notification creation fails
+    }
     
     await logAuditEvent({
       actor: req.user,
@@ -605,6 +696,25 @@ router.put('/requests/:requestId/items/:itemId/quantity', auth, async (req, res)
         newQuantity: quantityNum
       }
     });
+
+    // Emit Socket.io event to notify unit
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('item_updated', {
+          requestId: request._id,
+          itemId: itemId,
+          itemName: itemName,
+          updateType: 'quantity',
+          oldValue: oldQuantity,
+          newValue: quantityNum,
+          unitUserId: request.userId._id || request.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
     
     res.json({ item: request.items[itemIndex], request });
   } catch (error) {
@@ -643,6 +753,23 @@ router.put('/requests/:requestId/items/:itemId/specification', auth, async (req,
     request.items[itemIndex].specification = specification;
     await request.save();
     
+    // Create notification for the unit user
+    try {
+      await request.populate('userId', 'unit');
+      await Notification.create({
+        userId: request.userId,
+        unit: request.unit || (request.userId?.unit) || null,
+        type: 'item_updated',
+        title: 'Item Updated',
+        message: `The specification for item "${itemName}" in your request "${request.requestTitle}" has been updated by the administrator.`,
+        requestId: request._id,
+        itemId: itemId
+      });
+    } catch (notificationError) {
+      console.error('Error creating notification:', notificationError);
+      // Don't fail the request if notification creation fails
+    }
+    
     await logAuditEvent({
       actor: req.user,
       action: 'item_specification_updated',
@@ -655,11 +782,147 @@ router.put('/requests/:requestId/items/:itemId/specification', auth, async (req,
         newSpecification: specification
       }
     });
+
+    // Emit Socket.io event to notify unit
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('item_updated', {
+          requestId: request._id,
+          itemId: itemId,
+          itemName: itemName,
+          updateType: 'specification',
+          unitUserId: request.userId._id || request.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
     
     res.json({ item: request.items[itemIndex], request });
   } catch (error) {
     console.error('Error updating item specification:', error);
     res.status(500).json({ message: 'Error updating item specification', error: error.message });
+  }
+});
+
+// PUT - Update item details (item name, purpose, range) (admin only)
+router.put('/requests/:requestId/items/:itemId/details', auth, async (req, res) => {
+  try {
+    const { requestId, itemId } = req.params;
+    const { item, purpose, range } = req.body;
+    
+    // Find the request
+    const request = await Request.findById(requestId);
+    if (!request) {
+      return res.status(404).json({ message: 'Request not found' });
+    }
+    
+    // Find the item in the request
+    const itemIndex = request.items.findIndex(item => item.id === itemId);
+    if (itemIndex === -1) {
+      return res.status(404).json({ message: 'Item not found in request' });
+    }
+    
+    // Capture old values before updating
+    const oldItemName = request.items[itemIndex].item;
+    const oldPurpose = request.items[itemIndex].purpose || '';
+    const oldRange = request.items[itemIndex].range || 'mid';
+    
+    // Update the item's details
+    const updatedFields = [];
+    if (item !== undefined && item !== null) {
+      request.items[itemIndex].item = item;
+      if (item !== oldItemName) {
+        updatedFields.push(`name from "${oldItemName}" to "${item}"`);
+      }
+    }
+    if (purpose !== undefined && purpose !== null) {
+      request.items[itemIndex].purpose = purpose;
+      updatedFields.push('purpose');
+    }
+    if (range !== undefined && range !== null) {
+      request.items[itemIndex].range = range;
+      updatedFields.push(`range to ${range.toUpperCase()}`);
+    }
+    
+    await request.save();
+    
+    // Create notification for the unit user
+    try {
+      await request.populate('userId', 'unit');
+      const itemNameDisplay = item !== undefined ? item : oldItemName;
+      
+      // Build a more descriptive message
+      const changes = [];
+      if (item !== undefined && item !== null && item !== oldItemName) {
+        changes.push(`name changed from "${oldItemName}" to "${item}"`);
+      }
+      if (purpose !== undefined && purpose !== null && purpose !== oldPurpose) {
+        changes.push('purpose updated');
+      }
+      if (range !== undefined && range !== null && range !== oldRange) {
+        changes.push(`range changed to ${range.toUpperCase()}`);
+      }
+      
+      const updateMessage = changes.length > 0
+        ? `The ${changes.join(', ')} for item "${itemNameDisplay}" in your request "${request.requestTitle}" has been updated by the administrator.`
+        : `Item "${itemNameDisplay}" in your request "${request.requestTitle}" has been updated by the administrator.`;
+      
+      await Notification.create({
+        userId: request.userId,
+        unit: request.unit || (request.userId?.unit) || null,
+        type: 'item_updated',
+        title: 'Item Updated',
+        message: updateMessage,
+        requestId: request._id,
+        itemId: itemId
+      });
+    } catch (notificationError) {
+      console.error('Error creating notification:', notificationError);
+      // Don't fail the request if notification creation fails
+    }
+    
+    await logAuditEvent({
+      actor: req.user,
+      action: 'item_details_updated',
+      description: `Updated details for item "${oldItemName}"`,
+      target: { type: 'request', id: request._id.toString(), name: request.requestTitle },
+      metadata: {
+        itemId,
+        itemName: item !== undefined ? item : oldItemName,
+        oldItemName,
+        oldPurpose,
+        oldRange,
+        newPurpose: purpose !== undefined ? purpose : oldPurpose,
+        newRange: range !== undefined ? range : oldRange
+      }
+    });
+
+    // Emit Socket.io event to notify unit
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        const itemNameDisplay = item !== undefined ? item : oldItemName;
+        io.emit('item_updated', {
+          requestId: request._id,
+          itemId: itemId,
+          itemName: itemNameDisplay,
+          updateType: 'details',
+          updatedFields: updatedFields,
+          unitUserId: request.userId._id || request.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
+    
+    res.json({ item: request.items[itemIndex], request });
+  } catch (error) {
+    console.error('Error updating item details:', error);
+    res.status(500).json({ message: 'Error updating item details', error: error.message });
   }
 });
 

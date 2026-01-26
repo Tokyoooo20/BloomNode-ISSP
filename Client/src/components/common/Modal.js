@@ -119,7 +119,8 @@ const Modal = ({
   onClose,
   onConfirm,
   closeOnOverlay = true,
-  showCloseButton = true
+  showCloseButton = true,
+  zIndex = 50
 }) => {
   if (!isOpen) {
     return null;
@@ -146,7 +147,8 @@ const Modal = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"
+      className="fixed inset-0 flex items-center justify-center p-4 sm:p-6"
+      style={{ zIndex }}
       onClick={handleOverlayClick}
     >
       <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm" />

@@ -13,6 +13,13 @@ const { generateVerificationCode, sendVerificationEmail, sendApprovalEmail, send
 
 const router = express.Router();
 
+// University-level offices that should have special conflict detection
+const UNIVERSITY_LEVEL_OFFICES = [
+  'Office of the University President',
+  'Office of the Vice President for Academic Affairs',
+  'Office of the Chancellor'
+];
+
 // Configure multer for profile picture uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -74,7 +81,7 @@ const validateStrongPassword = (password) => {
 // Signup route with admin approval requirement
 router.post('/signup', async (req, res) => {
   try {
-    const { unit, campus, username, email, password } = req.body;
+    const { unit, campus, office, universityLevelOffice, firstName, lastName, username, email, password } = req.body;
 
     // Validation
     if (!unit || !campus || !username || !email || !password) {
@@ -117,6 +124,10 @@ router.post('/signup', async (req, res) => {
       // Update existing pending user with new code and info
       existingPendingUser.unit = unit;
       existingPendingUser.campus = campus;
+      existingPendingUser.office = office || '';
+      existingPendingUser.universityLevelOffice = universityLevelOffice || '';
+      existingPendingUser.firstName = firstName || '';
+      existingPendingUser.lastName = lastName || '';
       existingPendingUser.username = username;
       existingPendingUser.email = email;
       existingPendingUser.password = password;
@@ -130,6 +141,10 @@ router.post('/signup', async (req, res) => {
       pendingUser = new PendingUser({
         unit,
         campus,
+        office: office || '',
+        universityLevelOffice: universityLevelOffice || '',
+        firstName: firstName || '',
+        lastName: lastName || '',
         username,
         email,
         password,
@@ -201,7 +216,7 @@ router.post('/signup', async (req, res) => {
     };
 
     // In development or when email fails, optionally include code in response for testing
-    if ((process.env.NODE_ENV === 'development' || !process.env.SENDGRID_API_KEY) && !emailSent) {
+    if ((process.env.NODE_ENV === 'development' || (!process.env.SENDGRID_API_KEY && !process.env.RESEND_API_KEY)) && !emailSent) {
       response.devMode = true;
       response.verificationCode = verificationCode; // Include code for testing
       response.codeExpires = codeExpiration;
@@ -281,6 +296,10 @@ router.post('/verify-email', async (req, res) => {
     const newUser = new User({
       unit: pendingUser.unit,
       campus: pendingUser.campus,
+      office: pendingUser.office || '',
+      universityLevelOffice: pendingUser.universityLevelOffice || '',
+      firstName: pendingUser.firstName || '',
+      lastName: pendingUser.lastName || '',
       username: pendingUser.username,
       email: pendingUser.email,
       password: pendingUser.password, // Already hashed in PendingUser model
@@ -517,26 +536,61 @@ router.patch('/approve-user/:userId', auth, async (req, res) => {
       });
     }
 
-    // Normalize campus values (empty/null = 'Main')
-    const userToApproveCampus = (userToApprove.campus || '').trim() || 'Main';
+    // Normalize campus values consistently (empty/null/undefined -> 'Main', trim, case-insensitive)
+    const normalizeCampus = (campus) => {
+      if (!campus || typeof campus !== 'string' || campus.trim() === '') {
+        return 'Main';
+      }
+      const trimmed = campus.trim();
+      // Case-insensitive normalization: capitalize first letter, lowercase rest
+      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+    };
     
-    // Check if there's already an approved user with the same unit AND same campus (excluding admin/president/Executive roles)
-    // Build campus query: match exact campus or match empty/null if userToApproveCampus is 'Main'
+    const userToApproveCampus = normalizeCampus(userToApprove.campus);
+    const userToApproveUnit = (userToApprove.unit || '').trim();
+    
+    // Check if this is a university-level office (these need special conflict detection)
+    const isUniversityLevelOffice = UNIVERSITY_LEVEL_OFFICES.includes(userToApproveUnit);
+    
+    // Build campus query: match normalized campus value or match empty/null/undefined if normalized to 'Main'
+    // Also handle case variations (Main, main, MAIN, etc.)
     const campusQuery = userToApproveCampus === 'Main' 
-      ? { $or: [{ campus: 'Main' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
-      : { campus: userToApproveCampus };
+      ? { 
+          $or: [
+            { campus: 'Main' }, 
+            { campus: 'main' },
+            { campus: 'MAIN' },
+            { campus: '' }, 
+            { campus: null }, 
+            { campus: { $exists: false } }
+          ] 
+        }
+      : { 
+          $or: [
+            { campus: userToApproveCampus },
+            { campus: userToApproveCampus.toLowerCase() },
+            { campus: userToApproveCampus.toUpperCase() }
+          ]
+        };
+    
+    // Build role query based on whether this is a university-level office
+    // For university-level offices (especially President), check ALL roles including president/Executive
+    // For regular units, exclude admin/president/Executive roles (these are system roles, not program heads)
+    const roleQuery = isUniversityLevelOffice
+      ? { role: { $ne: 'admin' } } // Only exclude admin role for university-level offices
+      : { role: { $nin: ['admin', 'president', 'Executive'] } }; // Exclude all for regular units
     
     const existingUser = await User.findOne({
-      unit: userToApprove.unit,
+      unit: userToApproveUnit,
       ...campusQuery,
       approvalStatus: 'approved',
-      role: { $nin: ['admin', 'president', 'Executive'] }, // Check for program heads, not admin/president/Executive
+      ...roleQuery,
       _id: { $ne: userId } // Exclude the user being approved
     }).select('-password');
 
     // If conflict exists and not auto-suspending, return conflict info
     if (existingUser && !autoSuspendConflict) {
-      const existingUserCampus = (existingUser.campus || '').trim() || 'Main';
+      const existingUserCampus = normalizeCampus(existingUser.campus);
       return res.status(409).json({
         conflict: true,
         message: `Another user with the same unit (${existingUserCampus} campus) is already approved`,
@@ -724,23 +778,29 @@ router.patch('/suspend-user/:userId', auth, async (req, res) => {
   }
 });
 
-// Update user details (e.g., unit or role)
+// Update user details (e.g., unit, role, campus, office, etc.)
 router.patch('/update-user/:userId', auth, async (req, res) => {
   try {
     const { userId } = req.params;
-    const { unit, role } = req.body;
+    const { 
+      username, 
+      email, 
+      firstName, 
+      lastName, 
+      campus, 
+      office, 
+      universityLevelOffice, 
+      unit, 
+      role 
+    } = req.body;
 
-    if (!unit && !role) {
+    // Check if any updates are provided
+    const hasUpdates = username || email || firstName || lastName || campus !== undefined || 
+                       office !== undefined || universityLevelOffice !== undefined || unit || role;
+
+    if (!hasUpdates) {
       return res.status(400).json({
         message: 'No updates provided'
-      });
-    }
-
-    // Allow 'Program head', 'president', 'admin', or any unit name as a role
-    // No strict validation needed - frontend controls the options
-    if (role && typeof role !== 'string' || (role && role.trim().length === 0)) {
-      return res.status(400).json({
-        message: 'Role must be a non-empty string'
       });
     }
 
@@ -752,26 +812,156 @@ router.patch('/update-user/:userId', auth, async (req, res) => {
       });
     }
 
-    let unitChanged = false;
+    const changes = [];
+    const auditMetadata = {};
+
+    // Update username
+    if (username && username !== user.username) {
+      // Check if username is already taken
+      const existingUser = await User.findOne({ username, _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(400).json({
+          message: 'Username already taken'
+        });
+      }
+      user.username = username.trim();
+      changes.push('username');
+      auditMetadata.username = username;
+    }
+
+    // Update email
+    if (email && email !== user.email) {
+      // Check if email is already taken
+      const existingUser = await User.findOne({ email: email.toLowerCase(), _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(400).json({
+          message: 'Email already taken'
+        });
+      }
+      user.email = email.toLowerCase().trim();
+      changes.push('email');
+      auditMetadata.email = email;
+    }
+
+    // Update firstName
+    if (firstName !== undefined) {
+      user.firstName = firstName ? firstName.trim() : '';
+      changes.push('firstName');
+    }
+
+    // Update lastName
+    if (lastName !== undefined) {
+      user.lastName = lastName ? lastName.trim() : '';
+      changes.push('lastName');
+    }
+
+    // Update campus
+    if (campus !== undefined) {
+      user.campus = campus ? campus.trim() : '';
+      changes.push('campus');
+      auditMetadata.campus = campus;
+    }
+
+    // Update office
+    if (office !== undefined) {
+      user.office = office ? office.trim() : '';
+      changes.push('office');
+      auditMetadata.office = office;
+    }
+
+    // Update universityLevelOffice
+    if (universityLevelOffice !== undefined) {
+      user.universityLevelOffice = universityLevelOffice ? universityLevelOffice.trim() : '';
+      changes.push('universityLevelOffice');
+      auditMetadata.universityLevelOffice = universityLevelOffice;
+    }
+
+    // Update unit
     if (unit) {
       if (typeof unit !== 'string' || !unit.trim()) {
         return res.status(400).json({
           message: 'Unit must be a non-empty string'
         });
       }
-      if (unit.trim() !== user.unit) {
-        unitChanged = true;
+      const newUnit = unit.trim();
+      if (newUnit !== user.unit) {
+        // Check for conflict if user is approved
+        if (user.approvalStatus === 'approved') {
+          const normalizeCampus = (campus) => {
+            if (!campus || typeof campus !== 'string' || campus.trim() === '') {
+              return 'Main';
+            }
+            const trimmed = campus.trim();
+            return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+          };
+          
+          const userCampus = normalizeCampus(user.campus);
+          const isUniversityLevelOffice = UNIVERSITY_LEVEL_OFFICES.includes(newUnit);
+          
+          // Build campus query
+          const campusQuery = userCampus === 'Main' 
+            ? { $or: [{ campus: 'Main' }, { campus: 'main' }, { campus: 'MAIN' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
+            : { $or: [{ campus: userCampus }, { campus: userCampus.toLowerCase() }, { campus: userCampus.toUpperCase() }] };
+          
+          // Build role query
+          const roleQuery = isUniversityLevelOffice
+            ? { role: { $ne: 'admin' } }
+            : { role: { $nin: ['admin', 'president', 'Executive'] } };
+          
+          const existingUser = await User.findOne({
+            unit: newUnit,
+            ...campusQuery,
+            approvalStatus: 'approved',
+            ...roleQuery,
+            _id: { $ne: userId }
+          }).select('-password');
+          
+          // If conflict exists and not auto-suspending, return conflict info
+          if (existingUser && !req.body.autoSuspendConflict) {
+            const existingUserCampus = normalizeCampus(existingUser.campus);
+            return res.status(409).json({
+              conflict: true,
+              message: `Another user with the same unit (${existingUserCampus} campus) is already approved`,
+              existingUser: {
+                _id: existingUser._id,
+                username: existingUser.username,
+                email: existingUser.email,
+                unit: existingUser.unit,
+                campus: existingUserCampus,
+                approvedAt: existingUser.approvedAt
+              }
+            });
+          }
+          
+          // If conflict exists and auto-suspending, suspend the existing user
+          if (existingUser && req.body.autoSuspendConflict) {
+            existingUser.isApproved = false;
+            existingUser.approvalStatus = 'suspended';
+            await existingUser.save();
+            console.log(`Auto-suspended user ${existingUser.username} (${existingUser.email}) due to unit change conflict`);
+            auditMetadata.suspendedUser = {
+              username: existingUser.username,
+              email: existingUser.email
+            };
+          }
+        }
+        
+        user.unit = newUnit;
+        changes.push('unit');
+        auditMetadata.unit = unit;
       }
-      user.unit = unit.trim();
     }
 
-    let roleChanged = false;
+    // Update role
     if (role && role !== user.role) {
-      user.role = role;
-      // Auto-approve for any role (Program head, president, admin, or unit names)
-      user.isApproved = true;
-      user.approvalStatus = 'approved';
-      roleChanged = true;
+      if (typeof role !== 'string' || role.trim().length === 0) {
+        return res.status(400).json({
+          message: 'Role must be a non-empty string'
+        });
+      }
+      user.role = role.trim();
+      changes.push('role');
+      auditMetadata.role = role;
     }
 
     await user.save();
@@ -779,35 +969,20 @@ router.patch('/update-user/:userId', auth, async (req, res) => {
     const sanitizedUser = user.toObject();
     delete sanitizedUser.password;
 
-    const auditTasks = [];
-    if (unitChanged) {
-      auditTasks.push(
-        logAuditEvent({
+    // Log audit event if there were changes
+    if (changes.length > 0) {
+      try {
+        await logAuditEvent({
           actor: req.user,
-          action: 'account_unit_updated',
-          description: `Updated unit for ${user.email}`,
+          action: 'account_updated',
+          description: `Updated ${changes.join(', ')} for ${user.email}`,
           target: { type: 'user', id: user._id.toString(), name: user.username },
-          metadata: {
-            unit: user.unit
-          }
-        })
-      );
-    }
-    if (roleChanged) {
-      auditTasks.push(
-        logAuditEvent({
-          actor: req.user,
-          action: 'account_role_changed',
-          description: `Changed role for ${user.email} to ${user.role}`,
-          target: { type: 'user', id: user._id.toString(), name: user.username },
-          metadata: {
-            role: user.role
-          }
-        })
-      );
-    }
-    if (auditTasks.length) {
-      await Promise.all(auditTasks);
+          metadata: auditMetadata
+        });
+      } catch (auditError) {
+        console.error('Failed to log audit event:', auditError);
+        // Don't fail the request if audit logging fails
+      }
     }
 
     res.json({
@@ -817,7 +992,8 @@ router.patch('/update-user/:userId', auth, async (req, res) => {
   } catch (error) {
     console.error('Error updating user:', error);
     res.status(500).json({
-      message: 'Server error updating user'
+      message: 'Server error updating user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -845,13 +1021,15 @@ router.delete('/delete-user/:userId', auth, async (req, res) => {
     // Store user info before deletion for audit log
     const userEmail = user.email;
     const username = user.username;
-    const userUnit = user.unit;
+    const userUnit = (user.unit || '').trim();
     const userIdString = user._id.toString();
 
-    // Prevent deletion of admin, president, and Executive roles
-    if (['admin', 'president', 'Executive'].includes(user.role)) {
+    // Only prevent deletion of system administrators (admin role)
+    // Allow deletion of president/Executive roles - these are office holders, not system admins
+    // Users with "Executive" unit or "president"/"Executive" roles can be deleted
+    if (user.role === 'admin') {
       return res.status(403).json({
-        message: 'Cannot delete administrator accounts'
+        message: 'Cannot delete system administrator accounts'
       });
     }
 

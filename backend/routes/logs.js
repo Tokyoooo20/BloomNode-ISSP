@@ -20,6 +20,10 @@ router.get('/', auth, async (req, res) => {
     // Get the logged-in user's unit
     const user = await User.findById(req.user.id).select('unit role approvalStatus');
     const userUnit = user?.unit;
+    const userRole = user?.role?.toLowerCase();
+
+    // Check if user is admin, president, or executive - they should see all logs
+    const isAdminOrPresident = userRole === 'admin' || userRole === 'president' || userRole === 'executive';
 
     // Check if user is a Program Head OR pending with unit
     const isProgramHead = user.role && 
@@ -35,8 +39,12 @@ router.get('/', auth, async (req, res) => {
 
     // Filter by unit - only show logs from users in the same unit
     // For Program Heads and pending users: show all logs for their unit (department account)
+    // For admins, presidents, and executives: show all logs (no filter)
     // Query by actor.unit OR by actor.id from users in the same unit (for backward compatibility)
-    if ((isProgramHead || isPendingWithUnit) && userUnit) {
+    if (isAdminOrPresident) {
+      // Admins, presidents, and executives see all logs - no unit filter
+      // query remains empty, will fetch all logs
+    } else if ((isProgramHead || isPendingWithUnit) && userUnit) {
       // Find all users in the same unit
       const unitUsers = await User.find({ unit: userUnit }).select('_id');
       const unitUserIds = unitUsers.map(u => u._id);
@@ -47,7 +55,7 @@ router.get('/', auth, async (req, res) => {
         { 'actor.id': { $in: unitUserIds } } // Logs from users in the same unit (for old logs)
       ];
     } else if (!userUnit) {
-      // If user has no unit, return empty logs
+      // If user has no unit and is not admin/president/executive, return empty logs
       return res.json({
         logs: [],
         nextCursor: null
@@ -69,6 +77,37 @@ router.get('/', auth, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(numericLimit)
       .lean();
+
+    // Populate actor names for non-admin users
+    const actorIds = [...new Set(logs
+      .filter(log => log.actor?.id && log.actor?.role?.toLowerCase() !== 'admin' && !log.actor?.name)
+      .map(log => log.actor.id.toString())
+    )];
+
+    if (actorIds.length > 0) {
+      const users = await User.find({ _id: { $in: actorIds } })
+        .select('_id firstName lastName username')
+        .lean();
+
+      const userMap = new Map();
+      users.forEach(user => {
+        const name = user.firstName && user.lastName 
+          ? `${user.firstName} ${user.lastName}`.trim()
+          : user.username || '';
+        userMap.set(user._id.toString(), name);
+      });
+
+      // Populate names in logs
+      logs.forEach(log => {
+        if (log.actor?.id && log.actor?.role?.toLowerCase() !== 'admin' && !log.actor?.name) {
+          const userId = log.actor.id.toString();
+          const name = userMap.get(userId);
+          if (name) {
+            log.actor.name = name;
+          }
+        }
+      });
+    }
 
     const nextCursor = logs.length === numericLimit
       ? logs[logs.length - 1]._id

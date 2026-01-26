@@ -46,6 +46,7 @@ export const API_ENDPOINTS = {
     requestsByUnit: (unitName) => `${API_BASE_URL}/api/admin/requests/unit/${encodeURIComponent(unitName)}`,
     requestReview: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/review`,
     completeReview: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/complete-review`,
+    requestStatus: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/status`,
     officeStats: `${API_BASE_URL}/api/admin/office/stats`,
     getRequest: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}`,
     dictApproval: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/dict-approval`,
@@ -53,6 +54,7 @@ export const API_ENDPOINTS = {
     updateRequestItemPrice: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/price`,
     updateRequestItemQuantity: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/quantity`,
     updateRequestItemSpecification: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/specification`,
+    updateRequestItemDetails: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/details`,
   },
   
   // ISSP endpoints
@@ -77,6 +79,7 @@ export const API_ENDPOINTS = {
   // AI endpoints
   ai: {
     itemInsights: `${API_BASE_URL}/api/ai/item-insights`,
+    checkITRelated: `${API_BASE_URL}/api/ai/check-it-related`,
   },
   
   // Notification endpoints
@@ -89,6 +92,58 @@ export const API_ENDPOINTS = {
   // Logs endpoints
   logs: {
     list: `${API_BASE_URL}/api/logs`,
+  },
+  
+  // Organization endpoints
+  organization: {
+    campuses: {
+      list: `${API_BASE_URL}/api/organization/campuses`,
+      get: (id) => `${API_BASE_URL}/api/organization/campuses/${id}`,
+      create: `${API_BASE_URL}/api/organization/campuses`,
+      update: (id) => `${API_BASE_URL}/api/organization/campuses/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/campuses/${id}`,
+    },
+    faculties: {
+      list: `${API_BASE_URL}/api/organization/faculties`,
+      get: (id) => `${API_BASE_URL}/api/organization/faculties/${id}`,
+      create: `${API_BASE_URL}/api/organization/faculties`,
+      update: (id) => `${API_BASE_URL}/api/organization/faculties/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/faculties/${id}`,
+    },
+    offices: {
+      list: `${API_BASE_URL}/api/organization/offices`,
+      get: (id) => `${API_BASE_URL}/api/organization/offices/${id}`,
+      create: `${API_BASE_URL}/api/organization/offices`,
+      update: (id) => `${API_BASE_URL}/api/organization/offices/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/offices/${id}`,
+    },
+    units: {
+      list: `${API_BASE_URL}/api/organization/units`,
+      create: `${API_BASE_URL}/api/organization/units`,
+      update: (id) => `${API_BASE_URL}/api/organization/units/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/units/${id}`,
+    },
+    programs: {
+      list: `${API_BASE_URL}/api/organization/programs`,
+      get: (id) => `${API_BASE_URL}/api/organization/programs/${id}`,
+      create: `${API_BASE_URL}/api/organization/programs`,
+      update: (id) => `${API_BASE_URL}/api/organization/programs/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/programs/${id}`,
+    },
+    universityLevelOffices: {
+      list: `${API_BASE_URL}/api/organization/university-level-offices`,
+      get: (id) => `${API_BASE_URL}/api/organization/university-level-offices/${id}`,
+      create: `${API_BASE_URL}/api/organization/university-level-offices`,
+      update: (id) => `${API_BASE_URL}/api/organization/university-level-offices/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/university-level-offices/${id}`,
+    },
+    yearCycles: {
+      list: `${API_BASE_URL}/api/organization/year-cycles`,
+      get: (id) => `${API_BASE_URL}/api/organization/year-cycles/${id}`,
+      create: `${API_BASE_URL}/api/organization/year-cycles`,
+      update: (id) => `${API_BASE_URL}/api/organization/year-cycles/${id}`,
+      delete: (id) => `${API_BASE_URL}/api/organization/year-cycles/${id}`,
+    },
   },
 };
 

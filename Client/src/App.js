@@ -9,6 +9,7 @@ import Dashboard from './components/Admin/Dashboard';
 import UnitDboard from './components/Client/UnitDboard';
 import Pdashboard from './components/Pres/Pdashboard';
 import Profile from './components/common/Profile';
+import EditUser from './components/Admin/EditUser';
 
 function App() {
   return (
@@ -25,6 +26,7 @@ function App() {
           <Route path="/unitdboard" element={<UnitDboard />} />
           <Route path="/pdashboard" element={<Pdashboard />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/edit-user/:userId" element={<EditUser />} />
         </Routes>
       </div>
     </Router>

@@ -1,19 +1,63 @@
 const sgMail = require('@sendgrid/mail');
+const { Resend } = require('resend');
 
 // Initialize SendGrid with API key
-const apiKey = process.env.SENDGRID_API_KEY;
+const sendGridApiKey = process.env.SENDGRID_API_KEY;
+const resendApiKey = process.env.RESEND_API_KEY;
 
-if (!apiKey) {
-  console.error('WARNING: SENDGRID_API_KEY is not set in environment variables!');
-  console.error('Email functionality will not work. Please add SENDGRID_API_KEY to your .env file.');
-} else {
+// Determine which email service to use (prefer Resend, fallback to SendGrid)
+let emailService = 'none';
+let apiKey = null;
+
+if (resendApiKey) {
+  emailService = 'resend';
+  apiKey = resendApiKey;
   try {
-    sgMail.setApiKey(apiKey);
-    // SendGrid API key loaded silently
+    const resend = new Resend(resendApiKey);
+    console.log('✅ Resend email service initialized');
+  } catch (err) {
+    console.error('Error initializing Resend:', err.message);
+  }
+} else if (sendGridApiKey) {
+  emailService = 'sendgrid';
+  apiKey = sendGridApiKey;
+  try {
+    sgMail.setApiKey(sendGridApiKey);
+    console.log('✅ SendGrid email service initialized');
   } catch (err) {
     console.error('Error setting SendGrid API key:', err.message);
   }
+} else {
+  console.error('WARNING: No email API key configured!');
+  console.error('Please set either RESEND_API_KEY or SENDGRID_API_KEY in your environment variables.');
 }
+
+/**
+ * Helper function to send email using configured service (Resend or SendGrid)
+ */
+const sendEmail = async (to, from, subject, html) => {
+  if (emailService === 'resend') {
+    const resend = new Resend(resendApiKey);
+    const { data, error } = await resend.emails.send({
+      from: from,
+      to: to,
+      subject: subject,
+      html: html,
+    });
+
+    if (error) {
+      throw new Error(`Resend API error: ${error.message || JSON.stringify(error)}`);
+    }
+
+    return { success: true, service: 'resend', emailId: data?.id };
+  } else if (emailService === 'sendgrid') {
+    const msg = { to, from, subject, html };
+    await sgMail.send(msg);
+    return { success: true, service: 'sendgrid' };
+  } else {
+    throw new Error('Email service not configured. Please set either RESEND_API_KEY or SENDGRID_API_KEY.');
+  }
+};
 
 /**
  * Generate a 6-digit verification code
@@ -31,21 +75,28 @@ const generateVerificationCode = () => {
 const sendVerificationEmail = async (email, username, code) => {
   try {
     // Validate configuration before attempting to send
-    if (!apiKey) {
-      const error = new Error('SENDGRID_API_KEY is not configured in environment variables');
+    if (!apiKey || emailService === 'none') {
+      const error = new Error('Email service not configured. Please set either RESEND_API_KEY or SENDGRID_API_KEY in your environment variables.');
       console.error('❌ EMAIL CONFIGURATION ERROR:');
-      console.error('   Missing: SENDGRID_API_KEY');
-      console.error('   Fix: Add SENDGRID_API_KEY to your .env file');
+      console.error('   Missing: RESEND_API_KEY or SENDGRID_API_KEY');
+      console.error('   Fix: Add one of these to your Render.com environment variables');
       throw error;
     }
 
-    const fromEmail = process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com';
+    // Get from email based on service
+    let fromEmail;
+    if (emailService === 'resend') {
+      fromEmail = process.env.RESEND_FROM_EMAIL || process.env.FROM_EMAIL || 'BloomNode <onboarding@resend.dev>';
+    } else {
+      fromEmail = process.env.SENDGRID_FROM_EMAIL || process.env.FROM_EMAIL || 'noreply@bloomnode.com';
+    }
     
     if (!fromEmail) {
-      const error = new Error('SENDGRID_FROM_EMAIL is not configured');
+      const missingVar = emailService === 'resend' ? 'RESEND_FROM_EMAIL' : 'SENDGRID_FROM_EMAIL';
+      const error = new Error(`${missingVar} is not configured`);
       console.error('❌ EMAIL CONFIGURATION ERROR:');
-      console.error('   Missing: SENDGRID_FROM_EMAIL');
-      console.error('   Fix: Add SENDGRID_FROM_EMAIL to your .env file');
+      console.error(`   Missing: ${missingVar}`);
+      console.error(`   Fix: Add ${missingVar} to your Render.com environment variables`);
       throw error;
     }
 
@@ -125,16 +176,16 @@ const sendVerificationEmail = async (email, username, code) => {
       `,
     };
 
-    // Validate API key is set before attempting to send
-    if (!apiKey) {
-      throw new Error('SENDGRID_API_KEY is not configured. Please add it to your .env file.');
-    }
-
-    await sgMail.send(msg);
-
-    console.log('✅ Verification email sent successfully!');
+    // Send email using the configured service
+    const result = await sendEmail(email, fromEmail, msg.subject, msg.html);
+    
+    console.log(`✅ Verification email sent successfully via ${result.service}!`);
     console.log('   Recipient:', email);
     console.log('   Verification Code:', code);
+    if (result.emailId) {
+      console.log('   Email ID:', result.emailId);
+    }
+
     return { success: true };
   } catch (error) {
     console.error('\n❌ ============================================');
@@ -207,8 +258,10 @@ const sendVerificationEmail = async (email, username, code) => {
     }
     
     console.error('\n📝 Current Configuration:');
-    console.error('   SENDGRID_API_KEY:', apiKey ? `${apiKey.substring(0, 10)}...` : 'NOT SET');
-    console.error('   SENDGRID_FROM_EMAIL:', process.env.SENDGRID_FROM_EMAIL || 'NOT SET');
+    console.error('   Email Service:', emailService);
+    console.error('   RESEND_API_KEY:', resendApiKey ? `${resendApiKey.substring(0, 10)}...` : 'NOT SET');
+    console.error('   SENDGRID_API_KEY:', sendGridApiKey ? `${sendGridApiKey.substring(0, 10)}...` : 'NOT SET');
+    console.error('   FROM_EMAIL:', process.env.FROM_EMAIL || process.env.RESEND_FROM_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'NOT SET');
     console.error('   NODE_ENV:', process.env.NODE_ENV || 'NOT SET');
     console.error('❌ ============================================\n');
     
@@ -223,10 +276,15 @@ const sendVerificationEmail = async (email, username, code) => {
  */
 const sendApprovalEmail = async (email, username) => {
   try {
-    const msg = {
-      to: email,
-      from: process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com',
-      subject: 'Your BloomNode Account Has Been Approved! 🎉',
+    // Get from email based on service
+    let fromEmail;
+    if (emailService === 'resend') {
+      fromEmail = process.env.RESEND_FROM_EMAIL || process.env.FROM_EMAIL || 'BloomNode <onboarding@resend.dev>';
+    } else {
+      fromEmail = process.env.SENDGRID_FROM_EMAIL || process.env.FROM_EMAIL || 'noreply@bloomnode.com';
+    }
+
+    const subject = 'Your BloomNode Account Has Been Approved! 🎉';
       html: `
         <!DOCTYPE html>
         <html>
@@ -286,12 +344,12 @@ const sendApprovalEmail = async (email, username) => {
             </table>
           </body>
         </html>
-      `,
-    };
+      `;
 
-    await sgMail.send(msg);
-
-    console.log('✅ Approval email sent successfully to:', email);
+    // Send email using the configured service
+    const result = await sendEmail(email, fromEmail, subject, html);
+    
+    console.log(`✅ Approval email sent successfully via ${result.service} to:`, email);
     return { success: true };
   } catch (error) {
     console.error('❌ Error sending approval email:', error);
@@ -312,10 +370,15 @@ const sendPasswordResetEmail = async (email, username, resetToken) => {
   try {
     const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
     
-    const msg = {
-      to: email,
-      from: process.env.SENDGRID_FROM_EMAIL || 'noreply@bloomnode.com',
-      subject: 'Reset Your BloomNode Password',
+    // Get from email based on service
+    let fromEmail;
+    if (emailService === 'resend') {
+      fromEmail = process.env.RESEND_FROM_EMAIL || process.env.FROM_EMAIL || 'BloomNode <onboarding@resend.dev>';
+    } else {
+      fromEmail = process.env.SENDGRID_FROM_EMAIL || process.env.FROM_EMAIL || 'noreply@bloomnode.com';
+    }
+
+    const subject = 'Reset Your BloomNode Password';
       html: `
         <!DOCTYPE html>
         <html>
@@ -385,12 +448,12 @@ const sendPasswordResetEmail = async (email, username, resetToken) => {
             </table>
           </body>
         </html>
-      `,
-    };
+      `;
 
-    await sgMail.send(msg);
-
-    console.log('✅ Password reset email sent successfully to:', email);
+    // Send email using the configured service
+    const result = await sendEmail(email, fromEmail, subject, html);
+    
+    console.log(`✅ Password reset email sent successfully via ${result.service} to:`, email);
     return { success: true };
   } catch (error) {
     console.error('❌ Error sending password reset email:', error);

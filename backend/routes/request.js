@@ -30,18 +30,27 @@ const getRequestName = async (request) => {
     return request.requestTitle;
   }
   
-  // Try to get unit from populated user or fetch it
+  // Try to get unit from request first (populated from user in pre-save hook)
   let unit = null;
-  if (request.userId && typeof request.userId === 'object' && request.userId.unit) {
-    // User is already populated
-    unit = request.userId.unit;
-  } else if (request.userId) {
-    // Need to fetch user
-    try {
-      const user = await User.findById(request.userId);
-      unit = user?.unit || null;
-    } catch (error) {
-      console.error('Error fetching user for request name:', error);
+  
+  // Check request.unit field directly
+  if (request.unit && request.unit.trim()) {
+    unit = request.unit.trim();
+  } 
+  // Check populated userId object
+  else if (request.userId) {
+    if (typeof request.userId === 'object' && request.userId.unit) {
+      // User is already populated
+      unit = request.userId.unit;
+    } else if (typeof request.userId === 'string' || request.userId._id) {
+      // Need to fetch user
+      try {
+        const userId = request.userId._id || request.userId;
+        const user = await User.findById(userId);
+        unit = user?.unit || null;
+      } catch (error) {
+        console.error('Error fetching user for request name:', error);
+      }
     }
   }
   
@@ -49,7 +58,12 @@ const getRequestName = async (request) => {
     return unit.trim();
   }
   
-  // Fallback to ID if no unit available
+  // Fallback: Use year cycle if available
+  if (request.year && request.year.trim()) {
+    return `Request - ${request.year}`;
+  }
+  
+  // Last fallback to ID if nothing else available
   const requestId = request._id ? request._id.toString().slice(-6) : 'unknown';
   return `Request #${requestId}`;
 };
@@ -638,6 +652,27 @@ router.put('/:id', auth, async (req, res) => {
             
             if (adminNotifications.length > 0) {
               await Notification.insertMany(adminNotifications);
+            }
+            
+            // Emit Socket.io event to notify admins
+            try {
+              const io = req.app.get('io');
+              if (io) {
+                io.emit('request_submitted', {
+                  requestId: request._id,
+                  requestTitle: requestName,
+                  unit: submittingUser.unit,
+                  submittedBy: {
+                    id: submittingUser._id,
+                    username: submittingUser.username,
+                    unit: submittingUser.unit
+                  },
+                  itemCount: request.items?.length || 0
+                });
+              }
+            } catch (socketError) {
+              console.error('Error emitting Socket.io event:', socketError);
+              // Don't fail the request if Socket.io emit fails
             }
             
             // Automatically add items to ISSP Resource Requirements deployment table

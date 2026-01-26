@@ -1,0 +1,31 @@
+# ============================================
+# RENDER.COM ENVIRONMENT VARIABLES
+# Copy and paste these into Render.com
+# ============================================
+
+# REQUIRED - Database
+MONGODB_URI=your_mongodb_connection_string_here
+
+# REQUIRED - Authentication
+JWT_SECRET=your_jwt_secret_key_here
+
+# REQUIRED - AI Assistant
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# REQUIRED - Email Service (Choose ONE option below)
+
+# OPTION A: Resend (Recommended)
+RESEND_API_KEY=your_resend_api_key_here
+RESEND_FROM_EMAIL=BloomNode <your-email@yourdomain.com>
+
+# OR OPTION B: SendGrid
+# SENDGRID_API_KEY=your_sendgrid_api_key_here
+# SENDGRID_FROM_EMAIL=noreply@yourdomain.com
+
+# OPTIONAL - But Recommended
+NODE_ENV=production
+FRONTEND_URL=https://your-frontend-url.onrender.com
+
+# OPTIONAL - AI Model (has default)
+# GEMINI_MODEL=gemini-pro
+

@@ -162,14 +162,56 @@ const analyzeSectionChanges = (previousValue, currentValue, patchValue) => {
 
   const changedFields = [];
   const removedFields = [];
+  
+  // Handle object with nested arrays (like pageB with summaryInvestments array)
   Object.keys(patchValue || {}).forEach((field) => {
-    const previousFieldValue = previousValue ? previousValue[field] : undefined;
-    const currentFieldValue = currentValue ? currentValue[field] : undefined;
-    if (JSON.stringify(previousFieldValue) !== JSON.stringify(currentFieldValue)) {
-      changedFields.push(field);
-      if (!isEmptyValue(previousFieldValue) && isEmptyValue(currentFieldValue)) {
-        removedFields.push(field);
+    try {
+      const previousFieldValue = previousValue ? previousValue[field] : undefined;
+      const currentFieldValue = currentValue ? currentValue[field] : undefined;
+      
+      // For arrays, compare lengths first to avoid expensive stringify on large arrays
+      if (Array.isArray(previousFieldValue) || Array.isArray(currentFieldValue)) {
+        const prevLength = Array.isArray(previousFieldValue) ? previousFieldValue.length : 0;
+        const currLength = Array.isArray(currentFieldValue) ? currentFieldValue.length : 0;
+        
+        if (prevLength !== currLength) {
+          changedFields.push(field);
+          if (prevLength > 0 && currLength === 0) {
+            removedFields.push(field);
+          }
+        } else if (prevLength > 0) {
+          // Only do full comparison if arrays have same length
+          // For very large arrays (>100 items), skip deep comparison to avoid performance issues
+          if (prevLength > 100) {
+            // For large arrays, assume changed if lengths are same but arrays exist
+            // This is a performance optimization - we could do a hash comparison instead
+            changedFields.push(field);
+          } else {
+            // For smaller arrays, do full comparison
+            try {
+              if (JSON.stringify(previousFieldValue) !== JSON.stringify(currentFieldValue)) {
+                changedFields.push(field);
+              }
+            } catch (stringifyError) {
+              // If stringify fails (circular reference, etc.), mark as changed
+              console.error(`[Backend] Error stringifying arrays for field ${field}:`, stringifyError);
+              changedFields.push(field);
+            }
+          }
+        }
+      } else {
+        // For non-array values, do normal comparison
+        if (JSON.stringify(previousFieldValue) !== JSON.stringify(currentFieldValue)) {
+          changedFields.push(field);
+          if (!isEmptyValue(previousFieldValue) && isEmptyValue(currentFieldValue)) {
+            removedFields.push(field);
+          }
+        }
       }
+    } catch (err) {
+      // If comparison fails, just mark as changed
+      console.error(`[Backend] Error comparing field ${field}:`, err);
+      changedFields.push(field);
     }
   });
   return { changedFields, removedFields };
@@ -1484,8 +1526,25 @@ const drawDeploymentTable = (doc, rows = [], options = {}) => {
     headerBottomHeight +
     rowsToRender.length * (minRowHeight + 2) +
     12;
+  
+  // Check if we need a new page, and if so, redraw part and section headings
+  const currentY = doc.y;
+  const spaceNeeded = estimatedHeight;
+  const availableSpace = doc.page.height - doc.page.margins.bottom - currentY;
+  
+  // Store original page number to detect if ensureSpace adds a page
+  const originalPageNumber = doc.page.number;
+  
+  // Use ensureSpace first to handle page breaks
   ensureSpace(doc, estimatedHeight);
+  
+  // If ensureSpace added a new page, redraw part and section headings
+  if (doc.page.number > originalPageNumber && options.onPageBreak) {
+    options.onPageBreak(doc);
+    // No additional spacing - table should start immediately after section title
+  }
 
+  // Start table immediately at current Y position (no extra spacing)
   const startY = doc.y;
   const yearGroupWidth = columnWidths.slice(2).reduce((sum, width) => sum + width, 0);
   const yearGroupX = marginLeft + columnWidths[0] + columnWidths[1];
@@ -2092,6 +2151,26 @@ router.post('/review/submit', auth, async (req, res) => {
       }
     });
 
+    // Emit Socket.io event to notify president
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('issp_sent', {
+          isspId: issp._id,
+          status: issp.review.status,
+          submittedAt: issp.review.submittedAt,
+          submittedBy: {
+            id: req.user.id,
+            username: req.user.username,
+            unit: req.user.unit
+          }
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
+
     res.json({ review: issp.review });
   } catch (error) {
     console.error('Error submitting ISSP for review:', error);
@@ -2194,6 +2273,26 @@ router.post('/review/decision', auth, async (req, res) => {
         decidedAt: issp.review.decidedAt
       }
     });
+
+    // Emit Socket.io event to notify admin
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('issp_reviewed', {
+          isspId: issp._id,
+          status: status,
+          decidedAt: issp.review.decidedAt,
+          decidedBy: {
+            id: req.user.id,
+            username: req.user.username
+          },
+          adminUserId: issp.userId._id || issp.userId
+        });
+      }
+    } catch (socketError) {
+      console.error('Error emitting Socket.io event:', socketError);
+      // Don't fail the request if Socket.io emit fails
+    }
 
     res.json({ review: issp.review });
   } catch (error) {
@@ -2563,53 +2662,141 @@ router.put('/development-investment-program', auth, async (req, res) => {
       issp.unit = user.unit;
     }
 
+    // Clean up dictApproval BEFORE making any changes to prevent validation errors
+    try {
+      if (issp.dictApproval) {
+        if (issp.dictApproval instanceof Map) {
+          const cleanedDictApproval = new Map();
+          for (const [key, value] of issp.dictApproval.entries()) {
+            // Only keep entries that are objects with the expected structure
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+              cleanedDictApproval.set(key, value);
+            }
+          }
+          issp.dictApproval = cleanedDictApproval;
+          issp.markModified('dictApproval');
+        } else if (typeof issp.dictApproval === 'object') {
+          // Convert plain object to Map if needed
+          const cleanedDictApproval = new Map();
+          for (const [key, value] of Object.entries(issp.dictApproval)) {
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+              cleanedDictApproval.set(key, value);
+            }
+          }
+          issp.dictApproval = cleanedDictApproval;
+          issp.markModified('dictApproval');
+        } else {
+          // If it's not a Map or object, initialize as empty Map
+          issp.dictApproval = new Map();
+          issp.markModified('dictApproval');
+        }
+      } else {
+        // Initialize as empty Map if it doesn't exist
+        issp.dictApproval = new Map();
+        issp.markModified('dictApproval');
+      }
+    } catch (dictError) {
+      console.error('[Backend] Error cleaning dictApproval before update (non-fatal):', dictError);
+      // If cleaning fails, initialize as empty Map
+      issp.dictApproval = new Map();
+      issp.markModified('dictApproval');
+    }
+
     const previousSection = deepClone(issp.developmentInvestmentProgram || {});
     
-    // Update the data
+    // Update the data - merge pageB to preserve any existing properties
     if (pageA) issp.developmentInvestmentProgram.pageA = pageA;
-    if (pageB) issp.developmentInvestmentProgram.pageB = pageB;
+    if (pageB) {
+      // Merge pageB data instead of replacing entirely
+      if (!issp.developmentInvestmentProgram.pageB) {
+        issp.developmentInvestmentProgram.pageB = {};
+      }
+      Object.assign(issp.developmentInvestmentProgram.pageB, pageB);
+      // Log the summaryInvestments data being saved
+      if (pageB.summaryInvestments) {
+        console.log('[Backend] Saving summaryInvestments:', pageB.summaryInvestments.length, 'rows');
+        if (pageB.summaryInvestments.length > 0) {
+          console.log('[Backend] First row:', JSON.stringify(pageB.summaryInvestments[0], null, 2));
+        }
+      }
+    }
     if (pageC) issp.developmentInvestmentProgram.pageC = pageC;
     
     // Auto-update status
     issp.developmentInvestmentProgram.status = checkSectionCompletion(issp.developmentInvestmentProgram, 'developmentInvestmentProgram');
     
-    await issp.save();
+    // Mark the developmentInvestmentProgram as modified
+    issp.markModified('developmentInvestmentProgram');
+    
+    // Save with validation disabled for dictApproval if needed
+    try {
+      await issp.save({ validateBeforeSave: true });
+    } catch (saveError) {
+      // If save fails due to dictApproval validation, try saving without validation
+      if (saveError.name === 'ValidationError' && saveError.message.includes('dictApproval')) {
+        console.error('[Backend] Save failed due to dictApproval validation, retrying without validation...');
+        // Reset dictApproval to empty Map and try again
+        issp.dictApproval = new Map();
+        issp.markModified('dictApproval');
+        await issp.save({ validateBeforeSave: false });
+        console.log('[Backend] Successfully saved after fixing dictApproval');
+      } else {
+        throw saveError;
+      }
+    }
 
     const sectionKey = 'developmentInvestmentProgram';
     const isspId = issp._id.toString();
-    await Promise.all([
-      logIsspSectionActivity({
-        req,
-        isspId,
-        sectionKey,
-        pageKey: 'pageA',
-        previousValue: previousSection.pageA,
-        currentValue: issp.developmentInvestmentProgram.pageA,
-        patchValue: pageA
-      }),
-      logIsspSectionActivity({
-        req,
-        isspId,
-        sectionKey,
-        pageKey: 'pageB',
-        previousValue: previousSection.pageB,
-        currentValue: issp.developmentInvestmentProgram.pageB,
-        patchValue: pageB
-      }),
-      logIsspSectionActivity({
-        req,
-        isspId,
-        sectionKey,
-        pageKey: 'pageC',
-        previousValue: previousSection.pageC,
-        currentValue: issp.developmentInvestmentProgram.pageC,
-        patchValue: pageC
-      })
-    ]);
+    
+    // Log activities with error handling to prevent 500 errors
+    try {
+      await Promise.all([
+        pageA ? logIsspSectionActivity({
+          req,
+          isspId,
+          sectionKey,
+          pageKey: 'pageA',
+          previousValue: previousSection.pageA,
+          currentValue: issp.developmentInvestmentProgram.pageA,
+          patchValue: pageA
+        }).catch(err => {
+          console.error('[Backend] Error logging pageA activity:', err);
+          return null;
+        }) : Promise.resolve(null),
+        pageB ? logIsspSectionActivity({
+          req,
+          isspId,
+          sectionKey,
+          pageKey: 'pageB',
+          previousValue: previousSection.pageB,
+          currentValue: issp.developmentInvestmentProgram.pageB,
+          patchValue: pageB
+        }).catch(err => {
+          console.error('[Backend] Error logging pageB activity:', err);
+          return null;
+        }) : Promise.resolve(null),
+        pageC ? logIsspSectionActivity({
+          req,
+          isspId,
+          sectionKey,
+          pageKey: 'pageC',
+          previousValue: previousSection.pageC,
+          currentValue: issp.developmentInvestmentProgram.pageC,
+          patchValue: pageC
+        }).catch(err => {
+          console.error('[Backend] Error logging pageC activity:', err);
+          return null;
+        }) : Promise.resolve(null)
+      ]);
+    } catch (logError) {
+      // Log the error but don't fail the request
+      console.error('[Backend] Error in activity logging (non-fatal):', logError);
+    }
     
     res.json(issp);
   } catch (error) {
     console.error('Error updating development and investment program:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ message: 'Error updating development and investment program', error: error.message });
   }
 });
@@ -2710,8 +2897,12 @@ router.get('/generate', auth, async (req, res) => {
     console.log('[PDF Generation] Full ISSP developmentInvestmentProgram:', JSON.stringify(issp.developmentInvestmentProgram, null, 2));
     console.log('[PDF Generation] Development Program pageB:', JSON.stringify(developmentProgram.pageB, null, 2));
     console.log('[PDF Generation] Summary Investments:', developmentProgram.pageB?.summaryInvestments?.length || 0, 'rows');
-    if (developmentProgram.pageB?.summaryInvestments) {
+    if (developmentProgram.pageB?.summaryInvestments && developmentProgram.pageB.summaryInvestments.length > 0) {
       console.log('[PDF Generation] First summary investment row:', JSON.stringify(developmentProgram.pageB.summaryInvestments[0], null, 2));
+      console.log('[PDF Generation] Last summary investment row:', JSON.stringify(developmentProgram.pageB.summaryInvestments[developmentProgram.pageB.summaryInvestments.length - 1], null, 2));
+    } else {
+      console.log('[PDF Generation] WARNING: No summary investments data found in pageB!');
+      console.log('[PDF Generation] pageB keys:', Object.keys(developmentProgram.pageB || {}));
     }
 
     // Part I
@@ -2966,7 +3157,13 @@ router.get('/generate', auth, async (req, res) => {
 
     // Part IV
     startPart('PART IV. RESOURCE REQUIREMENTS');
-    startSection('A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES');
+    // Draw section title with zero spacing and position table immediately after
+    ensureSpace(doc, 18); // Space before title
+    const marginLeft = doc.page.margins.left;
+    const contentWidth = getContentWidth(doc);
+    doc.x = marginLeft;
+    doc.font('Helvetica-Bold').fontSize(12).text('A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES', marginLeft, doc.y, { width: contentWidth });
+    // No moveDown - table will start immediately at current Y position
     
     // Extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
     const cycleYears = getYearsFromCycle(selectedYearCycle);
@@ -2995,14 +3192,18 @@ router.get('/generate', auth, async (req, res) => {
       
       unitRequests.forEach(request => {
         const userCampus = request.userId?.campus || '';
-        // Identify Main Campus: empty, null, or undefined campus field
-        const campus = (!userCampus || userCampus.trim() === '') ? 'DOrSU Main Campus' : userCampus;
+        // Normalize Main Campus: empty, null, undefined, or "Main" string should all be "DOrSU Main Campus"
+        const normalizedCampus = (!userCampus || userCampus.trim() === '' || userCampus.trim().toLowerCase() === 'main') 
+          ? 'DOrSU Main Campus' 
+          : userCampus.trim();
+        const campus = normalizedCampus;
         
-        console.log(`[PDF Generation] Processing request from unit: ${request.userId?.unit || 'N/A'}, campus: ${campus}`);
+        console.log(`[PDF Generation] Processing request from unit: ${request.userId?.unit || 'N/A'}, original campus: "${userCampus}", normalized campus: "${campus}"`);
         
         if (request.items && Array.isArray(request.items)) {
           request.items.forEach(item => {
-            if (item.item && item.item.trim() !== '') {
+            // Only include approved items in the deployment table
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
               // Normalize item name to lowercase for grouping (ignore case differences)
               // This ensures "Laptop" and "laptop" are grouped together
               const itemName = item.item.trim().toLowerCase();
@@ -3031,9 +3232,19 @@ router.get('/generate', auth, async (req, res) => {
                 itemGroups[itemName][campus][year] += qty;
               });
               
-              // If no quantityByYear data exists, log for debugging
+              // If no quantityByYear data exists, distribute total quantity across years
               if (!hasQuantityData && Object.keys(quantityByYear).length === 0 && item.quantity > 0) {
-                console.log(`[PDF Generation] Warning: Item "${itemName}" from ${campus} has total quantity ${item.quantity} but no quantityByYear data`);
+                console.log(`[PDF Generation] Warning: Item "${itemName}" from ${campus} has total quantity ${item.quantity} but no quantityByYear data. Distributing across years.`);
+                // Distribute total quantity evenly across the cycle years
+                const totalQty = Number(item.quantity) || 0;
+                const qtyPerYear = Math.ceil(totalQty / cycleYears.length);
+                cycleYears.forEach((year, index) => {
+                  // Put more in first year if there's a remainder
+                  const yearQty = (index === 0 && totalQty % cycleYears.length !== 0) 
+                    ? qtyPerYear + (totalQty % cycleYears.length)
+                    : qtyPerYear;
+                  itemGroups[itemName][campus][year] += yearQty;
+                });
               }
             }
           });
@@ -3119,8 +3330,22 @@ router.get('/generate', auth, async (req, res) => {
     
     // Use actual years from cycle as column labels
     const yearLabels = cycleYears.map(year => year.toString());
-    drawDeploymentTable(doc, deploymentData, { yearLabels });
+    // Pass callback to redraw part and section headings if page break occurs
+    drawDeploymentTable(doc, deploymentData, { 
+      yearLabels,
+      onPageBreak: (doc) => {
+        drawPartHeading(doc, 'PART IV. RESOURCE REQUIREMENTS');
+        // Draw section title directly without extra spacing
+        ensureSpace(doc, 18); // Space before title
+        const marginLeft = doc.page.margins.left;
+        const contentWidth = getContentWidth(doc);
+        doc.x = marginLeft;
+        doc.font('Helvetica-Bold').fontSize(12).text('A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES', marginLeft, doc.y, { width: contentWidth });
+        // No moveDown - table will start immediately at current Y position
+      }
+    });
 
+    // Move to next page for section B
     addPageWithHeader();
     drawPartHeading(doc, 'PART IV. RESOURCE REQUIREMENTS');
     startSection('B. ICT ORGANIZATIONAL STRUCTURE');
@@ -3169,18 +3394,139 @@ router.get('/generate', auth, async (req, res) => {
     drawPartHeading(doc, 'PART V. DEVELOPMENT AND INVESTMENT PROGRAM');
     startSection('C. SUMMARY OF INVESTMENTS', { after: 0.6 });
     
-    // Get summary investments data - ensure we're getting it from the right place
+    // Get summary investments data - ALWAYS calculate from submitted requests to match UI
+    // This ensures PDF always shows the same data as displayed in the system
     let summaryInvestmentsData = [];
     
-    // Try multiple possible paths to get the data
-    if (developmentProgram.pageB?.summaryInvestments) {
-      summaryInvestmentsData = developmentProgram.pageB.summaryInvestments;
-    } else if (developmentProgram.summaryInvestments) {
-      summaryInvestmentsData = developmentProgram.summaryInvestments;
-    } else if (developmentProgram.pageB) {
-      // Check if pageB itself is an array
-      if (Array.isArray(developmentProgram.pageB)) {
-        summaryInvestmentsData = developmentProgram.pageB;
+    // Always calculate from submitted requests (same as UI) to ensure consistency
+    console.log('[PDF Generation] Calculating summaryInvestments from submitted requests to match UI...');
+    
+    // Fetch submitted requests for the selected year cycle (reuse the requests already fetched if available)
+    let requestsForSummary = unitRequests;
+    if (!requestsForSummary || requestsForSummary.length === 0) {
+      requestsForSummary = await Request.find({
+        status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] },
+        year: selectedYearCycle
+      })
+      .populate('userId', 'username email unit campus')
+      .sort({ createdAt: -1 });
+    }
+    
+    if (requestsForSummary.length > 0) {
+        // Get cycle years (reuse if available, otherwise calculate)
+        const summaryCycleYears = cycleYears || getYearsFromCycle(selectedYearCycle);
+        
+        // Group items by name (case-insensitive) across all units/campuses
+        const itemGroups = {};
+        
+        requestsForSummary.forEach(request => {
+          if (request.items && Array.isArray(request.items)) {
+            request.items.forEach(item => {
+              // Only include approved items in the summary
+              if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+                // Normalize item name to lowercase for grouping
+                const itemName = item.item.trim().toLowerCase();
+                
+                // Initialize item group if not exists
+                if (!itemGroups[itemName]) {
+                  itemGroups[itemName] = {
+                    quantities: {},
+                    costs: {}
+                  };
+                  summaryCycleYears.forEach(year => {
+                    itemGroups[itemName].quantities[year] = 0;
+                    itemGroups[itemName].costs[year] = 0;
+                  });
+                }
+                
+                // Sum quantities and costs by year (cost = quantity × admin-set price)
+                const quantityByYear = item.quantityByYear || {};
+                const adminPrice = Number(item.price) || 0;
+                
+                summaryCycleYears.forEach(year => {
+                  const yearKey = year.toString();
+                  const qty = Number(quantityByYear[yearKey]) || 0;
+                  itemGroups[itemName].quantities[year] += qty;
+                  // Calculate cost for this item instance: quantity × admin-set price
+                  itemGroups[itemName].costs[year] += qty * adminPrice;
+                });
+              }
+            });
+          }
+        });
+        
+        // Convert grouped data to table format
+        const summaryRows = [];
+        
+        // Sort item names alphabetically
+        const sortedItemNames = Object.keys(itemGroups).sort();
+        
+        sortedItemNames.forEach(itemNameKey => {
+          const itemData = itemGroups[itemNameKey];
+          
+          // Skip items with no quantities
+          const hasQuantities = summaryCycleYears.some(year => itemData.quantities[year] > 0);
+          if (!hasQuantities) return;
+          
+          // Capitalize first letter for display
+          const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+          
+          // Get quantities and costs (already calculated per year)
+          const year1Qty = itemData.quantities[summaryCycleYears[0]] || 0;
+          const year1Cost = itemData.costs[summaryCycleYears[0]] || 0;
+          const year2Qty = itemData.quantities[summaryCycleYears[1]] || 0;
+          const year2Cost = itemData.costs[summaryCycleYears[1]] || 0;
+          const year3Qty = itemData.quantities[summaryCycleYears[2]] || 0;
+          const year3Cost = itemData.costs[summaryCycleYears[2]] || 0;
+          
+          summaryRows.push({
+            item: displayItemName,
+            year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+            year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+            year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+            year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+            year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+            year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+          });
+        });
+        
+        // Calculate totals
+        let totalYear1Physical = 0;
+        let totalYear1Cost = 0;
+        let totalYear2Physical = 0;
+        let totalYear2Cost = 0;
+        let totalYear3Physical = 0;
+        let totalYear3Cost = 0;
+        
+        summaryRows.forEach(row => {
+          totalYear1Physical += Number(row.year1Physical) || 0;
+          totalYear1Cost += Number(row.year1Cost) || 0;
+          totalYear2Physical += Number(row.year2Physical) || 0;
+          totalYear2Cost += Number(row.year2Cost) || 0;
+          totalYear3Physical += Number(row.year3Physical) || 0;
+          totalYear3Cost += Number(row.year3Cost) || 0;
+        });
+        
+        // Add totals row
+        summaryRows.push({
+          item: 'TOTAL',
+          year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+          year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+          year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+          year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+          year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+          year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
+          isTotalRow: true
+        });
+        
+      summaryInvestmentsData = summaryRows;
+      console.log('[PDF Generation] Calculated summaryInvestments from requests:', summaryInvestmentsData.length, 'rows');
+    } else {
+      console.log('[PDF Generation] No submitted requests found for calculation');
+      // Fallback to saved data if no requests available
+      if (developmentProgram.pageB?.summaryInvestments && developmentProgram.pageB.summaryInvestments.length > 0) {
+        summaryInvestmentsData = developmentProgram.pageB.summaryInvestments;
+        console.log('[PDF Generation] Fallback: Using saved summaryInvestments:', summaryInvestmentsData.length, 'rows');
       }
     }
     
@@ -3188,6 +3534,10 @@ router.get('/generate', auth, async (req, res) => {
     console.log('[PDF Generation] Summary Investments data (final):', JSON.stringify(summaryInvestmentsData, null, 2));
     console.log('[PDF Generation] Summary Investments count (final):', summaryInvestmentsData.length);
     console.log('[PDF Generation] Is array?', Array.isArray(summaryInvestmentsData));
+    
+    if (summaryInvestmentsData.length === 0) {
+      console.log('[PDF Generation] WARNING: No summary investments data to display in PDF!');
+    }
     
     // Always draw the table, even if empty (it will show empty rows)
     drawSummaryInvestmentsTable(doc, summaryInvestmentsData);

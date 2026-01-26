@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import Modal from './Modal';
 import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 
 const Profile = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [activeTab, setActiveTab] = useState('profile');
   const [loading, setLoading] = useState(false);
   const [userData, setUserData] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarUserData, setSidebarUserData] = useState({ unit: '', username: '', profilePicture: null });
   const [profileForm, setProfileForm] = useState({
     username: '',
     unit: ''
@@ -31,10 +36,67 @@ const Profile = () => {
     message: '' 
   });
 
-  // Fetch user data on component mount
+  // Fetch user data on component mount and when location changes
   useEffect(() => {
+    // Always fetch user data when component mounts or pathname changes
     fetchUserData();
-  }, []);
+    
+    // Only fetch sidebar data and reset sidebar state if on standalone profile route
+    if (location.pathname === '/profile') {
+      fetchSidebarUserData();
+      // Reset sidebar state when navigating to profile
+      setSidebarOpen(false);
+      // Reset active tab to default
+      setActiveTab('profile');
+    }
+  }, [location.pathname]);
+
+  // Fetch admin user data for sidebar
+  const fetchSidebarUserData = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.auth.me, {
+        headers: getAuthHeaders()
+      });
+      setSidebarUserData({
+        unit: response.data.unit || '',
+        username: response.data.username || '',
+        profilePicture: response.data.profilePicture 
+          ? getFileUrl(response.data.profilePicture)
+          : null
+      });
+    } catch (error) {
+      console.error('Error fetching sidebar user data:', error);
+      const storedUser = localStorage.getItem('user');
+      if (storedUser) {
+        try {
+          const parsedUser = JSON.parse(storedUser);
+          setSidebarUserData({
+            unit: parsedUser.unit || '',
+            username: parsedUser.username || '',
+            profilePicture: null
+          });
+        } catch (parseError) {
+          console.error('Error parsing stored user data:', parseError);
+        }
+      }
+    }
+  };
+
+  const handleLogoutClick = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    navigate('/login');
+  };
+
+  const handleSidebarNavigation = (section) => {
+    // Close sidebar on mobile
+    setSidebarOpen(false);
+    // Navigate to dashboard with section state
+    navigate('/dashboard', { 
+      state: { section },
+      replace: false
+    });
+  };
 
   const fetchUserData = async () => {
     try {
@@ -314,14 +376,21 @@ const Profile = () => {
 
   if (loading && !userData) {
     return (
-      <div className="flex justify-center items-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-600"></div>
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
       </div>
     );
   }
 
-  return (
-    <div className="max-w-7xl mx-auto">
+  // Check if we're on the standalone /profile route or embedded in Dashboard
+  const isStandaloneProfile = location.pathname === '/profile';
+
+  // Content to render (without sidebar wrapper)
+  const profileContent = (
+    <>
+      {/* Content */}
+      <div className="p-4 sm:p-6 lg:p-8">
+        <div className="max-w-7xl mx-auto">
       {/* Header Section */}
       <div className="bg-gradient-to-r from-gray-800 to-gray-700 rounded-xl shadow-lg p-8 mb-6">
         <div className="flex flex-col sm:flex-row items-center sm:items-start space-y-4 sm:space-y-0 sm:space-x-6">
@@ -743,17 +812,166 @@ const Profile = () => {
         </div>
       )}
 
-      {/* Alert Modal */}
-      <Modal
-        isOpen={alertModal.show}
-        variant={alertModal.variant}
-        title={alertModal.title}
-        message={alertModal.message}
-        confirmLabel="OK"
-        cancelLabel={null}
-        onConfirm={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
-        onClose={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
-      />
+          {/* Alert Modal */}
+          <Modal
+            isOpen={alertModal.show}
+            variant={alertModal.variant}
+            title={alertModal.title}
+            message={alertModal.message}
+            confirmLabel="OK"
+            cancelLabel={null}
+            onConfirm={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
+            onClose={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
+          />
+        </div>
+      </div>
+    </>
+  );
+
+  // If embedded in Dashboard, return just the content
+  if (!isStandaloneProfile) {
+    return profileContent;
+  }
+
+  // If standalone /profile route, return with sidebar
+  return (
+    <div className="min-h-screen bg-gray-900 flex">
+      {/* Mobile Overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-gray-900/50 z-40 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <div className={`fixed w-64 h-screen bg-gray-800 shadow-lg overflow-y-auto z-50 transform transition-transform duration-300 ease-in-out ${
+        sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+      } lg:translate-x-0`}>
+        {/* User Profile */}
+        <div className="p-6 border-b border-gray-700">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 bg-gradient-to-r from-medium-gray to-dark-charcoal rounded-full flex items-center justify-center overflow-hidden">
+              {sidebarUserData.profilePicture ? (
+                <img 
+                  src={sidebarUserData.profilePicture} 
+                  alt="Profile" 
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <span className="text-white font-semibold text-sm">A</span>
+              )}
+            </div>
+            <div>
+              <h3 className="text-white font-semibold text-sm">
+                ADMIN
+              </h3>
+            </div>
+          </div>
+        </div>
+
+        {/* Navigation */}
+        <nav className="mt-6">
+          <div className="px-4">
+            <button
+              onClick={() => handleSidebarNavigation('dashboard')}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+              </svg>
+              Dashboard
+            </button>
+            
+            <button
+              onClick={() => handleSidebarNavigation('offices')}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+              </svg>
+              Offices
+            </button>
+
+            <button
+              onClick={() => handleSidebarNavigation('issp')}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              ISSP
+            </button>
+
+            <button
+              onClick={() => handleSidebarNavigation('users')}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              Users
+            </button>
+
+            <button
+              onClick={() => handleSidebarNavigation('logs')}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target text-gray-300 hover:bg-gray-700 hover:text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+              Activity Log
+            </button>
+
+            <button
+              onClick={() => {
+                setSidebarOpen(false);
+                navigate('/profile');
+              }}
+              className="w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target bg-gray-700 text-white"
+            >
+              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+              </svg>
+              Profile
+            </button>
+          </div>
+        </nav>
+        
+        {/* Logout Button */}
+        <div className="absolute bottom-4 sm:bottom-6 left-2 sm:left-4 right-2 sm:right-auto">
+          <button 
+            onClick={handleLogoutClick}
+            className="bg-red-500 text-white py-2.5 sm:py-2 px-4 sm:px-20 w-full sm:w-56 rounded-lg font-medium transition-all duration-300 hover:bg-red-600 shadow-lg tap-target"
+          >
+            Logout
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 bg-gray-100 lg:ml-64">
+        {/* Header */}
+        <header className="bg-white shadow-sm border-b border-gray-200 px-4 sm:px-6 py-4">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-3">
+              {/* Hamburger Menu Button */}
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="lg:hidden p-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors tap-target"
+                aria-label="Toggle menu"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+              <h1 className="text-xl sm:text-2xl font-bold text-gray-800">Profile</h1>
+            </div>
+          </div>
+        </header>
+
+        {profileContent}
+      </div>
     </div>
   );
 };

@@ -4,6 +4,7 @@ import PresISSP from './PresISSP';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
 import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
+import { connectSocket, disconnectSocket, subscribe, unsubscribe } from '../../utils/socket';
 
 const statusStyles = {
   draft: 'bg-gray-50 text-gray-700',
@@ -53,6 +54,7 @@ const Pdashboard = () => {
   const [dashboardStats, setDashboardStats] = useState(null);
   const [recentRequests, setRecentRequests] = useState([]);
   const [topItems, setTopItems] = useState([]);
+  const [isspStats, setIsspStats] = useState({ approved: 0, rejected: 0, pending: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notifications, setNotifications] = useState([]);
@@ -404,6 +406,55 @@ const Pdashboard = () => {
     }
   }, [priceDistributionYearCycle]);
 
+  // Refetch dashboard data function (extracted for reuse)
+  const refetchDashboardData = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        return;
+      }
+
+      const [statsResponse, reviewResponse, requestsResponse] = await Promise.all([
+        axios.get(API_ENDPOINTS.admin.dashboardStats, { headers: getAuthHeaders() }),
+        axios.get(API_ENDPOINTS.issp.reviewList, { headers: getAuthHeaders() }),
+        axios.get(API_ENDPOINTS.admin.submittedRequests, { headers: getAuthHeaders() })
+      ]);
+
+      const statsData = statsResponse.data;
+      let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
+      let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+      
+      // Calculate ISSP review statistics from ALL ISSPs (before filtering by year cycle)
+      // ISSPs don't have year cycles like requests, so we show all of them
+      const isspReviewStats = {
+        approved: reviewData.filter(issp => issp.review?.status === 'approved').length,
+        rejected: reviewData.filter(issp => issp.review?.status === 'rejected').length,
+        pending: reviewData.filter(issp => issp.review?.status === 'pending').length
+      };
+      
+      // Filter requests by selected year cycle (for top items display)
+      requestsData = requestsData.filter(request => {
+        const requestYear = request.year || '';
+        return requestYear === priceDistributionYearCycle;
+      });
+      
+      // Filter review data by selected year cycle (for ISSP Review Queue display only)
+      // Note: Stats are calculated from ALL ISSPs above, not filtered ones
+      const filteredReviewData = reviewData.filter(review => {
+        // If ISSP has a year field, filter by it; otherwise include it
+        const reviewYear = review.year || '';
+        return !reviewYear || reviewYear === priceDistributionYearCycle;
+      });
+
+      setDashboardStats(statsData);
+      setRecentRequests(filteredReviewData);
+      setTopItems(aggregateItemSummary(requestsData));
+      setIsspStats(isspReviewStats);
+    } catch (err) {
+      console.error('Error loading president dashboard data:', err);
+    }
+  }, [priceDistributionYearCycle]);
+
   useEffect(() => {
     const fetchDashboardData = async () => {
       setLoading(true);
@@ -426,21 +477,32 @@ const Pdashboard = () => {
         let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
         let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
         
-        // Filter requests by selected year cycle
+        // Calculate ISSP review statistics from ALL ISSPs (before filtering by year cycle)
+        // ISSPs don't have year cycles like requests, so we show all of them
+        const isspReviewStats = {
+          approved: reviewData.filter(issp => issp.review?.status === 'approved').length,
+          rejected: reviewData.filter(issp => issp.review?.status === 'rejected').length,
+          pending: reviewData.filter(issp => issp.review?.status === 'pending').length
+        };
+        
+        // Filter requests by selected year cycle (for top items display)
         requestsData = requestsData.filter(request => {
           const requestYear = request.year || '';
           return requestYear === priceDistributionYearCycle;
         });
         
-        // Filter review data by selected year cycle
-        reviewData = reviewData.filter(review => {
+        // Filter review data by selected year cycle (for ISSP Review Queue display only)
+        // Note: Stats are calculated from ALL ISSPs above, not filtered ones
+        const filteredReviewData = reviewData.filter(review => {
+          // If ISSP has a year field, filter by it; otherwise include it
           const reviewYear = review.year || '';
-          return reviewYear === priceDistributionYearCycle;
+          return !reviewYear || reviewYear === priceDistributionYearCycle;
         });
 
         setDashboardStats(statsData);
-        setRecentRequests(reviewData);
+        setRecentRequests(filteredReviewData);
         setTopItems(aggregateItemSummary(requestsData));
+        setIsspStats(isspReviewStats);
       } catch (err) {
         console.error('Error loading president dashboard data:', err);
         const message = err.response?.data?.message || err.message || 'Failed to load dashboard data.';
@@ -448,6 +510,7 @@ const Pdashboard = () => {
         setDashboardStats(null);
         setRecentRequests([]);
         setTopItems([]);
+        setIsspStats({ approved: 0, rejected: 0, pending: 0 });
       } finally {
         setLoading(false);
       }
@@ -468,58 +531,49 @@ const Pdashboard = () => {
       fetchPriceDistribution();
     }, 30000);
     return () => clearInterval(interval);
-  }, [priceDistributionYearCycle]);
+  }, [priceDistributionYearCycle, refetchDashboardData]);
+
+  // Socket.io real-time updates
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userStr = localStorage.getItem('user');
+    
+    if (!token || !userStr) {
+      return;
+    }
+
+    try {
+      const user = JSON.parse(userStr);
+      connectSocket(token, user.id, user.role);
+
+      // Listen for ISSP sent from admin
+      const handleIsspSent = (data) => {
+        console.log('ISSP sent event received in dashboard:', data);
+        // Refresh all dashboard data
+        refetchDashboardData();
+        fetchNotifications();
+        fetchApprovedISSP();
+      };
+
+      subscribe('issp_sent', handleIsspSent);
+
+      return () => {
+        unsubscribe('issp_sent', handleIsspSent);
+        // Don't disconnect socket here - other components might be using it
+      };
+    } catch (error) {
+      console.error('Error setting up Socket.io:', error);
+    }
+  }, [refetchDashboardData]);
 
   // Refetch all data when year cycle changes
   useEffect(() => {
     if (activeSection === 'dashboard') {
       fetchPriceDistribution();
       fetchItemStatistics();
-      // Refetch dashboard data to update top items and review queue
-      const fetchDashboardData = async () => {
-        try {
-          const token = localStorage.getItem('token');
-          if (!token) return;
-
-          const [statsResponse, reviewResponse, requestsResponse] = await Promise.all([
-            axios.get(API_ENDPOINTS.admin.dashboardStats, { headers: getAuthHeaders() }),
-            axios.get(API_ENDPOINTS.issp.reviewList, { headers: getAuthHeaders() }),
-            axios.get(API_ENDPOINTS.admin.submittedRequests, { headers: getAuthHeaders() })
-          ]);
-
-          const statsData = statsResponse.data;
-          let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
-          let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
-          
-          console.log('[Dashboard Refresh] Total requests:', requestsData.length);
-          console.log('[Dashboard Refresh] Total reviews:', reviewData.length);
-          console.log('[Dashboard Refresh] Selected year cycle:', priceDistributionYearCycle);
-          
-          // Filter requests by selected year cycle
-          requestsData = requestsData.filter(request => {
-            const requestYear = request.year || '';
-            return requestYear === priceDistributionYearCycle;
-          });
-          
-          // Filter review data by selected year cycle
-          reviewData = reviewData.filter(review => {
-            const reviewYear = review.year || '';
-            return reviewYear === priceDistributionYearCycle;
-          });
-          
-          console.log('[Dashboard Refresh] Filtered requests:', requestsData.length);
-          console.log('[Dashboard Refresh] Filtered reviews:', reviewData.length);
-
-          setDashboardStats(statsData);
-          setRecentRequests(reviewData);
-          setTopItems(aggregateItemSummary(requestsData));
-        } catch (err) {
-          console.error('Error loading dashboard data:', err);
-        }
-      };
-      fetchDashboardData();
+      refetchDashboardData();
     }
-  }, [priceDistributionYearCycle, activeSection, fetchPriceDistribution, fetchItemStatistics]);
+  }, [priceDistributionYearCycle, activeSection, fetchPriceDistribution, fetchItemStatistics, refetchDashboardData]);
 
   // Auto-hide notification dropdown when clicking outside
   useEffect(() => {
@@ -836,19 +890,19 @@ const Pdashboard = () => {
                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
                   <p className="text-sm text-gray-600 font-medium">Approved</p>
                   <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {dashboardStats?.approvedRequests ?? 0}
+                    {isspStats.approved}
                   </h3>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
                   <p className="text-sm text-gray-600 font-medium">Rejected</p>
                   <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {dashboardStats?.rejectedRequests ?? 0}
+                    {isspStats.rejected}
                   </h3>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
                   <p className="text-sm text-gray-600 font-medium">Pending</p>
                   <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {dashboardStats?.pendingRequests ?? 0}
+                    {isspStats.pending}
                   </h3>
                 </div>
               </div>

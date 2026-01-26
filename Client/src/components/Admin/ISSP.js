@@ -2,6 +2,201 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Modal from '../common/Modal';
 import axios from 'axios';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
+import { connectSocket, disconnectSocket, subscribe, unsubscribe } from '../../utils/socket';
+
+// AI Assistant Configuration
+// NOTE: The Gemini API key is configured in the backend environment variables (GEMINI_API_KEY)
+// Current API key: AIzaSyCTEv0VfRoEqqBGVtyi2eD-d8kCTS8TilQ
+// The frontend calls the backend API endpoint which uses the key from environment variables
+// Never expose API keys directly in frontend code
+
+// AI Assistant Status Badges
+const aiStatusBadges = {
+  loading: { label: 'Fetching...', styles: 'bg-blue-50 text-blue-600 border-blue-100' },
+  ready: { label: 'AI Ready', styles: 'bg-green-50 text-green-600 border-green-100' },
+  error: { label: 'Needs Attention', styles: 'bg-red-50 text-red-600 border-red-100' },
+  typing: { label: 'Preparing', styles: 'bg-amber-50 text-amber-600 border-amber-100' },
+  idle: { label: 'Idle', styles: 'bg-gray-100 text-gray-500 border-gray-200' }
+};
+
+// AI Price & Specification Assistant Sidebar Component
+const AdminPriceInsightSidebar = ({ itemName, status, insights, error, onRetry, onApplyPrice, onApplySpecification, onClose }) => {
+  const trimmedName = (itemName || '').trim();
+  if (!trimmedName) return null;
+
+  const badge = aiStatusBadges[status] || aiStatusBadges.loading;
+  const hasInsights = status === 'ready' && insights;
+  const isLoading = status === 'loading';
+  const isError = status === 'error';
+
+  return (
+    <aside className="bg-white border border-blue-100 rounded-xl shadow-sm p-4 sm:p-5 flex flex-col h-full lg:max-h-[600px]">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-2 sm:space-x-3">
+          <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-blue-100 flex items-center justify-center flex-shrink-0">
+            <svg
+              className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.4}
+                d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+              />
+            </svg>
+          </div>
+          <div>
+            <p className="text-xs sm:text-sm text-gray-700 font-medium">BloomNode AI Assistant</p>
+          </div>
+        </div>
+        <div className="flex items-center space-x-2">
+          <span className={`px-2 py-1 text-xs font-semibold rounded-full border ${badge.styles}`}>
+            {badge.label}
+          </span>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors text-gray-500 hover:text-gray-700"
+              title="Close AI Assistant"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 flex-1 flex flex-col space-y-3 sm:space-y-4 text-xs sm:text-sm text-gray-600 overflow-y-auto">
+        <div className="space-y-2">
+          <p className="text-xs text-gray-900 uppercase tracking-widest">Item</p>
+          <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-medium text-gray-900">
+            "{trimmedName}"
+          </div>
+        </div>
+
+        {isLoading && (
+          <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 space-y-3">
+            <div className="flex items-center space-x-2 text-blue-900 font-semibold">
+              <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6v6l4 2" />
+              </svg>
+              <span>Fetching AI suggestions...</span>
+            </div>
+            <div className="space-y-2">
+              <div className="h-3 bg-white/60 rounded animate-pulse"></div>
+              <div className="h-3 bg-white/60 rounded animate-pulse w-3/4"></div>
+              <div className="h-3 bg-white/60 rounded animate-pulse w-2/3"></div>
+            </div>
+          </div>
+        )}
+
+        {isError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700 space-y-3">
+            <p className="font-medium">Unable to fetch AI suggestions right now.</p>
+            <p className="text-sm">{error || 'Please try again shortly.'}</p>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="inline-flex items-center space-x-1 text-red-700 font-semibold hover:text-red-800"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0119 9M5 15a7.5 7.5 0 0113.5 0"
+                  />
+                </svg>
+                <span>Try again</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {hasInsights && (
+          <>
+            {/* Suggested Price */}
+            {(insights.suggestedPrice && !isNaN(insights.suggestedPrice)) && (
+              <div className="bg-white border border-green-200 rounded-lg p-4">
+                <p className="text-xs text-gray-900 uppercase tracking-widest mb-2">Suggested Price</p>
+                <p className="text-lg font-bold text-green-700 mb-2">
+                  ₱{insights.suggestedPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                {onApplyPrice && (
+                  <button
+                    type="button"
+                    onClick={() => onApplyPrice(insights.suggestedPrice)}
+                    className="w-full mt-2 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    Apply Price
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Full Technical Specifications */}
+            {Array.isArray(insights.specs) && insights.specs.length > 0 && (
+              <div className="bg-white border border-gray-200 rounded-lg p-4">
+                <p className="text-xs text-gray-900 uppercase tracking-widest mb-2">Full Technical Specifications</p>
+                <ul className="space-y-2 text-gray-900 text-sm mb-3">
+                  {insights.specs.map((spec, idx) => (
+                    <li key={`${spec}-${idx}`} className="flex items-start">
+                      <span className="text-blue-600 mr-2 mt-0.5 flex-shrink-0">•</span>
+                      <span className="break-words">{spec}</span>
+                    </li>
+                  ))}
+                </ul>
+                {onApplySpecification && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Join all specs into a single string for the specification field
+                      const specificationText = insights.specs.join('. ');
+                      onApplySpecification(specificationText);
+                    }}
+                    className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    Apply Specifications
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Sources */}
+            {Array.isArray(insights.sources) && insights.sources.length > 0 && (
+              <div className="bg-white border border-gray-200 rounded-lg p-4">
+                <p className="text-xs text-gray-900 uppercase tracking-widest mb-3">Sources</p>
+                <ul className="space-y-2">
+                  {insights.sources.map((source, idx) => (
+                    <li key={idx} className="text-sm text-gray-700">
+                      <div className="flex items-start space-x-2">
+                        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 font-semibold text-xs">
+                          {idx + 1}
+                        </span>
+                        <span className="break-words">{source}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </aside>
+  );
+};
 
 const PAGE_C_ROWS = 10;
 
@@ -1037,6 +1232,15 @@ const ISSP = () => {
   // Price and Specification editing state for Request Details - track multiple pending edits
   const [pendingPriceEdits, setPendingPriceEdits] = useState({}); // { "requestId-itemId": priceValue }
   const [pendingSpecificationEdits, setPendingSpecificationEdits] = useState({}); // { "requestId-itemId": specificationValue }
+  
+  // AI Assistant state for price/specification suggestions
+  const [aiActiveItem, setAiActiveItem] = useState(null); // { itemKey: "requestId-itemId", itemName: "item name" }
+  const [aiInsights, setAiInsights] = useState(null);
+  const [aiStatus, setAiStatus] = useState('idle');
+  const [aiError, setAiError] = useState(null);
+  const aiRequestIdRef = useRef(0);
+  const latestQueriedItemRef = useRef('');
+  const aiStatusRef = useRef('idle');
   const [showDictStatusModal, setShowDictStatusModal] = useState(false);
   const [dictStatusForm, setDictStatusForm] = useState({ status: '', notes: '' });
   const [updatingDictStatus, setUpdatingDictStatus] = useState(false);
@@ -1045,7 +1249,30 @@ const ISSP = () => {
   const [updatingAcceptingEntries, setUpdatingAcceptingEntries] = useState(false);
   const orgProfileAutoSaveTimerRef = useRef(null);
   const orgProfileDirtyRef = useRef(false);
-  const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2026');
+  // Default year cycles (fallback if database is empty)
+  const defaultYearCyclesForISSP = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
+  
+  // Initialize with defaults so year cycles are always visible
+  const [availableYearCycles, setAvailableYearCycles] = useState(defaultYearCyclesForISSP);
+  const [yearCyclesData, setYearCyclesData] = useState(defaultYearCyclesForISSP.map(name => {
+    const [startYear, endYear] = name.split('-').map(Number);
+    return { name, startYear, endYear, isActive: true };
+  })); // Store full cycle objects for status info
+  const [selectedYearCycle, setSelectedYearCycle] = useState(defaultYearCyclesForISSP[0] || '');
+  
+  // Tab navigation state
+  const [activeTab, setActiveTab] = useState('submissions'); // 'submissions', 'sections', 'reviews', 'entries'
+  const [expandedSections, setExpandedSections] = useState({
+    presidentialReview: false,
+    dictApproval: false,
+    entryStatus: false
+  });
+  
+  // Edit Item Modal state for Request Details table
+  const [editItemModal, setEditItemModal] = useState({ show: false, item: null, requestId: null, itemId: null });
+  const [editItemForm, setEditItemForm] = useState({ item: '', quantityByYear: {}, specification: '', purpose: '', price: '', range: 'mid' });
+  const [savingItemEdit, setSavingItemEdit] = useState(false);
+  const [showSaveItemConfirmation, setShowSaveItemConfirmation] = useState(false);
   
   // Helper function to extract years from cycle (e.g., "2024-2026" → [2024, 2025, 2026])
   const getYearsFromCycle = (cycle) => {
@@ -1349,6 +1576,17 @@ const ISSP = () => {
         return items.length > 0;
       });
       
+      // Check if this unit has at least one approved item
+      let hasApprovedItems = false;
+      for (const request of requestsForSelectedCycle) {
+        const items = request.items && Array.isArray(request.items) ? request.items : [];
+        const hasApproved = items.some(item => item.approvalStatus === 'approved');
+        if (hasApproved) {
+          hasApprovedItems = true;
+          break;
+        }
+      }
+      
       // Use requests for selected cycle if available, otherwise use all requests
       const requestsToUse = requestsForSelectedCycle.length > 0 
         ? requestsForSelectedCycle 
@@ -1405,7 +1643,8 @@ const ISSP = () => {
         requestCount: requestCount, // Show count of requests with items for selected cycle
         lastUpdated,
         status,
-        hasRequestsForSelectedCycle: requestsForSelectedCycle.length > 0
+        hasRequestsForSelectedCycle: requestsForSelectedCycle.length > 0,
+        hasApprovedItems: hasApprovedItems // Flag indicating if unit has at least one approved item
       };
     });
 
@@ -1430,14 +1669,17 @@ const ISSP = () => {
     // Filter out units that don't have requests for the selected year cycle
     const unitsWithRequestsForCycle = filtered.filter(unit => unit.hasRequestsForSelectedCycle);
     
+    // Filter to only show units that have at least one approved item
+    const unitsWithApprovedItems = unitsWithRequestsForCycle.filter(unit => unit.hasApprovedItems);
+    
     // Sort alphabetically by unit name, then by campus
-    unitsWithRequestsForCycle.sort((a, b) => {
+    unitsWithApprovedItems.sort((a, b) => {
       const unitCompare = a.unitName.localeCompare(b.unitName);
       if (unitCompare !== 0) return unitCompare;
       return a.campus.localeCompare(b.campus);
     });
 
-    return unitsWithRequestsForCycle;
+    return unitsWithApprovedItems;
   }, [unitRequestsGrouped, selectedYearCycle, unitSearchQuery, unitStatusFilter]);
 
   // Calculate summary statistics
@@ -1573,7 +1815,7 @@ const ISSP = () => {
           })
         );
 
-        // Filter out requests with no items, then combine all items from remaining requests - FILTER TO ONLY PENDING ITEMS
+        // Filter out requests with no items, then combine all items from remaining requests - FILTER TO ONLY APPROVED ITEMS
         const requestsWithItems = allRequestsData.filter(request => {
           const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
           return requestItems.length > 0;
@@ -1584,13 +1826,13 @@ const ISSP = () => {
           const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
           console.log(`Request ${index + 1} (${request.requestTitle || request.title || request._id}):`, {
             totalItems: requestItems.length,
-            pendingItems: requestItems.filter(item => item.approvalStatus === 'pending' || !item.approvalStatus).length,
+            approvedItems: requestItems.filter(item => item.approvalStatus === 'approved').length,
             allStatuses: requestItems.map(item => item.approvalStatus || 'no status')
           });
           
           requestItems.forEach(item => {
-            // Only include items with pending approval status
-            if (item.approvalStatus === 'pending' || !item.approvalStatus) {
+            // Only include items with approved approval status
+            if (item.approvalStatus === 'approved') {
               allItems.push({
                 ...item,
                 requestId: request._id,
@@ -1604,14 +1846,12 @@ const ISSP = () => {
           });
         });
         
-        // Combine items with the same name and specification
-        // Group by item name + specification (if specifications differ, keep separate)
+        // Combine items with the same name (group by item name only, regardless of specification)
         const itemGroups = {};
         allItems.forEach(item => {
           const itemName = (item.item || '').trim().toLowerCase();
-          const specification = (item.specification || '').trim();
-          // Create a key from item name and specification
-          const groupKey = `${itemName}|||${specification}`;
+          // Group by item name only
+          const groupKey = itemName;
           
           if (!itemGroups[groupKey]) {
             itemGroups[groupKey] = {
@@ -1625,18 +1865,43 @@ const ISSP = () => {
               quantityByYear: {},
               requestIds: new Set(), // Track which requests this combined item comes from
               requestTitles: new Set(), // Track request titles
+              specifications: new Set(), // Track all unique specifications
               // Keep the first item's other properties as base
               id: item.id || `combined-${Date.now()}`,
               itemStatus: item.itemStatus,
               itemStatusRemarks: item.itemStatusRemarks,
-              itemStatusUpdatedAt: item.itemStatusUpdatedAt
+              itemStatusUpdatedAt: item.itemStatusUpdatedAt,
+              // Track dates - use earliest createdAt and latest updatedAt
+              requestCreatedAt: item.requestCreatedAt,
+              requestUpdatedAt: item.requestUpdatedAt
             };
+          } else {
+            // Update dates: use earliest createdAt and latest updatedAt
+            const existingCreatedAt = itemGroups[groupKey].requestCreatedAt;
+            const existingUpdatedAt = itemGroups[groupKey].requestUpdatedAt;
+            
+            if (item.requestCreatedAt) {
+              if (!existingCreatedAt || new Date(item.requestCreatedAt) < new Date(existingCreatedAt)) {
+                itemGroups[groupKey].requestCreatedAt = item.requestCreatedAt;
+              }
+            }
+            
+            if (item.requestUpdatedAt) {
+              if (!existingUpdatedAt || new Date(item.requestUpdatedAt) > new Date(existingUpdatedAt)) {
+                itemGroups[groupKey].requestUpdatedAt = item.requestUpdatedAt;
+              }
+            }
           }
           
           // Add this item's request info
           itemGroups[groupKey].requestIds.add(item.requestId);
           if (item.requestTitle) {
             itemGroups[groupKey].requestTitles.add(item.requestTitle);
+          }
+          
+          // Collect all specifications (for items with same name but different specs)
+          if (item.specification && item.specification.trim()) {
+            itemGroups[groupKey].specifications.add(item.specification.trim());
           }
           
           // Sum up quantities by year
@@ -1675,21 +1940,43 @@ const ISSP = () => {
         });
         
         // Convert grouped items back to array
-        const combinedItems = Object.values(itemGroups).map(group => ({
-          ...group,
-          requestId: Array.from(group.requestIds)[0], // Use first request ID for reference
-          requestTitle: Array.from(group.requestTitles).join(', '), // Combine request titles
-          quantityByYear: group.quantityByYear,
-          // Calculate total quantity from quantityByYear
-          quantity: Object.values(group.quantityByYear).reduce((sum, qty) => sum + (Number(qty) || 0), 0)
-        }));
+        const combinedItems = Object.values(itemGroups).map(group => {
+          // Combine specifications if there are multiple unique ones
+          const uniqueSpecs = Array.from(group.specifications).filter(spec => spec && spec.trim());
+          let combinedSpecification = '';
+          if (uniqueSpecs.length > 0) {
+            // If multiple specifications, combine them with a separator
+            if (uniqueSpecs.length === 1) {
+              combinedSpecification = uniqueSpecs[0];
+            } else {
+              // Combine multiple specifications, removing duplicates and empty ones
+              combinedSpecification = uniqueSpecs.join(' | ');
+            }
+          } else {
+            // Use the original specification if no unique specs were collected
+            combinedSpecification = group.specification || '';
+          }
+          
+          return {
+            ...group,
+            specification: combinedSpecification,
+            requestId: Array.from(group.requestIds)[0], // Use first request ID for reference
+            requestTitle: Array.from(group.requestTitles).join(', '), // Combine request titles
+            quantityByYear: group.quantityByYear,
+            // Calculate total quantity from quantityByYear
+            quantity: Object.values(group.quantityByYear).reduce((sum, qty) => sum + (Number(qty) || 0), 0),
+            // Preserve date fields
+            requestCreatedAt: group.requestCreatedAt,
+            requestUpdatedAt: group.requestUpdatedAt
+          };
+        });
         
         console.log(`Combined ${allItems.length} items into ${combinedItems.length} unique items`);
 
         console.log(`=== SUMMARY for ${unitName} ===`);
         console.log(`Total requests fetched: ${allRequestsData.length}`);
         console.log(`Requests with items: ${requestsWithItems.length}`);
-        console.log(`Total pending items before combining: ${allItems.length}`);
+        console.log(`Total approved items before combining: ${allItems.length}`);
         console.log(`Total items after combining: ${combinedItems.length}`);
         console.log(`Combined items:`, combinedItems);
 
@@ -1722,7 +2009,7 @@ const ISSP = () => {
         setPendingSpecificationEdits({});
       } catch (fetchError) {
         console.error('Error fetching request details:', fetchError);
-        // Fallback: filter out requests with no items, then combine items from cached requests - FILTER TO ONLY PENDING ITEMS
+        // Fallback: filter out requests with no items, then combine items from cached requests - FILTER TO ONLY APPROVED ITEMS
         // Use allUnitRequests for fallback, but still filter by selected year cycle
         const fallbackRequests = allUnitRequests.filter(
           request => request.year === selectedYearCycle
@@ -1736,8 +2023,8 @@ const ISSP = () => {
         requestsWithItems.forEach(request => {
           if (request.items && Array.isArray(request.items)) {
             request.items.forEach(item => {
-              // Only include items with pending approval status
-              if (item.approvalStatus === 'pending' || !item.approvalStatus) {
+              // Only include items with approved approval status
+              if (item.approvalStatus === 'approved') {
                 allItems.push({
                   ...item,
                   requestId: request._id,
@@ -2049,6 +2336,174 @@ const ISSP = () => {
     }));
   };
 
+  // Keep ref in sync with state
+  useEffect(() => {
+    aiStatusRef.current = aiStatus;
+  }, [aiStatus]);
+
+  // Fetch AI price and specification suggestions
+  const fetchPriceSpecificationInsights = useCallback(
+    async (itemName, options = {}) => {
+      const trimmed = (itemName || '').trim();
+      if (!trimmed) return;
+
+      if (!options.force && trimmed === latestQueriedItemRef.current && aiStatusRef.current === 'ready') {
+        return;
+      }
+
+      const requestId = Date.now();
+      aiRequestIdRef.current = requestId;
+      latestQueriedItemRef.current = trimmed;
+      setAiStatus('loading');
+      setAiError(null);
+
+      try {
+        const token = localStorage.getItem('token');
+        const headers = token ? { 'x-auth-token': token } : undefined;
+        const response = await axios.post(
+          API_ENDPOINTS.ai.itemInsights,
+          { itemName: trimmed },
+          { headers }
+        );
+
+        if (aiRequestIdRef.current !== requestId) return;
+
+        // Transform the response to include suggested price and specification
+        const insights = response.data;
+        
+        // Extract numeric price from priceRange string (e.g., "₱10,000 - ₱15,000" or "₱50,000")
+        let suggestedPrice = null;
+        if (insights.priceRange && insights.priceRange !== 'Information unavailable') {
+          // Remove currency symbols and extract numbers
+          const priceStr = insights.priceRange.replace(/₱/g, '').replace(/,/g, '').trim();
+          // Try to extract first number or average if range
+          const numbers = priceStr.match(/\d+/g);
+          if (numbers && numbers.length > 0) {
+            if (numbers.length === 1) {
+              suggestedPrice = parseFloat(numbers[0]);
+            } else {
+              // If range, take the first number (lower bound) or average
+              const num1 = parseFloat(numbers[0]);
+              const num2 = parseFloat(numbers[1]);
+              suggestedPrice = (num1 + num2) / 2; // Average of range
+            }
+          }
+        }
+        
+        // Build specification from specs array, filtering out warranty information
+        let suggestedSpecification = null;
+        if (Array.isArray(insights.specs) && insights.specs.length > 0) {
+          // Filter out warranty-related specs
+          const warrantyKeywords = ['warranty', 'warranties', 'year warranty', 'years warranty', 'warranty period', 'on-site warranty', 'on site warranty'];
+          const technicalSpecs = insights.specs.filter(spec => {
+            if (!spec || typeof spec !== 'string') return false;
+            const specLower = spec.toLowerCase();
+            // Exclude specs that contain warranty keywords
+            return !warrantyKeywords.some(keyword => specLower.includes(keyword));
+          });
+          
+          // Join only technical specs
+          if (technicalSpecs.length > 0) {
+            suggestedSpecification = technicalSpecs.join('. ');
+          } else if (insights.suggestedSpecification) {
+            // Fallback to suggestedSpecification if all specs were filtered out
+            const fallbackSpec = insights.suggestedSpecification;
+            const hasWarranty = warrantyKeywords.some(keyword => fallbackSpec.toLowerCase().includes(keyword));
+            if (!hasWarranty) {
+              suggestedSpecification = fallbackSpec;
+            }
+          }
+        } else if (insights.suggestedSpecification) {
+          // Check if suggestedSpecification contains warranty info
+          const warrantyKeywords = ['warranty', 'warranties', 'year warranty', 'years warranty', 'warranty period', 'on-site warranty', 'on site warranty'];
+          const hasWarranty = warrantyKeywords.some(keyword => insights.suggestedSpecification.toLowerCase().includes(keyword));
+          if (!hasWarranty) {
+            suggestedSpecification = insights.suggestedSpecification;
+          }
+        }
+        
+        // Build sources array - prioritize API sources (which should reference price/spec), then fallback to vendors
+        const sources = [];
+        
+        // First, use sources from API if available (these should reference price and specification)
+        if (Array.isArray(insights.sources) && insights.sources.length > 0) {
+          sources.push(...insights.sources.slice(0, 3));
+        }
+        
+        // If we don't have 3 sources yet, add relevant vendors that support the price/spec
+        if (sources.length < 3 && Array.isArray(insights.vendors) && insights.vendors.length > 0) {
+          const remainingSlots = 3 - sources.length;
+          sources.push(...insights.vendors.slice(0, remainingSlots));
+        }
+        
+        // If still less than 3, add brand suggestion as a source
+        if (sources.length < 3 && insights.brandSuggestion) {
+          sources.push(`Brand/Model Reference: ${insights.brandSuggestion}`);
+        }
+        
+        const transformedInsights = {
+          // Original data for display
+          priceRange: insights.priceRange || 'Information unavailable',
+          specs: insights.specs || [],
+          sources: sources.length > 0 ? sources.slice(0, 3) : [], // Ensure max 3 sources
+          // Transformed data for quick apply
+          suggestedPrice: suggestedPrice,
+          suggestedSpecification: suggestedSpecification
+        };
+
+        setAiInsights(transformedInsights);
+        setAiStatus('ready');
+      } catch (err) {
+        if (aiRequestIdRef.current !== requestId) return;
+        if (err.code === 'ERR_CANCELED') return;
+        const message = err.response?.data?.message || err.message || 'Failed to fetch AI suggestions';
+        setAiStatus('error');
+        setAiError(message);
+      }
+    },
+    []
+  );
+
+  // Handle AI retry
+  const handleAiRetry = useCallback(() => {
+    if (aiActiveItem && aiActiveItem.itemName) {
+      fetchPriceSpecificationInsights(aiActiveItem.itemName, { force: true });
+    }
+  }, [aiActiveItem, fetchPriceSpecificationInsights]);
+
+  // Handle applying suggested price
+  const handleApplyPrice = useCallback((price) => {
+    if (aiActiveItem && aiActiveItem.itemKey) {
+      setPendingPriceEdits(prev => ({
+        ...prev,
+        [aiActiveItem.itemKey]: price.toString()
+      }));
+    }
+  }, [aiActiveItem]);
+
+  // Handle applying suggested specification
+  const handleApplySpecification = useCallback((specification) => {
+    if (aiActiveItem && aiActiveItem.itemKey) {
+      setPendingSpecificationEdits(prev => ({
+        ...prev,
+        [aiActiveItem.itemKey]: specification
+      }));
+    }
+  }, [aiActiveItem]);
+
+  // Auto-fetch insights when active item changes
+  useEffect(() => {
+    if (aiActiveItem && aiActiveItem.itemName) {
+      fetchPriceSpecificationInsights(aiActiveItem.itemName);
+    } else {
+      // Reset AI state when no active item
+      setAiInsights(null);
+      setAiStatus('idle');
+      setAiError(null);
+      latestQueriedItemRef.current = '';
+    }
+  }, [aiActiveItem, fetchPriceSpecificationInsights]);
+
   const handleDeleteItem = useCallback(async (itemId, requestId, itemName, unitName = null) => {
     // Show confirmation modal
     openModal({
@@ -2142,6 +2597,248 @@ const ISSP = () => {
     });
   }, [openModal, showAlert, closeModal, filteredUnitRequestsGrouped, handleViewUnitRequest, selectedUnitRequest]);
 
+  // Handle editing an item from Request Details table (opens modal)
+  const handleEditItemFromTable = (item) => {
+    // Get years from the selected unit request's year cycle
+    const requestYearCycle = selectedUnitRequest?.year || selectedYearCycle;
+    const cycleYears = getYearsFromCycle(requestYearCycle);
+    const quantityByYear = {};
+    
+    // Initialize quantityByYear with existing values or zeros
+    if (item.quantityByYear && typeof item.quantityByYear === 'object') {
+      cycleYears.forEach(year => {
+        const yearStr = year.toString();
+        quantityByYear[yearStr] = item.quantityByYear[yearStr] || item.quantityByYear[year] || 0;
+      });
+    } else {
+      // If no quantityByYear, distribute total quantity evenly or set to 0
+      const totalQty = item.quantity || 0;
+      cycleYears.forEach((year, index) => {
+        quantityByYear[year.toString()] = index === 0 ? totalQty : 0;
+      });
+    }
+    
+    setEditItemForm({
+      item: item.item || '',
+      quantityByYear: quantityByYear,
+      specification: item.specification || '',
+      purpose: item.purpose || '',
+      price: item.price || '',
+      range: item.range || 'mid'
+    });
+    
+    setEditItemModal({
+      show: true,
+      item: item,
+      requestId: item.requestId,
+      itemId: item.id || item._id
+    });
+  };
+
+  // Handle edit form field change
+  const handleEditFormChange = (field, value) => {
+    if (field.startsWith('quantityByYear.')) {
+      const year = field.split('.')[1];
+      const numValue = value === '' ? 0 : Math.max(0, parseInt(value, 10) || 0);
+      setEditItemForm(prev => ({
+        ...prev,
+        quantityByYear: {
+          ...prev.quantityByYear,
+          [year]: numValue
+        }
+      }));
+    } else {
+      setEditItemForm(prev => ({
+        ...prev,
+        [field]: value
+      }));
+    }
+  };
+
+  // Handle save edited item from Request Details table - shows confirmation first
+  const handleSaveItemEdit = () => {
+    if (!editItemModal.item || !editItemModal.requestId || !editItemModal.itemId) return;
+
+    // Validate form
+    if (!editItemForm.item || editItemForm.item.trim() === '') {
+      showAlert({
+        variant: 'danger',
+        title: 'Validation Error',
+        message: 'Item name is required.'
+      });
+      return;
+    }
+
+    // Check if at least one quantity is provided
+    const hasQuantity = Object.keys(editItemForm.quantityByYear || {}).length > 0
+      ? Object.values(editItemForm.quantityByYear).some(qty => Number(qty) > 0)
+      : false;
+
+    if (!hasQuantity) {
+      showAlert({
+        variant: 'danger',
+        title: 'Validation Error',
+        message: 'Please provide at least one quantity for a year.'
+      });
+      return;
+    }
+
+    // Show confirmation modal
+    setShowSaveItemConfirmation(true);
+  };
+
+  // Actually perform the save after confirmation
+  const handleConfirmSaveItemEdit = async () => {
+    if (!editItemModal.item || !editItemModal.requestId || !editItemModal.itemId) return;
+
+    try {
+      setSavingItemEdit(true);
+      const token = localStorage.getItem('token');
+      if (!token) {
+        showAlert({
+          variant: 'danger',
+          title: 'Authentication Required',
+          message: 'No authentication token found. Please login again.'
+        });
+        return;
+      }
+
+      // Calculate total quantity from quantityByYear
+      const totalQuantity = Object.values(editItemForm.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
+      const priceNum = editItemForm.price ? parseFloat(editItemForm.price) : null;
+
+      // Fetch the current request to update it
+      const requestResponse = await axios.get(
+        API_ENDPOINTS.admin.getRequest(editItemModal.requestId),
+        { headers: { 'x-auth-token': token } }
+      );
+      const request = requestResponse.data;
+
+      if (!request) {
+        throw new Error('Request not found');
+      }
+
+      // Use request._id if available (some responses might have _id instead of id)
+      const requestIdToUse = request._id || request.id || editItemModal.requestId;
+
+      // Use individual admin endpoints for fields that have them
+      // Update quantity (includes quantityByYear)
+      if (totalQuantity > 0) {
+        await axios.put(
+          API_ENDPOINTS.admin.updateRequestItemQuantity(requestIdToUse, editItemModal.itemId),
+          { quantity: totalQuantity, quantityByYear: editItemForm.quantityByYear },
+          { headers: { 'x-auth-token': token } }
+        );
+      }
+
+      // Update specification
+      await axios.put(
+        API_ENDPOINTS.admin.updateRequestItemSpecification(requestIdToUse, editItemModal.itemId),
+        { specification: editItemForm.specification || '' },
+        { headers: { 'x-auth-token': token } }
+      );
+
+      // Update price if provided
+      if (priceNum !== null && !isNaN(priceNum) && priceNum >= 0) {
+        await axios.put(
+          API_ENDPOINTS.admin.updateRequestItemPrice(requestIdToUse, editItemModal.itemId),
+          { price: priceNum },
+          { headers: { 'x-auth-token': token } }
+        );
+      }
+
+      // Update item name, purpose, and range using admin endpoint
+      await axios.put(
+        API_ENDPOINTS.admin.updateRequestItemDetails(requestIdToUse, editItemModal.itemId),
+        {
+          item: editItemForm.item,
+          purpose: editItemForm.purpose || '',
+          range: editItemForm.range || 'mid'
+        },
+        { headers: { 'x-auth-token': token } }
+      );
+
+      // Refresh request to get latest data after all updates
+      const refreshedRequestResponse = await axios.get(
+        API_ENDPOINTS.admin.getRequest(requestIdToUse),
+        { headers: { 'x-auth-token': token } }
+      );
+      const updateResponse = { data: refreshedRequestResponse.data };
+
+      // Update selectedUnitRequest state
+      setSelectedUnitRequest(prev => {
+        if (!prev || !prev.items) return prev;
+        return {
+          ...prev,
+          items: prev.items.map(item =>
+            (item.id || item._id) === editItemModal.itemId
+              ? {
+                  ...item,
+                  item: editItemForm.item,
+                  quantity: totalQuantity,
+                  quantityByYear: editItemForm.quantityByYear,
+                  specification: editItemForm.specification || '',
+                  purpose: editItemForm.purpose || '',
+                  price: priceNum !== null && !isNaN(priceNum) ? priceNum : item.price,
+                  range: editItemForm.range || 'mid'
+                }
+              : item
+          )
+        };
+      });
+
+      // Update unitRequestsGrouped if it exists
+      const finalRequestIdForUpdate = updateResponse.data._id || updateResponse.data.id || requestIdToUse;
+      setUnitRequestsGrouped(prev => {
+        const updated = { ...prev };
+        Object.keys(updated).forEach(unit => {
+          updated[unit] = updated[unit].map(req => {
+            const reqId = req._id || req.id;
+            if (reqId === finalRequestIdForUpdate || reqId === editItemModal.requestId) {
+              return updateResponse.data;
+            }
+            return req;
+          });
+        });
+        return updated;
+      });
+
+      // Clear pending edits for this item
+      const itemKey = `${editItemModal.requestId}-${editItemModal.itemId}`;
+      setPendingPriceEdits(prev => {
+        const newState = { ...prev };
+        delete newState[itemKey];
+        return newState;
+      });
+      setPendingSpecificationEdits(prev => {
+        const newState = { ...prev };
+        delete newState[itemKey];
+        return newState;
+      });
+
+      // Close modals and reset form
+      setShowSaveItemConfirmation(false);
+      setEditItemModal({ show: false, item: null, requestId: null, itemId: null });
+      setEditItemForm({ item: '', quantityByYear: {}, specification: '', purpose: '', price: '', range: 'mid' });
+
+      showAlert({
+        variant: 'success',
+        title: 'Item Updated',
+        message: 'All item fields have been updated successfully! The changes will be reflected for the request owner.',
+        autoCloseDelay: 2000
+      });
+    } catch (error) {
+      console.error('Error updating item:', error);
+      showAlert({
+        variant: 'danger',
+        title: 'Update Failed',
+        message: error.response?.data?.message || error.message || 'Failed to update item.'
+      });
+    } finally {
+      setSavingItemEdit(false);
+    }
+  };
+
   const updateItemPrice = async (itemId, requestId, price) => {
     try {
       const token = localStorage.getItem('token');
@@ -2221,10 +2918,23 @@ const ISSP = () => {
       // Clear inline editing state (if using old method)
       // Note: This is now handled by pendingPriceEdits state
 
+      // Update submittedRequests to trigger summary investments recalculation
+      setSubmittedRequests(prev => prev.map(request => {
+        if (request._id === requestId) {
+          return {
+            ...request,
+            items: request.items.map(item =>
+              item.id === itemId ? { ...item, price: priceNum } : item
+            )
+          };
+        }
+        return request;
+      }));
+
       showAlert({
         variant: 'success',
         title: 'Price Updated',
-        message: 'Item price has been updated successfully!',
+        message: 'Item price has been updated successfully! Summary of Investments will be recalculated.',
         autoCloseDelay: 2000
       });
     } catch (error) {
@@ -2384,16 +3094,161 @@ const ISSP = () => {
     );
   };
 
+  // Ensure default year cycles exist in database
+  const ensureDefaultYearCycles = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) return;
+
+      const response = await axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+        headers: { 'x-auth-token': token }
+      });
+      
+      const existingCycles = response.data || [];
+      const existingNames = existingCycles.map(cycle => cycle.name);
+      
+      // Find missing default cycles
+      const missingCycles = defaultYearCyclesForISSP.filter(name => !existingNames.includes(name));
+      
+      // Create missing cycles
+      if (missingCycles.length > 0) {
+        for (const cycleName of missingCycles) {
+          const [startYear, endYear] = cycleName.split('-').map(Number);
+          const order = defaultYearCyclesForISSP.indexOf(cycleName) + 1;
+          
+          try {
+            await axios.post(API_ENDPOINTS.organization.yearCycles.create, {
+              name: cycleName,
+              startYear,
+              endYear,
+              isActive: true,
+              order
+            }, {
+              headers: { 'x-auth-token': token }
+            });
+            console.log(`Created default year cycle: ${cycleName}`);
+          } catch (createError) {
+            // Ignore if cycle already exists (race condition)
+            if (createError.response?.status !== 400 || !createError.response?.data?.message?.includes('already exists')) {
+              console.error(`Error creating year cycle ${cycleName}:`, createError);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error ensuring default year cycles:', error);
+    }
+  }, []);
+
+  // Fetch available year cycles from database
+  const fetchYearCycles = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      
+      // First, ensure default cycles exist in database
+      await ensureDefaultYearCycles();
+      
+      if (token) {
+        const response = await axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+          headers: { 'x-auth-token': token }
+        });
+
+        if (response.data && Array.isArray(response.data) && response.data.length > 0) {
+          // Sort by order and startYear
+          const sortedCycles = [...response.data].sort((a, b) => {
+            if (a.order !== b.order) return a.order - b.order;
+            return (b.startYear || 0) - (a.startYear || 0);
+          });
+          
+          const yearRanges = sortedCycles.map(cycle => cycle.name);
+          setAvailableYearCycles(yearRanges);
+          setYearCyclesData(sortedCycles);
+          
+          // Set initial selected year cycle to the first if not already set
+          setSelectedYearCycle(prev => prev || (yearRanges.length > 0 ? yearRanges[0] : ''));
+        } else {
+          // Fallback: use defaults if database is empty (shouldn't happen after ensureDefaultYearCycles)
+          setAvailableYearCycles(defaultYearCyclesForISSP);
+          setYearCyclesData(defaultYearCyclesForISSP.map(name => {
+            const [startYear, endYear] = name.split('-').map(Number);
+            return { name, startYear, endYear, isActive: true };
+          }));
+          setSelectedYearCycle(prev => prev || defaultYearCyclesForISSP[0]);
+        }
+      } else {
+        // No token - use defaults as fallback
+        setAvailableYearCycles(defaultYearCyclesForISSP);
+        setYearCyclesData(defaultYearCyclesForISSP.map(name => {
+          const [startYear, endYear] = name.split('-').map(Number);
+          return { name, startYear, endYear, isActive: true };
+        }));
+        setSelectedYearCycle(prev => prev || defaultYearCyclesForISSP[0]);
+      }
+    } catch (error) {
+      console.error('Error in fetchYearCycles:', error);
+      // On error, use default hardcoded cycles as fallback
+      setAvailableYearCycles(defaultYearCyclesForISSP);
+      setYearCyclesData(defaultYearCyclesForISSP.map(name => {
+        const [startYear, endYear] = name.split('-').map(Number);
+        return { name, startYear, endYear, isActive: true };
+      }));
+      setSelectedYearCycle(prev => prev || defaultYearCyclesForISSP[0]);
+    }
+  }, [ensureDefaultYearCycles]);
+
   // Fetch ISSP sections status
   useEffect(() => {
     fetchISSPStatus(true);
     fetchUnitStatuses();
     fetchSubmittedRequests();
-  }, [fetchISSPStatus, fetchUnitStatuses, fetchSubmittedRequests]);
+    fetchYearCycles();
+  }, [fetchISSPStatus, fetchUnitStatuses, fetchSubmittedRequests, fetchYearCycles]);
 
 useEffect(() => {
   refreshIsspData();
 }, [refreshIsspData]);
+
+  // Socket.io real-time updates
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userStr = localStorage.getItem('user');
+    
+    if (!token || !userStr) {
+      return;
+    }
+
+    try {
+      const user = JSON.parse(userStr);
+      connectSocket(token, user.id, user.role);
+
+      // Listen for ISSP review decision from president
+      const handleIsspReviewed = (data) => {
+        console.log('ISSP reviewed event received:', data);
+        // Refresh ISSP status and data
+        fetchISSPStatus(false);
+        refreshIsspData();
+      };
+
+      // Listen for new request submissions from units
+      const handleRequestSubmitted = (data) => {
+        console.log('Request submitted event received:', data);
+        // Refresh submitted requests
+        fetchSubmittedRequests();
+        fetchUnitStatuses();
+      };
+
+      subscribe('issp_reviewed', handleIsspReviewed);
+      subscribe('request_submitted', handleRequestSubmitted);
+
+      return () => {
+        unsubscribe('issp_reviewed', handleIsspReviewed);
+        unsubscribe('request_submitted', handleRequestSubmitted);
+        // Don't disconnect socket here - other components might be using it
+      };
+    } catch (error) {
+      console.error('Error setting up Socket.io:', error);
+    }
+  }, [fetchISSPStatus, refreshIsspData, fetchSubmittedRequests, fetchUnitStatuses]);
 
   useEffect(() => {
     return () => {
@@ -2406,24 +3261,8 @@ useEffect(() => {
   // Recalculate SUMMARY OF INVESTMENTS when year cycle changes or submittedRequests loads (if viewing DEVELOPMENT section)
   useEffect(() => {
     if (selectedItem?.title === "DEVELOPMENT AND INVESTMENT PROGRAM" && submittedRequests.length > 0) {
-      // Only recalculate if there's no saved data (to avoid overwriting manual edits)
-      // Check if current data has meaningful content (excluding totals, empty rows, and placeholder data)
-      const currentData = devSummaryInvestments;
-      const hasSavedData = currentData.some(row => {
-        const item = row.item?.toString().trim() || '';
-        // Ignore placeholder/sample data
-        if (item.toUpperCase().includes('SAMPLE') || item.toUpperCase().includes('UPDATE') || item === '') {
-          return false;
-        }
-        // Must have actual data and not be TOTAL
-        return item.toUpperCase() !== 'TOTAL' &&
-               (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost);
-      });
-      
-      console.log('[SUMMARY] Recalculation trigger - hasSavedData:', hasSavedData, 'submittedRequests.length:', submittedRequests.length);
-      
-      if (!hasSavedData) {
-        console.log('[SUMMARY] Recalculating for year cycle:', selectedYearCycle);
+      // Always recalculate from submitted requests when year cycle changes
+      console.log('[SUMMARY] Recalculating for year cycle:', selectedYearCycle);
         // Reuse the same logic from fetchFullISSPData
         const cycleYears = getYearsFromCycle(selectedYearCycle);
         const itemGroups = {};
@@ -2434,7 +3273,8 @@ useEffect(() => {
         requestsForCycle.forEach(request => {
           if (request.items && Array.isArray(request.items)) {
             request.items.forEach(item => {
-              if (item.item && item.item.trim() !== '') {
+              // Only include approved items in the summary
+              if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
                 const itemName = item.item.trim().toLowerCase();
                 
                 if (!itemGroups[itemName]) {
@@ -2522,15 +3362,73 @@ useEffect(() => {
           setDevSummaryInvestments(normalizedSummary);
           console.log('[SUMMARY] Recalculated and set', summaryRows.length, 'items');
           console.log('[SUMMARY] First few items:', summaryRows.slice(0, 3).map(r => ({ item: r.item, y1qty: r.year1Physical, y1cost: r.year1Cost })));
+          
+          // Auto-save the recalculated data
+          const saveRecalculatedSummary = async () => {
+            try {
+              const token = localStorage.getItem('token');
+              if (!token) return;
+              
+              // Clean the data (remove empty rows, keep only data rows including TOTAL row)
+              const cleanedSummary = summaryRows.filter((row) => {
+                const item = row.item?.toString().trim() || '';
+                const isTotal = item.toUpperCase() === 'TOTAL' || row.isTotalRow === true;
+                // Keep TOTAL row or rows with actual data
+                return isTotal || (
+                  item !== '' &&
+                  (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost)
+                );
+              });
+              
+              // Fetch current ISSP data to preserve other sections
+              const currentIsspResponse = await axios.get(API_ENDPOINTS.issp.get, {
+                headers: { 'x-auth-token': token }
+              });
+              const currentDevelopment = currentIsspResponse.data?.developmentInvestmentProgram || {};
+              
+              const payload = {
+                pageA: {
+                  projectSchedule: currentDevelopment.pageA?.projectSchedule || [],
+                  isSchedule: currentDevelopment.pageA?.isSchedule || []
+                },
+                pageB: {
+                  summaryInvestments: cleanedSummary
+                },
+                pageC: {
+                  costBreakdown: currentDevelopment.pageC?.costBreakdown || []
+                }
+              };
+              
+              console.log('[SUMMARY] Saving recalculated Summary of Investments - payload:', JSON.stringify(payload, null, 2));
+              console.log('[SUMMARY] Number of items to save:', cleanedSummary.length);
+              console.log('[SUMMARY] First item:', JSON.stringify(cleanedSummary[0], null, 2));
+              if (cleanedSummary.length > 1) {
+                console.log('[SUMMARY] Last item:', JSON.stringify(cleanedSummary[cleanedSummary.length - 1], null, 2));
+              }
+              
+              await axios.put(
+                API_ENDPOINTS.issp.developmentInvestmentProgram,
+                payload,
+                { headers: { 'x-auth-token': token } }
+              );
+              
+              console.log('[SUMMARY] Auto-saved recalculated Summary of Investments with', cleanedSummary.length, 'items');
+            } catch (error) {
+              console.error('Error auto-saving recalculated Summary of Investments:', error);
+              // Don't show error to user, just log it
+            }
+          };
+          
+          // Save after a short delay to avoid race conditions
+          setTimeout(() => {
+            saveRecalculatedSummary();
+          }, 500);
         } else {
           console.log('[SUMMARY] No items found for recalculation - requestsForCycle.length:', requestsForCycle.length);
           if (requestsForCycle.length > 0) {
             console.log('[SUMMARY] Sample request items:', requestsForCycle[0]?.items?.slice(0, 2));
           }
         }
-      } else {
-        console.log('[SUMMARY] Skipping recalculation - has saved data');
-      }
     }
   }, [selectedYearCycle, selectedItem, submittedRequests]);
 
@@ -2614,7 +3512,8 @@ useEffect(() => {
                 
                 if (request.items && Array.isArray(request.items)) {
                   request.items.forEach(item => {
-                    if (item.item && item.item.trim() !== '') {
+                    // Only include approved items in the deployment table
+                    if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
                       // Normalize item name to lowercase for grouping
                       const itemName = item.item.trim().toLowerCase();
                       
@@ -2779,30 +3678,15 @@ useEffect(() => {
               normalizeDevProjectSchedule(development.pageA?.isSchedule || [])
             );
 
-            // Auto-populate SUMMARY OF INVESTMENTS from submitted requests if no saved data
+            // Always populate SUMMARY OF INVESTMENTS from submitted requests when viewing the section
             let summaryData = normalizeDevSummaryRows(development.pageB?.summaryInvestments || []);
             
-            // Check if there's real saved data (not placeholder/sample data)
-            const hasSavedSummaryData = development.pageB?.summaryInvestments && 
-                                        development.pageB.summaryInvestments.length > 0 &&
-                                        development.pageB.summaryInvestments.some(row => {
-                                          const item = row.item?.toString().trim() || '';
-                                          // Ignore placeholder/sample data
-                                          if (item.toUpperCase().includes('SAMPLE') || item.toUpperCase().includes('UPDATE') || item === '') {
-                                            return false;
-                                          }
-                                          // Must have actual data and not be TOTAL
-                                          return item.toUpperCase() !== 'TOTAL' &&
-                                                 (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost);
-                                        });
-            
-            console.log('[SUMMARY] hasSavedSummaryData:', hasSavedSummaryData);
             console.log('[SUMMARY] submittedRequests.length:', submittedRequests.length);
             console.log('[SUMMARY] selectedYearCycle:', selectedYearCycle);
             console.log('[SUMMARY] Current summaryData length:', summaryData.length);
             
-            // Always recalculate from submitted requests if we have requests, unless there's real saved data
-            if (!hasSavedSummaryData && submittedRequests.length > 0) {
+            // Always recalculate from submitted requests if we have requests
+            if (submittedRequests.length > 0) {
               console.log('[SUMMARY] Starting auto-population...');
               console.log('[SUMMARY] Auto-populating from submitted requests...');
               // Group items by name (case-insensitive) across all units/campuses
@@ -2816,7 +3700,8 @@ useEffect(() => {
               requestsForCycle.forEach(request => {
                 if (request.items && Array.isArray(request.items)) {
                   request.items.forEach(item => {
-                    if (item.item && item.item.trim() !== '') {
+                    // Only include approved items in the summary
+                    if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
                       // Normalize item name to lowercase for grouping
                       const itemName = item.item.trim().toLowerCase();
                       
@@ -2927,6 +3812,67 @@ useEffect(() => {
                 summaryData = normalizedSummary;
                 console.log('[SUMMARY] Populated', summaryRows.length, 'items');
                 console.log('[SUMMARY] First few items:', summaryRows.slice(0, 3).map(r => ({ item: r.item, y1qty: r.year1Physical, y1cost: r.year1Cost })));
+                
+                // Auto-save the populated data
+                const savePopulatedSummary = async () => {
+                  try {
+                    const token = localStorage.getItem('token');
+                    if (!token) return;
+                    
+                    // Clean the data (remove empty rows, keep only data rows including TOTAL row)
+                    const cleanedSummary = summaryRows.filter((row) => {
+                      const item = row.item?.toString().trim() || '';
+                      const isTotal = item.toUpperCase() === 'TOTAL' || row.isTotalRow === true;
+                      // Keep TOTAL row or rows with actual data
+                      return isTotal || (
+                        item !== '' &&
+                        (row.year1Physical || row.year1Cost || row.year2Physical || row.year2Cost || row.year3Physical || row.year3Cost)
+                      );
+                    });
+                    
+                    // Fetch current ISSP data to preserve other sections
+                    const currentIsspResponse = await axios.get(API_ENDPOINTS.issp.get, {
+                      headers: { 'x-auth-token': token }
+                    });
+                    const currentDevelopment = currentIsspResponse.data?.developmentInvestmentProgram || {};
+                    
+                    const payload = {
+                      pageA: {
+                        projectSchedule: currentDevelopment.pageA?.projectSchedule || [],
+                        isSchedule: currentDevelopment.pageA?.isSchedule || []
+                      },
+                      pageB: {
+                        summaryInvestments: cleanedSummary
+                      },
+                      pageC: {
+                        costBreakdown: currentDevelopment.pageC?.costBreakdown || []
+                      }
+                    };
+                    
+                    console.log('[SUMMARY] Saving Summary of Investments - payload:', JSON.stringify(payload, null, 2));
+                    console.log('[SUMMARY] Number of items to save:', cleanedSummary.length);
+                    console.log('[SUMMARY] First item:', JSON.stringify(cleanedSummary[0], null, 2));
+                    if (cleanedSummary.length > 1) {
+                      console.log('[SUMMARY] Last item:', JSON.stringify(cleanedSummary[cleanedSummary.length - 1], null, 2));
+                    }
+                    
+                    await axios.put(
+                      API_ENDPOINTS.issp.developmentInvestmentProgram,
+                      payload,
+                      { headers: { 'x-auth-token': token } }
+                    );
+                    
+                    console.log('[SUMMARY] Auto-saved Summary of Investments with', cleanedSummary.length, 'items');
+                  } catch (error) {
+                    console.error('Error auto-saving Summary of Investments:', error);
+                    // Don't show error to user, just log it
+                  }
+                };
+                
+                // Save after a short delay to avoid race conditions
+                setTimeout(() => {
+                  savePopulatedSummary();
+                }, 500);
               } else {
                 console.log('[SUMMARY] No items found to populate - requestsForCycle.length:', requestsForCycle.length);
                 if (requestsForCycle.length > 0) {
@@ -2934,115 +3880,7 @@ useEffect(() => {
                 }
               }
             } else {
-              console.log('[SUMMARY] Skipping auto-population - hasSavedSummaryData:', hasSavedSummaryData, 'or no requests');
-            }
-            
-            // If we still have placeholder data and submitted requests, recalculate anyway
-            if (submittedRequests.length > 0) {
-              const hasOnlyPlaceholderData = summaryData.every(row => {
-                const item = row.item?.toString().trim() || '';
-                return item === '' || 
-                       item.toUpperCase().includes('SAMPLE') || 
-                       item.toUpperCase().includes('UPDATE') ||
-                       (!row.year1Physical && !row.year1Cost && !row.year2Physical && !row.year2Cost && !row.year3Physical && !row.year3Cost);
-              });
-              
-              if (hasOnlyPlaceholderData) {
-                console.log('[SUMMARY] Detected only placeholder data, recalculating from submitted requests...');
-                const cycleYears = getYearsFromCycle(selectedYearCycle);
-                const itemGroups = {};
-                
-                const requestsForCycle = submittedRequests.filter(req => req.year === selectedYearCycle);
-                
-                requestsForCycle.forEach(request => {
-                  if (request.items && Array.isArray(request.items)) {
-                    request.items.forEach(item => {
-                      if (item.item && item.item.trim() !== '') {
-                        const itemName = item.item.trim().toLowerCase();
-                        
-                        if (!itemGroups[itemName]) {
-                          itemGroups[itemName] = {
-                            quantities: {},
-                            costs: {}
-                          };
-                          cycleYears.forEach(year => {
-                            itemGroups[itemName].quantities[year] = 0;
-                            itemGroups[itemName].costs[year] = 0;
-                          });
-                        }
-                        
-                        const quantityByYear = item.quantityByYear || {};
-                        const adminPrice = Number(item.price) || 0;
-                        
-                        cycleYears.forEach(year => {
-                          const yearKey = year.toString();
-                          const qty = Number(quantityByYear[yearKey]) || 0;
-                          itemGroups[itemName].quantities[year] += qty;
-                          itemGroups[itemName].costs[year] += qty * adminPrice;
-                        });
-                      }
-                    });
-                  }
-                });
-                
-                const summaryRows = [];
-                const sortedItemNames = Object.keys(itemGroups).sort();
-                
-                sortedItemNames.forEach(itemNameKey => {
-                  const itemData = itemGroups[itemNameKey];
-                  const hasQuantities = cycleYears.some(year => itemData.quantities[year] > 0);
-                  if (!hasQuantities) return;
-                  
-                  const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
-                  
-                  const year1Qty = itemData.quantities[cycleYears[0]] || 0;
-                  const year1Cost = itemData.costs[cycleYears[0]] || 0;
-                  const year2Qty = itemData.quantities[cycleYears[1]] || 0;
-                  const year2Cost = itemData.costs[cycleYears[1]] || 0;
-                  const year3Qty = itemData.quantities[cycleYears[2]] || 0;
-                  const year3Cost = itemData.costs[cycleYears[2]] || 0;
-                  
-                  summaryRows.push({
-                    item: displayItemName,
-                    year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
-                    year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
-                    year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
-                    year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
-                    year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
-                    year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
-                  });
-                });
-                
-                // Calculate totals
-                let totalYear1Physical = 0, totalYear1Cost = 0;
-                let totalYear2Physical = 0, totalYear2Cost = 0;
-                let totalYear3Physical = 0, totalYear3Cost = 0;
-                
-                summaryRows.forEach(row => {
-                  totalYear1Physical += Number(row.year1Physical) || 0;
-                  totalYear1Cost += Number(row.year1Cost) || 0;
-                  totalYear2Physical += Number(row.year2Physical) || 0;
-                  totalYear2Cost += Number(row.year2Cost) || 0;
-                  totalYear3Physical += Number(row.year3Physical) || 0;
-                  totalYear3Cost += Number(row.year3Cost) || 0;
-                });
-                
-                summaryRows.push({
-                  item: 'TOTAL',
-                  year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
-                  year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
-                  year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
-                  year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
-                  year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
-                  year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
-                  isTotalRow: true
-                });
-                
-                if (summaryRows.length > 0) {
-                  summaryData = normalizeDevSummaryRows(summaryRows);
-                  console.log('[SUMMARY] Recalculated from placeholder data, got', summaryRows.length, 'items');
-                }
-              }
+              console.log('[SUMMARY] No submitted requests available for auto-population');
             }
 
             setDevSummaryInvestments(summaryData);
@@ -3079,12 +3917,16 @@ useEffect(() => {
         
         requestsForCycle.forEach(request => {
           const userCampus = request.userId?.campus || '';
-          // Identify Main Campus: empty, null, or undefined campus field
-          const campus = (!userCampus || userCampus.trim() === '') ? 'DOrSU Main Campus' : userCampus;
+          // Normalize Main Campus: empty, null, undefined, or "Main" string should all be "DOrSU Main Campus"
+          const normalizedCampus = (!userCampus || userCampus.trim() === '' || userCampus.trim().toLowerCase() === 'main') 
+            ? 'DOrSU Main Campus' 
+            : userCampus.trim();
+          const campus = normalizedCampus;
           
           if (request.items && Array.isArray(request.items)) {
             request.items.forEach(item => {
-              if (item.item && item.item.trim() !== '') {
+              // Only include approved items in the deployment table
+              if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
                 // Normalize item name to lowercase for grouping
                 const itemName = item.item.trim().toLowerCase();
                 
@@ -4203,6 +5045,166 @@ useEffect(() => {
           </div>
         </div>
       </Modal>
+
+      {/* Save Item Confirmation Modal */}
+      <Modal
+        isOpen={showSaveItemConfirmation}
+        variant="confirm"
+        title="Confirm Save Changes"
+        message={`Are you sure you want to save the changes to "${editItemForm.item}"?`}
+        confirmLabel={savingItemEdit ? 'Saving...' : 'Yes, Save Changes'}
+        cancelLabel="Cancel"
+        onConfirm={handleConfirmSaveItemEdit}
+        onClose={() => setShowSaveItemConfirmation(false)}
+        zIndex={110}
+      />
+
+      {/* Edit Item Modal for Request Details Table */}
+      <Modal
+        isOpen={editItemModal.show}
+        variant="default"
+        title="Edit Item"
+        message="Update the item details below"
+        confirmLabel="Save Changes"
+        cancelLabel="Cancel"
+        onConfirm={handleSaveItemEdit}
+        onClose={() => {
+          setEditItemModal({ show: false, item: null, requestId: null, itemId: null });
+          setEditItemForm({ item: '', quantityByYear: {}, specification: '', purpose: '', price: '', range: 'mid' });
+        }}
+        closeOnOverlay={false}
+        zIndex={100}
+      >
+        <div className="space-y-4">
+          {/* Item Name */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Item Name *
+            </label>
+            <input
+              type="text"
+              value={editItemForm.item}
+              onChange={(e) => handleEditFormChange('item', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter item name"
+            />
+          </div>
+
+          {/* Quantity by Year */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Quantity by Year *
+            </label>
+            {(() => {
+              const requestYearCycle = selectedUnitRequest?.year || selectedYearCycle;
+              const modalCycleYears = getYearsFromCycle(requestYearCycle);
+              return modalCycleYears.length > 0 ? (
+                <div className="border border-gray-300 rounded-lg overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {modalCycleYears.map(year => (
+                          <th key={year} className="px-3 py-2 text-xs font-medium text-gray-700 text-center border-r border-gray-300 last:border-r-0">
+                            {year}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        {modalCycleYears.map(year => {
+                          const yearStr = year.toString();
+                          return (
+                            <td key={year} className="px-2 py-2 border-r border-gray-300 last:border-r-0">
+                              <input
+                                type="number"
+                                value={editItemForm.quantityByYear?.[yearStr] || ''}
+                                onChange={(e) => handleEditFormChange(`quantityByYear.${yearStr}`, e.target.value)}
+                                className="w-full px-2 py-1 text-sm text-center border border-gray-200 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="0"
+                                min="0"
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <input
+                  type="number"
+                  value={Object.values(editItemForm.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter quantity"
+                  min="1"
+                  disabled
+                />
+              );
+            })()}
+          </div>
+
+          {/* Price */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Price
+            </label>
+            <input
+              type="number"
+              value={editItemForm.price}
+              onChange={(e) => handleEditFormChange('price', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Enter price"
+              min="0"
+              step="0.01"
+            />
+          </div>
+
+          {/* Range */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Range
+            </label>
+            <select
+              value={editItemForm.range}
+              onChange={(e) => handleEditFormChange('range', e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="low">Low</option>
+              <option value="mid">Mid</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+
+          {/* Specification */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Specification
+            </label>
+            <textarea
+              value={editItemForm.specification}
+              onChange={(e) => handleEditFormChange('specification', e.target.value)}
+              rows="6"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              placeholder="Enter technical specifications for this item"
+            />
+          </div>
+
+          {/* Purpose */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Purpose
+            </label>
+            <textarea
+              value={editItemForm.purpose}
+              onChange={(e) => handleEditFormChange('purpose', e.target.value)}
+              rows="4"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              placeholder="Enter the purpose and intended use of this item"
+            />
+          </div>
+        </div>
+      </Modal>
       
       {/* Request Details Modal */}
       {selectedUnitRequest && (
@@ -4215,6 +5217,10 @@ useEffect(() => {
                     setItemsCurrentPage(1); // Reset to first page when closing
                     setPendingPriceEdits({}); // Reset price editing state
                     setPendingSpecificationEdits({}); // Reset specification editing state
+                    setAiActiveItem(null); // Reset AI assistant
+                    setAiInsights(null);
+                    setAiStatus('idle');
+                    setAiError(null);
                   }}
                   className="mr-4 text-gray-600 hover:text-gray-900"
                 >
@@ -4249,22 +5255,61 @@ useEffect(() => {
               {/* Items Section */}
               <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                 <div className="p-3 sm:p-4 border-b border-gray-200 bg-gray-50">
-                  <h4 className="text-base sm:text-lg font-semibold text-gray-900">
-                    Pending Items ({selectedUnitRequest.items?.length || 0})
-                  </h4>
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-base sm:text-lg font-semibold text-gray-900">
+                      Approved Items ({selectedUnitRequest.items?.length || 0})
+                    </h4>
+                    {(() => {
+                      // Get the earliest date from all items or the request itself
+                      const items = selectedUnitRequest.items || [];
+                      let earliestDate = null;
+                      
+                      if (items.length > 0) {
+                        const dates = items
+                          .map(item => item.requestCreatedAt || item.requestUpdatedAt)
+                          .filter(Boolean)
+                          .map(date => new Date(date));
+                        
+                        if (dates.length > 0) {
+                          earliestDate = new Date(Math.min(...dates));
+                        }
+                      }
+                      
+                      // Fallback to request dates if no item dates
+                      if (!earliestDate) {
+                        const requestDate = selectedUnitRequest.createdAt || selectedUnitRequest.updatedAt;
+                        if (requestDate) {
+                          earliestDate = new Date(requestDate);
+                        }
+                      }
+                      
+                      if (earliestDate) {
+                        return (
+                          <span className="text-xs sm:text-sm text-gray-600 font-medium">
+                            Submitted: {earliestDate.toLocaleDateString('en-US', { 
+                              year: 'numeric', 
+                              month: 'short', 
+                              day: 'numeric' 
+                            })}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
                 </div>
                 <div className="overflow-x-auto">
                   {(() => {
-                    // Items are already filtered to pending only in handleViewUnitRequest
+                    // Items are already filtered to approved only in handleViewUnitRequest
                     const items = Array.isArray(selectedUnitRequest.items) ? selectedUnitRequest.items : [];
-                    console.log('Displaying pending items:', items);
-                    console.log('Pending items length:', items.length);
+                    console.log('Displaying approved items:', items);
+                    console.log('Approved items length:', items.length);
                     
                     if (items.length === 0) {
                       return (
                         <div className="p-8 text-center text-gray-500">
-                          <p className="text-sm">No pending items found in this request.</p>
-                          <p className="text-xs mt-2 text-gray-400">All items have been reviewed. Check the Offices section to review items.</p>
+                          <p className="text-sm">No approved items found in this request.</p>
+                          <p className="text-xs mt-2 text-gray-400">No items have been approved yet. Check the Offices section to review items.</p>
                         </div>
                       );
                     }
@@ -4279,8 +5324,15 @@ useEffect(() => {
                     const requestYearCycle = selectedUnitRequest.year || selectedYearCycle;
                     const cycleYears = getYearsFromCycle(requestYearCycle);
                     
+                    const hasActiveAi = aiActiveItem && paginatedItems.some((itm, idx) => {
+                      const itmKey = `${itm.requestId}-${itm.id || idx}`;
+                      return aiActiveItem.itemKey === itmKey;
+                    });
+                    
                     return (
                     <>
+                    <div className={`grid ${hasActiveAi ? 'lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)] gap-4 sm:gap-6' : 'grid-cols-1'}`}>
+                      <div className={hasActiveAi ? 'overflow-x-auto' : ''}>
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
@@ -4295,6 +5347,7 @@ useEffect(() => {
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Price</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Range</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
@@ -4346,6 +5399,7 @@ useEffect(() => {
                                 const itemKey = `${item.requestId}-${item.id || index}`;
                                 const isEditing = itemKey in pendingPriceEdits;
                                 const displayPrice = isEditing ? pendingPriceEdits[itemKey] : (item.price > 0 ? item.price : '');
+                                const isAiActive = aiActiveItem && aiActiveItem.itemKey === itemKey;
                                 
                                 return isEditing ? (
                                   <input
@@ -4358,6 +5412,16 @@ useEffect(() => {
                                         ...prev,
                                         [itemKey]: e.target.value
                                       }));
+                                    }}
+                                    onFocus={() => {
+                                      // Trigger AI assistant when focusing on price input
+                                      if (item.item && item.item.trim()) {
+                                        setAiActiveItem({
+                                          itemKey: itemKey,
+                                          itemName: item.item.trim()
+                                        });
+                                        fetchPriceSpecificationInsights(item.item.trim());
+                                      }
                                     }}
                                     onBlur={() => {
                                       // Keep the edit in pending state, don't clear on blur
@@ -4373,6 +5437,14 @@ useEffect(() => {
                                         ...prev,
                                         [itemKey]: item.price > 0 ? item.price.toString() : ''
                                       }));
+                                      // Trigger AI assistant when clicking to edit price
+                                      if (item.item && item.item.trim()) {
+                                        setAiActiveItem({
+                                          itemKey: itemKey,
+                                          itemName: item.item.trim()
+                                        });
+                                        fetchPriceSpecificationInsights(item.item.trim());
+                                      }
                                     }}
                                     title="Click to edit price"
                                   >
@@ -4390,7 +5462,7 @@ useEffect(() => {
                                 {item.range?.toUpperCase() || 'N/A'}
                               </span>
                             </td>
-                            <td className="px-4 py-3">
+                            <td className="px-4 py-3 max-w-xs">
                               {(() => {
                                 const itemKey = `${item.requestId}-${item.id || index}`;
                                 const isEditing = itemKey in pendingSpecificationEdits;
@@ -4414,24 +5486,67 @@ useEffect(() => {
                                   />
                                 ) : (
                                   <div 
-                                    className="text-sm text-gray-900 max-w-xs break-words cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition-colors"
+                                    className="text-sm text-gray-900 cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition-colors line-clamp-2 overflow-hidden"
                                 onClick={() => {
                                       setPendingSpecificationEdits(prev => ({
                                         ...prev,
                                         [itemKey]: item.specification || ''
                                       }));
                                     }}
-                                    title="Click to edit specification"
+                                    title={item.specification || "Click to edit specification"}
                                   >
                                     {item.specification || <span className="text-gray-400 italic">Set Specification</span>}
                                   </div>
                                 );
                               })()}
                             </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-center">
+                              <button
+                                onClick={() => handleEditItemFromTable(item)}
+                                className="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm font-medium transition-colors duration-200"
+                                title="Edit item details"
+                              >
+                                Edit
+                              </button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                      </div>
+                      
+                      {/* AI Assistant Sidebar */}
+                      {hasActiveAi && aiActiveItem && (
+                        <>
+                          {/* Desktop Sidebar */}
+                          <div className="hidden lg:block">
+                            <AdminPriceInsightSidebar
+                              itemName={aiActiveItem.itemName}
+                              status={aiStatus}
+                              insights={aiInsights}
+                              error={aiError}
+                              onRetry={handleAiRetry}
+                              onApplyPrice={handleApplyPrice}
+                              onApplySpecification={handleApplySpecification}
+                              onClose={() => setAiActiveItem(null)}
+                            />
+                          </div>
+                          {/* Mobile Sidebar - Below table */}
+                          <div className="lg:hidden mt-4">
+                            <AdminPriceInsightSidebar
+                              itemName={aiActiveItem.itemName}
+                              status={aiStatus}
+                              insights={aiInsights}
+                              error={aiError}
+                              onRetry={handleAiRetry}
+                              onApplyPrice={handleApplyPrice}
+                              onApplySpecification={handleApplySpecification}
+                              onClose={() => setAiActiveItem(null)}
+                            />
+                          </div>
+                        </>
+                      )}
+                    </div>
                     {totalPages > 1 && (
                       <div className="bg-gray-50 px-4 py-3 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
                         <div className="text-sm text-gray-700">
@@ -4890,6 +6005,50 @@ useEffect(() => {
                         return updated;
                       });
 
+                      // Update submittedRequests to trigger summary investments recalculation
+                      setSubmittedRequests(prev => prev.map(request => {
+                        const priceUpdate = priceUpdates.find(([k]) => k.startsWith(request._id));
+                        const quantityUpdate = quantityUpdates.find(([k]) => k.startsWith(request._id));
+                        const specificationUpdate = specificationUpdates.find(([k]) => k.startsWith(request._id));
+                        
+                        if (priceUpdate || quantityUpdate || specificationUpdate) {
+                          return {
+                            ...request,
+                            items: request.items.map(item => {
+                              const priceKey = `${request._id}-${item.id}`;
+                              let updatedItem = { ...item };
+                              
+                              // Update price
+                              const priceEntry = priceUpdates.find(([k]) => k === priceKey);
+                              if (priceEntry) {
+                                const priceNum = parseFloat(priceEntry[1]);
+                                if (!isNaN(priceNum) && priceNum >= 0) {
+                                  updatedItem.price = priceNum;
+                                }
+                              }
+                              
+                              // Update quantity
+                              const quantityEntry = quantityUpdates.find(([k]) => k === priceKey);
+                              if (quantityEntry) {
+                                const quantityNum = parseInt(quantityEntry[1]);
+                                if (!isNaN(quantityNum) && quantityNum >= 0) {
+                                  updatedItem.quantity = quantityNum;
+                                }
+                              }
+                              
+                              // Update specification
+                              const specEntry = specificationUpdates.find(([k]) => k === priceKey);
+                              if (specEntry) {
+                                updatedItem.specification = specEntry[1];
+                              }
+                              
+                              return updatedItem;
+                            })
+                          };
+                        }
+                        return request;
+                      }));
+
                       // Clear all editing states
                       setEditingPrices({});
                       setEditingQuantities({});
@@ -4898,7 +6057,7 @@ useEffect(() => {
                       showAlert({
                         variant: 'success',
                         title: 'Updates Saved',
-                        message: `Successfully updated ${updateCount} item${updateCount > 1 ? 's' : ''}!`,
+                        message: `Successfully updated ${updateCount} item${updateCount > 1 ? 's' : ''}! Summary of Investments will be recalculated automatically.`,
                         autoCloseDelay: 2000
                       });
                     } catch (error) {
@@ -5067,11 +6226,21 @@ useEffect(() => {
                       value={selectedYearCycle}
                       onChange={(e) => setSelectedYearCycle(e.target.value)}
                       className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400 text-sm font-medium text-gray-700 bg-white"
+                      disabled={availableYearCycles.length === 0}
                     >
-                      <option value="2024-2026">2024-2026</option>
-                      <option value="2027-2029">2027-2029</option>
-                      <option value="2030-2032">2030-2032</option>
-                      <option value="2033-2035">2033-2035</option>
+                      {availableYearCycles.length === 0 ? (
+                        <option value="">No year cycles available</option>
+                      ) : (
+                        availableYearCycles.map((cycleName) => {
+                          const cycleData = yearCyclesData.find(c => c.name === cycleName);
+                          const isInactive = cycleData && cycleData.isActive === false;
+                          return (
+                            <option key={cycleName} value={cycleName}>
+                              {cycleName}{isInactive ? ' (Inactive)' : ''}
+                            </option>
+                          );
+                        })
+                      )}
                     </select>
                     </div>
                   </div>
@@ -5141,7 +6310,55 @@ useEffect(() => {
                   </div>
                   </div>
                 </div>
-                
+
+              {/* Tab Navigation */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+                <nav className="flex border-b border-gray-200">
+                  <button
+                    onClick={() => setActiveTab('submissions')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeTab === 'submissions'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Submissions
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('sections')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeTab === 'sections'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Sections
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('reviews')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeTab === 'reviews'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Reviews & Approvals
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('entries')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeTab === 'entries'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Entry Status
+                  </button>
+                </nav>
+              </div>
+
+              {/* Tab Content */}
+              {activeTab === 'submissions' && (
               <div>
                 <div className="mb-4">
                   <h2 className="text-lg font-bold text-gray-800 mb-4">UNIT SUBMISSION STATUS</h2>
@@ -5308,7 +6525,9 @@ useEffect(() => {
                   </div>
                 )}
               </div>
+              )}
 
+              {activeTab === 'sections' && (
               <div className="mb-6 mt-8">
                 <h2 className="text-lg font-bold text-gray-800 mb-4">ISSP SECTIONS</h2>
                 
@@ -5334,11 +6553,31 @@ useEffect(() => {
                     ))}
                   </div>
               </div>
+              )}
 
-              <div className="mt-8">
-                <h2 className="text-lg font-bold text-gray-800 mb-4">PRESIDENTIAL REVIEW STATUS</h2>
-                <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
-                  {/* Status Header */}
+              {activeTab === 'reviews' && (
+              <div className="space-y-6">
+                {/* Presidential Review Status - Collapsible */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                  <button
+                    onClick={() => setExpandedSections(prev => ({ ...prev, presidentialReview: !prev.presidentialReview }))}
+                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                  >
+                    <h2 className="text-lg font-bold text-gray-800">PRESIDENTIAL REVIEW STATUS</h2>
+                    <svg
+                      className={`w-5 h-5 text-gray-500 transition-transform ${expandedSections.presidentialReview ? 'rotate-180' : ''}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {expandedSections.presidentialReview && (
+                    <div className="px-6 pb-6">
+                      <div className="mt-4">
+                        <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
+                          {/* Status Header */}
                   <div className={`px-6 py-4 border-b ${
                     reviewStatus === 'approved' ? 'bg-emerald-50 border-emerald-200' :
                     reviewStatus === 'rejected' ? 'bg-red-50 border-red-200' :
@@ -5500,14 +6739,33 @@ useEffect(() => {
                       </div>
                     )}
                   </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
 
-              {/* DICT Approval Status Section */}
-              <div className="mt-8">
-                <h2 className="text-lg font-bold text-gray-800 mb-4">DICT APPROVAL STATUS ({selectedYearCycle})</h2>
-                <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
-                  {/* Status Header */}
+                {/* DICT Approval Status - Collapsible */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                  <button
+                    onClick={() => setExpandedSections(prev => ({ ...prev, dictApproval: !prev.dictApproval }))}
+                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                  >
+                    <h2 className="text-lg font-bold text-gray-800">DICT APPROVAL STATUS ({selectedYearCycle})</h2>
+                    <svg
+                      className={`w-5 h-5 text-gray-500 transition-transform ${expandedSections.dictApproval ? 'rotate-180' : ''}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {expandedSections.dictApproval && (
+                    <div className="px-6 pb-6">
+                      <div className="mt-4">
+                        <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
+                          {/* Status Header */}
                   {(() => {
                     // Handle Map structure - Mongoose Maps are converted to objects in JSON
                     const dictApproval = isspData?.dictApproval;
@@ -5579,77 +6837,85 @@ useEffect(() => {
                       </>
                     );
                   })()}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
+              )}
 
-              {/* Accepting Entries Status Section */}
-              <div className="mt-8">
-                <h2 className="text-lg font-bold text-gray-800 mb-4">ISSP ENTRY STATUS ({selectedYearCycle})</h2>
-                <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
-                  {/* Status Header */}
-                  {(() => {
-                    // Handle Map structure - Mongoose Maps are converted to objects in JSON
-                    const acceptingEntries = isspData?.acceptingEntries;
-                    const yearCycleStatus = acceptingEntries && typeof acceptingEntries === 'object' && !Array.isArray(acceptingEntries) 
-                      ? acceptingEntries[selectedYearCycle] 
-                      : null;
-                    const currentStatus = yearCycleStatus?.status || 'accepting'; // Default to 'accepting'
-                    
-                    return (
-                      <>
-                        <div className={`px-6 py-4 border-b ${
-                          currentStatus === 'accepting' ? 'bg-green-50 border-green-200' :
-                          'bg-red-50 border-red-200'
-                        }`}>
-                          <div className="flex items-center justify-between flex-wrap gap-4">
-                            <div className="flex items-center gap-3">
-                              <div>
-                                <p className="text-xs text-gray-600 font-medium mb-1">Current Status for {selectedYearCycle}</p>
-                                <span className={`text-sm font-semibold px-4 py-1.5 rounded-full inline-block ${
-                                  currentStatus === 'accepting' ? 'bg-green-100 text-green-700 border border-green-200' :
-                                  'bg-red-100 text-red-700 border border-red-200'
-                                }`}>
-                                  {currentStatus === 'accepting' ? 'Accepting Entries' : 'No Accepting Entries'}
-                                </span>
+              {activeTab === 'entries' && (
+              <div>
+                {/* ISSP Entry Status */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                  <div className="px-6 py-4">
+                    <h2 className="text-lg font-bold text-gray-800 mb-4">ISSP ENTRY STATUS ({selectedYearCycle})</h2>
+                    <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg shadow-md border border-gray-200 overflow-hidden">
+                      {(() => {
+                        const acceptingEntries = isspData?.acceptingEntries;
+                        const yearCycleStatus = acceptingEntries && typeof acceptingEntries === 'object' && !Array.isArray(acceptingEntries) 
+                          ? acceptingEntries[selectedYearCycle] 
+                          : null;
+                        const currentStatus = yearCycleStatus?.status || 'accepting';
+                        
+                        return (
+                          <>
+                            <div className={`px-6 py-4 border-b ${
+                              currentStatus === 'accepting' ? 'bg-green-50 border-green-200' :
+                              'bg-red-50 border-red-200'
+                            }`}>
+                              <div className="flex items-center justify-between flex-wrap gap-4">
+                                <div className="flex items-center gap-3">
+                                  <div>
+                                    <p className="text-xs text-gray-600 font-medium mb-1">Current Status for {selectedYearCycle}</p>
+                                    <span className={`text-sm font-semibold px-4 py-1.5 rounded-full inline-block ${
+                                      currentStatus === 'accepting' ? 'bg-green-100 text-green-700 border border-green-200' :
+                                      'bg-red-100 text-red-700 border border-red-200'
+                                    }`}>
+                                      {currentStatus === 'accepting' ? 'Accepting Entries' : 'No Accepting Entries'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    setAcceptingEntriesForm({
+                                      status: currentStatus,
+                                      notes: yearCycleStatus?.notes || ''
+                                    });
+                                    setShowAcceptingEntriesModal(true);
+                                  }}
+                                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors duration-200 flex items-center gap-2"
+                                >
+                                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                  Update Entry Status
+                                </button>
                               </div>
+                              {yearCycleStatus?.updatedAt && (
+                                <div className="text-xs text-gray-600 mt-2">
+                                  Updated: {new Date(yearCycleStatus.updatedAt).toLocaleString()}
+                                </div>
+                              )}
                             </div>
-                            <button
-                              onClick={() => {
-                                setAcceptingEntriesForm({
-                                  status: currentStatus,
-                                  notes: yearCycleStatus?.notes || ''
-                                });
-                                setShowAcceptingEntriesModal(true);
-                              }}
-                              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors duration-200 flex items-center gap-2"
-                            >
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                              </svg>
-                              Update Entry Status
-                            </button>
-                          </div>
-                          {yearCycleStatus?.updatedAt && (
-                            <div className="text-xs text-gray-600 mt-2">
-                              Updated: {new Date(yearCycleStatus.updatedAt).toLocaleString()}
-                            </div>
-                          )}
-                        </div>
 
-                        {/* Content Area */}
-                        <div className="p-6">
-                          {yearCycleStatus?.notes && (
-                            <div className="bg-white border border-gray-200 rounded-lg p-4">
-                              <p className="text-sm font-medium text-gray-700 mb-2">Notes:</p>
-                              <p className="text-sm text-gray-900">{yearCycleStatus.notes}</p>
+                            <div className="p-6">
+                              {yearCycleStatus?.notes && (
+                                <div className="bg-white border border-gray-200 rounded-lg p-4">
+                                  <p className="text-sm font-medium text-gray-700 mb-2">Notes:</p>
+                                  <p className="text-sm text-gray-900">{yearCycleStatus.notes}</p>
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </>
-                    );
-                  })()}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
                 </div>
               </div>
+              )}
 
             </>
           )}

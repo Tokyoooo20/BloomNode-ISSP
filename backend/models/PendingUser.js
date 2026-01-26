@@ -13,6 +13,30 @@ const pendingUserSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  office: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
+  universityLevelOffice: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
+  firstName: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
+  lastName: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
   username: {
     type: String,
     required: true,

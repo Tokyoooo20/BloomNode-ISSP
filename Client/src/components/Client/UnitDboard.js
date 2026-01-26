@@ -33,6 +33,7 @@ const UnitDboard = () => {
     'in-review': 0,
     submitted: 0
   });
+  const [totalItemsCount, setTotalItemsCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [mostRequestedItems, setMostRequestedItems] = useState([]);
   const [userData, setUserData] = useState({ unit: '', username: '', profilePicture: null });
@@ -76,7 +77,7 @@ const UnitDboard = () => {
       const fetchedRequests = response.data;
       setRequests(fetchedRequests);
       
-      // Calculate status counts
+      // Calculate status counts based on items (not requests)
       const counts = {
         approved: 0,
         rejected: 0,
@@ -85,13 +86,70 @@ const UnitDboard = () => {
         submitted: 0
       };
       
+      // Count unique items by name (combining duplicates)
+      const uniqueItemsMap = new Map();
+      
       fetchedRequests.forEach(request => {
-        if (counts[request.status] !== undefined) {
-          counts[request.status]++;
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach(item => {
+            const itemNameKey = (item.item || '').trim().toLowerCase();
+            if (itemNameKey) {
+              const itemStatus = item.approvalStatus || 'pending';
+              
+              // Track unique items and determine combined approval status
+              if (!uniqueItemsMap.has(itemNameKey)) {
+                // First occurrence of this item name
+                uniqueItemsMap.set(itemNameKey, {
+                  name: item.item,
+                  approvalStatus: itemStatus,
+                  hasDisapproved: itemStatus === 'disapproved',
+                  hasApproved: itemStatus === 'approved',
+                  hasPending: itemStatus === 'pending' || itemStatus === 'in-review'
+                });
+              } else {
+                // Update existing item's status flags
+                const existingItem = uniqueItemsMap.get(itemNameKey);
+                if (itemStatus === 'disapproved') {
+                  existingItem.hasDisapproved = true;
+                } else if (itemStatus === 'approved') {
+                  existingItem.hasApproved = true;
+                } else {
+                  existingItem.hasPending = true;
+                }
+                
+                // Determine combined approval status:
+                // - If any is disapproved → disapproved
+                // - If all are approved → approved
+                // - Otherwise → pending
+                if (existingItem.hasDisapproved) {
+                  existingItem.approvalStatus = 'disapproved';
+                } else if (existingItem.hasApproved && !existingItem.hasPending) {
+                  existingItem.approvalStatus = 'approved';
+                } else {
+                  existingItem.approvalStatus = 'pending';
+                }
+              }
+            }
+          });
         }
       });
       
+      // Count status based on unique items only
+      uniqueItemsMap.forEach(item => {
+        const itemStatus = item.approvalStatus || 'pending';
+        if (itemStatus === 'approved') {
+          counts.approved++;
+        } else if (itemStatus === 'disapproved') {
+          counts.rejected++;
+        } else {
+          counts.pending++;
+        }
+      });
+      
+      const totalItems = uniqueItemsMap.size;
+      
       setStatusCounts(counts);
+      setTotalItemsCount(totalItems);
       
       // Calculate most requested items
       const itemCounts = {};
@@ -185,14 +243,7 @@ const UnitDboard = () => {
     fetchUserData();
     fetchApprovedISSP();
     
-    // Refresh data every 30 seconds for real-time updates
-    const interval = setInterval(() => {
-      fetchRequests();
-      fetchNotifications();
-      fetchApprovedISSP();
-    }, 30000);
-    
-    return () => clearInterval(interval);
+    // No automatic refresh. Data refreshes on specific events (e.g., new request).
   }, []);
   
   // Refresh data when switching to dashboard
@@ -533,9 +584,9 @@ const UnitDboard = () => {
               {/* Quick Status Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
                 <div className="bg-white p-4 rounded-lg border-l-4 border-gray-400 shadow-sm">
-                  <p className="text-sm text-gray-600 font-medium">Total Requests</p>
+                  <p className="text-sm text-gray-600 font-medium">Total Items</p>
                   <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {loading ? '...' : requests.length}
+                    {loading ? '...' : totalItemsCount}
                   </h3>
                 </div>
                 <div className="bg-white p-4 rounded-lg border-l-4 border-gray-400 shadow-sm">
@@ -755,7 +806,11 @@ const UnitDboard = () => {
           )}
 
           {activeSection === 'request' && (
-            <Request onRequestUpdate={fetchRequests} />
+            <Request onRequestUpdate={() => {
+              fetchRequests();
+              fetchNotifications();
+              fetchApprovedISSP();
+            }} />
           )}
 
           {activeSection === 'inventory' && (

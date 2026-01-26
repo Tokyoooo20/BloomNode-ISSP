@@ -30,11 +30,23 @@ const seedAdminUser = async () => {
       console.log('🔑 Password: admin123456');
     }
 
-    // Check if president user already exists
-    const existingPresident = await User.findOne({ email: 'president@gmail.com' });
+    // Check if president user already exists (by email OR by role)
+    const existingPresident = await User.findOne({ 
+      $or: [
+        { email: 'president@gmail.com' },
+        { role: 'president' },
+        { role: 'Executive' }
+      ]
+    });
     
-    if (!existingPresident) {
-      // Create president user
+    // Only create default president on initial setup
+    // Check if there are any non-admin users - if yes, system has been used, don't recreate president
+    const nonAdminUsers = await User.countDocuments({ role: { $ne: 'admin' } });
+    const isInitialSetup = nonAdminUsers === 0;
+    
+    if (!existingPresident && isInitialSetup) {
+      // Only create default president if this is initial setup (no non-admin users exist)
+      // Once system has been used, president must be created through signup form
       const presidentUser = new User({
         unit: 'Executive',
         username: 'president',
@@ -48,9 +60,13 @@ const seedAdminUser = async () => {
       });
 
       await presidentUser.save();
-      console.log('✅ President user created successfully');
+      console.log('✅ President user created successfully (initial setup)');
       console.log('📧 Email: president@gmail.com');
       console.log('🔑 Password: president123');
+    } else if (!existingPresident && !isInitialSetup) {
+      // Database has non-admin users but no president - president was likely deleted
+      // Don't recreate it - user can create president through signup form if needed
+      // This prevents automatic recreation after deletion
     }
     // Removed the "already exists" message to avoid console spam
   } catch (error) {
