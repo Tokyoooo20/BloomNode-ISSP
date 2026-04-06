@@ -9,7 +9,7 @@ const officeSchema = new mongoose.Schema({
   campus: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Campus',
-    required: true
+    required: false // Campus is optional - null means applicable to all campuses
   },
   isActive: {
     type: Boolean,
@@ -23,8 +23,8 @@ const officeSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Compound index to ensure unique office names per campus
-officeSchema.index({ name: 1, campus: 1 }, { unique: true });
+// Unique index on name only - offices are global (applicable to all campuses)
+officeSchema.index({ name: 1 }, { unique: true });
 
 module.exports = mongoose.model('Office', officeSchema);
 

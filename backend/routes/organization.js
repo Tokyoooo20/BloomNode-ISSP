@@ -404,19 +404,18 @@ router.post('/offices', auth, async (req, res) => {
     if (!name || name.trim() === '') {
       return res.status(400).json({ message: 'Office name is required' });
     }
-    if (!campus) {
-      return res.status(400).json({ message: 'Campus is required' });
-    }
 
     const office = new Office({
       name: name.trim(),
-      campus,
+      campus: campus || null, // Campus is optional - null means applicable to all campuses
       isActive: isActive !== undefined ? isActive : true,
       order: order || 0
     });
 
     await office.save();
-    await office.populate('campus', 'name');
+    if (office.campus) {
+      await office.populate('campus', 'name');
+    }
 
     await logAuditEvent({
       actor: req.user,
@@ -428,7 +427,7 @@ router.post('/offices', auth, async (req, res) => {
     res.status(201).json(office);
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Office with this name already exists for this campus' });
+      return res.status(400).json({ message: 'Office with this name already exists' });
     }
     console.error('Error creating office:', error);
     res.status(500).json({ message: 'Error creating office', error: error.message });
@@ -447,12 +446,14 @@ router.put('/offices/:id', auth, async (req, res) => {
 
     const oldName = office.name;
     if (name) office.name = name.trim();
-    if (campus) office.campus = campus;
+    if (campus !== undefined) office.campus = campus || null; // Allow null for all campuses
     if (isActive !== undefined) office.isActive = isActive;
     if (order !== undefined) office.order = order;
 
     await office.save();
-    await office.populate('campus', 'name');
+    if (office.campus) {
+      await office.populate('campus', 'name');
+    }
 
     await logAuditEvent({
       actor: req.user,
@@ -464,7 +465,7 @@ router.put('/offices/:id', auth, async (req, res) => {
     res.json(office);
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Office with this name already exists for this campus' });
+      return res.status(400).json({ message: 'Office with this name already exists' });
     }
     console.error('Error updating office:', error);
     res.status(500).json({ message: 'Error updating office', error: error.message });
@@ -624,14 +625,18 @@ router.delete('/units/:id', auth, async (req, res) => {
 // GET all programs (public for signup, auth for admin)
 router.get('/programs', async (req, res) => {
   try {
-    const { facultyId, campusId } = req.query;
+    const { facultyId, campusId, officeId, unitId } = req.query;
     const query = {};
     if (facultyId) query.faculty = facultyId;
     if (campusId) query.campus = campusId;
+    if (officeId) query.office = officeId;
+    if (unitId) query.unit = unitId;
     
     const programs = await Program.find(query)
       .populate('faculty', 'name')
       .populate('campus', 'name')
+      .populate('office', 'name')
+      .populate('unit', 'name')
       .sort({ order: 1, name: 1 });
     res.json(programs);
   } catch (error) {
@@ -645,7 +650,9 @@ router.get('/programs/:id', auth, async (req, res) => {
   try {
     const program = await Program.findById(req.params.id)
       .populate('faculty', 'name')
-      .populate('campus', 'name');
+      .populate('campus', 'name')
+      .populate('office', 'name')
+      .populate('unit', 'name');
     if (!program) {
       return res.status(404).json({ message: 'Program not found' });
     }
@@ -659,19 +666,24 @@ router.get('/programs/:id', auth, async (req, res) => {
 // POST create program
 router.post('/programs', auth, async (req, res) => {
   try {
-    const { name, faculty, campus, isActive, order } = req.body;
+    const { name, faculty, campus, office, unit, isActive, order } = req.body;
     
     if (!name || name.trim() === '') {
       return res.status(400).json({ message: 'Program name is required' });
     }
-    if (!faculty) {
-      return res.status(400).json({ message: 'Faculty is required' });
+
+    let officeId = office || null;
+    if (unit) {
+      const unitDoc = await Unit.findById(unit).select('office');
+      if (unitDoc && unitDoc.office) officeId = unitDoc.office;
     }
 
     const program = new Program({
       name: name.trim(),
-      faculty,
+      faculty: faculty || null,
       campus: campus || null,
+      office: officeId,
+      unit: unit || null,
       isActive: isActive !== undefined ? isActive : true,
       order: order || 0
     });
@@ -680,6 +692,12 @@ router.post('/programs', auth, async (req, res) => {
     await program.populate('faculty', 'name');
     if (program.campus) {
       await program.populate('campus', 'name');
+    }
+    if (program.office) {
+      await program.populate('office', 'name');
+    }
+    if (program.unit) {
+      await program.populate('unit', 'name');
     }
 
     await logAuditEvent({
@@ -702,7 +720,7 @@ router.post('/programs', auth, async (req, res) => {
 // PUT update program
 router.put('/programs/:id', auth, async (req, res) => {
   try {
-    const { name, faculty, campus, isActive, order } = req.body;
+    const { name, faculty, campus, office, unit, isActive, order } = req.body;
     const program = await Program.findById(req.params.id);
     
     if (!program) {
@@ -713,6 +731,17 @@ router.put('/programs/:id', auth, async (req, res) => {
     if (name) program.name = name.trim();
     if (faculty) program.faculty = faculty;
     if (campus !== undefined) program.campus = campus || null;
+    if (unit !== undefined) {
+      program.unit = unit || null;
+      if (unit) {
+        const unitDoc = await Unit.findById(unit).select('office');
+        program.office = unitDoc && unitDoc.office ? unitDoc.office : program.office;
+      } else {
+        program.office = office !== undefined ? office || null : program.office;
+      }
+    } else if (office !== undefined) {
+      program.office = office || null;
+    }
     if (isActive !== undefined) program.isActive = isActive;
     if (order !== undefined) program.order = order;
 
@@ -720,6 +749,12 @@ router.put('/programs/:id', auth, async (req, res) => {
     await program.populate('faculty', 'name');
     if (program.campus) {
       await program.populate('campus', 'name');
+    }
+    if (program.office) {
+      await program.populate('office', 'name');
+    }
+    if (program.unit) {
+      await program.populate('unit', 'name');
     }
 
     await logAuditEvent({

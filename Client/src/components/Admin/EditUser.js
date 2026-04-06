@@ -117,7 +117,80 @@ const EditUser = () => {
   useEffect(() => {
     fetchUser();
     fetchUserData();
+    fetchCampuses();
+    fetchOffices();
+    fetchFaculties();
+    fetchPrograms();
+    fetchUniversityLevelOffices();
   }, [userId]);
+
+  // Re-initialize form data when campuses and faculties are loaded (in case user loaded before organization data)
+  // This ensures dropdowns have options available when form initializes
+  useEffect(() => {
+    if (user && campuses.length > 0 && faculties.length > 0 && universityLevelOffices.length > 0) {
+      // Only re-initialize if formData campus matches user's campus (hasn't been modified)
+      const userCampus = (user.campus || '').trim() || 'Main';
+      if (formData.campus === userCampus || !formData.campus) {
+        initializeFormData(user);
+      }
+    }
+  }, [campuses.length, faculties.length, universityLevelOffices.length]); // Depend on organization data being loaded
+
+  // Fetch organization data from API
+  const fetchCampuses = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.campuses.list, {
+        headers: getAuthHeaders()
+      });
+      setCampuses(response.data);
+    } catch (err) {
+      console.error('Error fetching campuses:', err);
+    }
+  };
+
+  const fetchOffices = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.offices.list, {
+        headers: getAuthHeaders()
+      });
+      setOffices(response.data);
+    } catch (err) {
+      console.error('Error fetching offices:', err);
+    }
+  };
+
+  const fetchFaculties = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.faculties.list, {
+        headers: getAuthHeaders()
+      });
+      setFaculties(response.data);
+    } catch (err) {
+      console.error('Error fetching faculties:', err);
+    }
+  };
+
+  const fetchPrograms = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.programs.list, {
+        headers: getAuthHeaders()
+      });
+      setPrograms(response.data);
+    } catch (err) {
+      console.error('Error fetching programs:', err);
+    }
+  };
+
+  const fetchUniversityLevelOffices = async () => {
+    try {
+      const response = await axios.get(API_ENDPOINTS.organization.universityLevelOffices.list, {
+        headers: getAuthHeaders()
+      });
+      setUniversityLevelOffices(response.data);
+    } catch (err) {
+      console.error('Error fetching university level offices:', err);
+    }
+  };
 
   const fetchUser = async () => {
     try {
@@ -172,10 +245,11 @@ const EditUser = () => {
     }
     
     const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-    const faculties = mainCampus ? faculties.filter(f => 
+    const mainFaculties = mainCampus ? faculties.filter(f => 
       (f.campus?._id === mainCampus._id || f.campus?.name === 'Main') && f.isActive
-    ).map(f => f.name) : [];
-    const isFaculty = faculties.includes(unit);
+    ) : [];
+    const facultyNames = mainFaculties.map(f => f.name);
+    const isFaculty = facultyNames.includes(unit);
     let faculty = '';
     let selectingProgram = false;
     
@@ -184,10 +258,10 @@ const EditUser = () => {
       selectingProgram = true;
       unit = '';
     } else if (unit) {
-      for (const faculty of faculties) {
-        const facPrograms = getFacultyPrograms(faculty.name);
-        if (programs.includes(unit)) {
-          faculty = fac;
+      for (const fac of mainFaculties) {
+        const facPrograms = getFacultyPrograms(fac.name);
+        if (facPrograms.includes(unit)) {
+          faculty = fac.name;
           selectingProgram = true;
           break;
         }
@@ -241,10 +315,11 @@ const EditUser = () => {
     } else if (name === 'unit') {
       newFormData.unit = value;
       const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-    const faculties = mainCampus ? faculties.filter(f => 
-      (f.campus?._id === mainCampus._id || f.campus?.name === 'Main') && f.isActive
-    ).map(f => f.name) : [];
-      if (faculties.includes(value)) {
+      const mainFaculties = mainCampus ? faculties.filter(f => 
+        (f.campus?._id === mainCampus._id || f.campus?.name === 'Main') && f.isActive
+      ) : [];
+      const facultyNames = mainFaculties.map(f => f.name);
+      if (facultyNames.includes(value)) {
         setSelectedFaculty(value);
         setIsSelectingProgram(true);
       } else {
@@ -259,22 +334,32 @@ const EditUser = () => {
   };
 
   const getOfficeOptions = () => {
-    if (formData.campus === 'Main') {
-      return [
-        'External and Special Units',
-        'Faculties',
-        'Directorates',
-        'Student Affairs and Services Offices',
-        'University Registrar Offices',
-        'National Service Training Program Offices',
-        'University Library Services Offices'
-      ];
-    }
-    return [];
+    if (!formData.campus) return [];
+    
+    // Find the selected campus
+    const selectedCampus = campuses.find(c => 
+      c.name === formData.campus && c.isActive
+    );
+    
+    if (!selectedCampus) return [];
+    
+    // Get offices for the selected campus
+    const campusOffices = offices.filter(o => {
+      const officeCampusId = o.campus?._id || o.campus;
+      const campusId = selectedCampus._id;
+      return (
+        (officeCampusId === campusId || o.campus?.name === formData.campus) && 
+        o.isActive
+      );
+    });
+    
+    return campusOffices.map(o => o.name);
   };
 
   const getUniversityLevelOfficeOptions = () => {
-    if (formData.campus === 'Main') {
+    // Normalize campus comparison (case-insensitive)
+    const normalizedCampus = (formData.campus || '').trim();
+    if (normalizedCampus.toLowerCase() === 'main') {
       return getUniversityLevelOffices();
     }
     return [];
@@ -775,15 +860,17 @@ const EditUser = () => {
                       name="office"
                       value={formData.office}
                       onChange={handleChange}
-                      disabled={formData.campus !== 'Main' || !!formData.universityLevelOffice}
+                      disabled={!formData.campus || !!formData.universityLevelOffice}
                       className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-transparent transition-all bg-white disabled:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-500 text-gray-900"
                     >
                       <option value="">
-                        {formData.campus !== 'Main' 
-                          ? 'Not applicable' 
+                        {!formData.campus
+                          ? 'Select Campus first'
                           : formData.universityLevelOffice 
                             ? 'Not applicable with University-Level Office' 
-                            : 'Select Office'}
+                            : getOfficeOptions().length === 0
+                              ? 'No offices available for this campus'
+                              : 'Select Office'}
                       </option>
                       {getOfficeOptions().map((office) => (
                         <option key={office} value={office}>
@@ -833,15 +920,17 @@ const EditUser = () => {
                       name="universityLevelOffice"
                       value={formData.universityLevelOffice}
                       onChange={handleChange}
-                      disabled={formData.campus !== 'Main' || (!!formData.office && !!formData.unit)}
+                      disabled={(formData.campus || '').trim().toLowerCase() !== 'main' || (!!formData.office && !!formData.unit)}
                       className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-transparent transition-all bg-white disabled:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-500 text-gray-900"
                     >
                       <option value="">
-                        {formData.campus !== 'Main' 
-                          ? 'Not applicable' 
+                        {(formData.campus || '').trim().toLowerCase() !== 'main'
+                          ? 'Only available for Main campus' 
                           : (formData.office && formData.unit)
                             ? 'Not applicable with Office/Unit'
-                            : 'Select University-Level Office'}
+                            : getUniversityLevelOfficeOptions().length === 0
+                              ? 'No university-level offices available'
+                              : 'Select University-Level Office'}
                       </option>
                       {getUniversityLevelOfficeOptions().map((office) => (
                         <option key={office} value={office}>

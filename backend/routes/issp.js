@@ -2024,6 +2024,24 @@ router.get('/', auth, async (req, res) => {
       await issp.save();
     }
     
+    // Always include acceptingEntries from admin's ISSP for all users
+    // This allows unit users to see which year cycles are accepting entries
+    if (user.role !== 'admin') {
+      try {
+        const adminUser = await User.findOne({ role: 'admin' });
+        if (adminUser) {
+          const adminISSP = await ISSP.findOne({ userId: adminUser._id });
+          if (adminISSP && adminISSP.acceptingEntries) {
+            // Add acceptingEntries from admin's ISSP to the response
+            issp.acceptingEntries = adminISSP.acceptingEntries;
+          }
+        }
+      } catch (adminError) {
+        console.error('Error fetching admin ISSP for accepting entries:', adminError);
+        // Don't fail the request if we can't get admin's acceptingEntries
+      }
+    }
+    
     res.json(issp);
   } catch (error) {
     console.error('Error fetching ISSP:', error);
@@ -3564,6 +3582,1379 @@ router.get('/generate', auth, async (req, res) => {
     console.error('Error generating ISSP PDF:', error);
     if (!res.headersSent) {
       res.status(500).json({ message: 'Error generating ISSP PDF', error: error.message });
+    }
+  }
+});
+
+// Generate ISSP report as Microsoft Word (.docx)
+router.get('/generate-word', auth, async (req, res) => {
+  try {
+    console.log('[Word Generation] Starting Word generation...');
+    const { userId: queryUserId, yearCycle } = req.query;
+    const selectedYearCycle = yearCycle || '2024-2027';
+
+    let targetUser;
+    const yearCycleYears = getYearsFromCycle(selectedYearCycle);
+
+    if (queryUserId) {
+      // Allow admin, president, or Executive roles to generate ISSP for other users
+      if (!(req.user.role === 'admin' || req.user.role === 'president' || req.user.role === 'Executive')) {
+        return res.status(403).json({ message: 'Not authorized to generate ISSP for another user' });
+      }
+
+      if (!mongoose.Types.ObjectId.isValid(queryUserId)) {
+        return res.status(400).json({ message: 'Invalid user identifier' });
+      }
+
+      targetUser = await User.findById(queryUserId);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    } else {
+      targetUser = await User.findById(req.user.id);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    }
+
+    const issp = await getISSPForUser(targetUser);
+    if (!issp) {
+      return res.status(404).json({ message: 'ISSP data not found' });
+    }
+
+    const organizationalProfile = issp.organizationalProfile || {};
+    const informationSystemsStrategy = issp.informationSystemsStrategy || {};
+    const resourceRequirements = issp.resourceRequirements || {};
+    const detailedProjects = issp.detailedIctProjects || {};
+    const developmentProgram = issp.developmentInvestmentProgram || {};
+
+    const formatDocValue = (value) => {
+      const formatted = formatValue(value);
+      return formatted === 'N/A' ? '' : formatted;
+    };
+
+    const asString = (value) => {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'string') return value;
+      return formatDocValue(value);
+    };
+
+    const makeKeyValueTable = (rows = []) => {
+      // rows: [{ label, value }]
+      const header = new TableRow({
+        children: [
+          new TableCell({ children: [new Paragraph({ text: 'Field', heading: HeadingLevel.HEADING_3 })] }),
+          new TableCell({ children: [new Paragraph({ text: 'Value', heading: HeadingLevel.HEADING_3 })] })
+        ]
+      });
+
+      const body = rows.map((r) => new TableRow({
+        children: [
+          new TableCell({ children: [new Paragraph({ text: asString(r.label) })] }),
+          new TableCell({ children: [new Paragraph({ text: asString(r.value) })] })
+        ]
+      }));
+
+      return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [header, ...body]
+      });
+    };
+
+    const makeSimpleTable = (columns = [], rows = []) => {
+      // columns: [{ key, label }]
+      const headerRow = new TableRow({
+        children: columns.map((c) => new TableCell({
+          children: [new Paragraph({ text: c.label })]
+        }))
+      });
+
+      const bodyRows = rows.map((row) => new TableRow({
+        children: columns.map((c) => new TableCell({
+          children: [new Paragraph({ text: formatDocValue(row?.[c.key]) || '' })]
+        }))
+      }));
+
+      return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [headerRow, ...bodyRows]
+      });
+    };
+
+    const makeParagraph = (text, opts = {}) =>
+      new Paragraph({
+        text: asString(text),
+        heading: opts.heading || undefined
+      });
+
+    const makeSectionTitle = (text) =>
+      new Paragraph({
+        text: asString(text),
+        heading: HeadingLevel.HEADING_1,
+        spacing: { after: 200 }
+      });
+
+    const makeSubSectionTitle = (text) =>
+      new Paragraph({
+        text: asString(text),
+        heading: HeadingLevel.HEADING_2,
+        spacing: { after: 150 }
+      });
+
+    const children = [
+      makeParagraph(`ISSP Report`, { heading: HeadingLevel.TITLE }),
+      makeParagraph(`Year Cycle: ${selectedYearCycle}`, { heading: HeadingLevel.HEADING_2 }),
+      makeParagraph(`Generated for: ${targetUser?.username || targetUser?.email || ''}`),
+      new Paragraph({ text: '', pageBreakBefore: true })
+    ];
+
+    // ---- PART I
+    children.push(makeSectionTitle('PART I. ORGANIZATIONAL PROFILE'));
+
+    // A.1 Mandate (bullets)
+    children.push(makeSubSectionTitle('A. DEPARTMENT/AGENCY VISION / MISSION STATEMENT'));
+    children.push(makeParagraph('A.1. Mandate', { heading: HeadingLevel.HEADING_3 }));
+    children.push(new Paragraph({ text: `Legal Basis: ${asString(organizationalProfile.pageA?.mandate)}` , bullet: { level: 0 }}));
+    children.push(new Paragraph({ text: `Functions: ${asString(organizationalProfile.pageA?.functions)}` , bullet: { level: 0 }}));
+    children.push(makeParagraph('A.2. Vision Statement', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeParagraph(asString(organizationalProfile.pageA?.visionStatement)));
+    children.push(makeParagraph('A.3. Mission Statement', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeParagraph(asString(organizationalProfile.pageA?.missionStatement)));
+    children.push(makeParagraph('A.4. Major Final Outputs', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeParagraph(asString(organizationalProfile.pageA?.majorFinalOutput)));
+
+    // Force page break similar to PDF
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART I. ORGANIZATIONAL PROFILE'));
+
+    // B. Department/Agency profile
+    children.push(makeSubSectionTitle('B. DEPARTMENT/AGENCY PROFILE'));
+    const pageBOrg = organizationalProfile.pageB || {};
+    children.push(makeParagraph('B.1. Name of Designated IS Planner', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeKeyValueTable([
+      { label: 'Plantilla Position', value: pageBOrg.plantillaPosition },
+      { label: 'Organizational Unit', value: pageBOrg.organizationalUnit },
+      { label: 'E-mail Address', value: pageBOrg.emailAddress },
+      { label: 'Contact Number/s', value: pageBOrg.contactNumbers }
+    ]));
+
+    children.push(makeParagraph('B.2. Current Annual ICT Budget', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeKeyValueTable([
+      { label: 'Annual ICT Budget', value: pageBOrg.annualIctBudget },
+      { label: 'Other Sources of Funds', value: pageBOrg.otherFundSources }
+    ]));
+
+    children.push(makeParagraph('B.3. Organizational Structure', { heading: HeadingLevel.HEADING_3 }));
+    children.push(makeKeyValueTable([
+      { label: 'Total No. of Employees', value: pageBOrg.totalEmployees },
+      { label: 'No. of Regional/Extension Offices (if any)', value: pageBOrg.regionalOffices },
+      { label: 'No. of Provincial Offices (if any)', value: pageBOrg.provincialOffices },
+      { label: 'No. of Other Offices (e.g. District, Field, etc.)', value: pageBOrg.otherOffices }
+    ]));
+
+    // TABLE B-1
+    children.push(makeParagraph('TABLE B-1 (FOR DEPARTMENT-WIDE ORGANIZATIONS ONLY)', { heading: HeadingLevel.HEADING_3 }));
+    const pageCOrg = organizationalProfile.pageC || {};
+    const tableDataB1 = Array.isArray(pageCOrg.tableData) ? pageCOrg.tableData : [];
+    if (tableDataB1.length > 0) {
+      const columns = Object.keys(tableDataB1[0]).map((k) => ({ key: k, label: k }));
+      children.push(makeSimpleTable(columns, tableDataB1));
+    } else {
+      children.push(makeParagraph('No TABLE B-1 data available.'));
+    }
+
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART I. ORGANIZATIONAL PROFILE'));
+
+    // C. Functional interface chart
+    children.push(makeSubSectionTitle('C. THE DEPARTMENT/AGENCY AND ITS ENVIRONMENT (FUNCTIONAL INTERFACE CHART)'));
+    const functionalInterfaceChartUrl = organizationalProfile.pageC?.functionalInterfaceChartUrl || '';
+    children.push(makeParagraph(functionalInterfaceChartUrl ? `Functional Interface Chart: ${functionalInterfaceChartUrl}` : 'No Functional Interface Chart uploaded.'));
+
+    // D. Strategic challenges
+    children.push(makeSubSectionTitle('D. PRESENT ICT SITUATION (STRATEGIC CHALLENGES)'));
+    children.push(makeParagraph(organizationalProfile.pageD?.strategicChallenges || 'No strategic challenges entered.'));
+
+    // E. Strategic concerns
+    children.push(makeSubSectionTitle('E. STRATEGIC CONCERNS FOR ICT USE'));
+    const pageERows = parseStrategicConcerns(organizationalProfile.pageE?.strategicConcerns);
+    if (pageERows && pageERows.length > 0) {
+      children.push(makeSimpleTable(
+        [
+          { key: 'majorFinalOutput', label: 'MAJOR FINAL OUTPUT / ORGANIZATIONAL OUTCOME' },
+          { key: 'criticalSystems', label: 'CRITICAL MANAGEMENT / OPERATING / BUSINESS SYSTEMS' },
+          { key: 'problems', label: 'PROBLEMS' },
+          { key: 'intendedUse', label: 'INTENDED USE OF ICT' }
+        ],
+        pageERows
+      ));
+    } else {
+      children.push(makeParagraph('No strategic concerns data provided.'));
+    }
+
+    // ---- PART II
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART II. INFORMATION SYSTEMS STRATEGY'));
+
+    // A. Diagram
+    children.push(makeSubSectionTitle('A. CONCEPTUAL FRAMEWORK FOR INFORMATION SYSTEMS (DIAGRAM OF IS INTERFACE)'));
+    const pageAIS = informationSystemsStrategy.pageA || {};
+    children.push(makeParagraph(pageAIS.diagramUrl ? `Diagram URL: ${pageAIS.diagramUrl}` : 'No diagram uploaded.'));
+
+    // B. Detailed description
+    children.push(makeSubSectionTitle('B. DETAILED DESCRIPTION OF PROPOSED INFORMATION SYSTEMS'));
+    const pageBIS = informationSystemsStrategy.pageB || {};
+    children.push(makeKeyValueTable([
+      { label: 'NAME OF INFORMATION SYSTEM / SUB-SYSTEM', value: pageBIS.name },
+      { label: 'DESCRIPTION', value: pageBIS.description },
+      { label: 'STATUS', value: pageBIS.status },
+      { label: 'DEVELOPMENT STRATEGY', value: pageBIS.developmentStrategy },
+      { label: 'COMPUTING SCHEME', value: pageBIS.computingScheme },
+      { label: 'USERS', value: [pageBIS.usersInternal ? `INTERNAL: ${pageBIS.usersInternal}` : '', pageBIS.usersExternal ? `EXTERNAL: ${pageBIS.usersExternal}` : ''].filter(Boolean).join('\n') },
+      { label: 'SYSTEM OWNER', value: pageBIS.systemOwner }
+    ]));
+
+    // C. Databases required
+    children.push(makeSubSectionTitle('C. DATABASES REQUIRED'));
+    const pageCIS = informationSystemsStrategy.pageC || {};
+    children.push(makeKeyValueTable([
+      { label: 'NAME OF DATABASE', value: pageCIS.databaseName },
+      { label: 'GENERAL CONTENTS / DESCRIPTION', value: pageCIS.generalContents },
+      { label: 'STATUS', value: pageCIS.status },
+      { label: 'INFORMATION SYSTEMS SERVED', value: pageCIS.informationSystemsServed },
+      { label: 'DATA ARCHIVING / STORAGE MEDIA', value: pageCIS.dataArchiving },
+      { label: 'USERS', value: [pageCIS.usersInternal ? `INTERNAL: ${pageCIS.usersInternal}` : '', pageCIS.usersExternal ? `EXTERNAL: ${pageCIS.usersExternal}` : ''].filter(Boolean).join('\n') },
+      { label: 'SYSTEM OWNER', value: pageCIS.owner }
+    ]));
+
+    // D. Network layout
+    children.push(makeSubSectionTitle('D. NETWORK LAYOUT'));
+    const pageDIS = informationSystemsStrategy.pageD || {};
+    children.push(makeParagraph(pageDIS.networkLayoutUrl ? `Network Layout URL: ${pageDIS.networkLayoutUrl}` : 'No network layout uploaded.'));
+
+    // ---- PART III
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART III. DETAILED DESCRIPTION OF ICT PROJECTS'));
+
+    // A. Internal projects
+    children.push(makeSubSectionTitle('A. INTERNAL ICT PROJECTS'));
+    const internalProject = detailedProjects.internal || {};
+    children.push(makeSimpleTable(
+      [
+        { key: 'number', label: 'No.' },
+        { key: 'label', label: 'LABEL' },
+        { key: 'value', label: 'VALUE' }
+      ],
+      [
+        { number: '1', label: 'NAME/TITLE', value: [internalProject.nameTitle, internalProject.rank ? `RANK: ${internalProject.rank}` : ''].filter(Boolean).join('\n') },
+        { number: '2', label: 'OBJECTIVES', value: internalProject.objectives },
+        { number: '3', label: 'DURATION', value: internalProject.duration },
+        { number: '4', label: 'DELIVERABLES', value: internalProject.deliverables }
+      ]
+    ));
+
+    // B. Cross-agency projects
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART III. DETAILED DESCRIPTION OF ICT PROJECTS'));
+    children.push(makeSubSectionTitle('B. CROSS-AGENCY ICT PROJECTS'));
+    const crossAgencyProject = detailedProjects.crossAgency || {};
+    children.push(makeSimpleTable(
+      [
+        { key: 'number', label: 'No.' },
+        { key: 'label', label: 'LABEL' },
+        { key: 'value', label: 'VALUE' }
+      ],
+      [
+        { number: '1', label: 'NAME/TITLE', value: crossAgencyProject.nameTitle },
+        { number: '2', label: 'OBJECTIVES', value: crossAgencyProject.objectives },
+        { number: '3', label: 'DURATION', value: crossAgencyProject.duration },
+        { number: '4', label: 'DELIVERABLES', value: crossAgencyProject.deliverables },
+        { number: '5', label: 'LEAD AGENCY', value: crossAgencyProject.leadAgency },
+        { number: '6', label: 'IMPLEMENTING AGENCIES', value: crossAgencyProject.implementingAgencies }
+      ]
+    ));
+
+    // C. Performance measurement framework
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART III. DETAILED DESCRIPTION OF ICT PROJECTS'));
+    children.push(makeSubSectionTitle('C. PERFORMANCE MEASUREMENT FRAMEWORK'));
+    const performanceEntries = Array.isArray(detailedProjects.performance?.frameworkData)
+      ? detailedProjects.performance.frameworkData
+      : [];
+    const perfObj = performanceFrameworkEntriesToObject(performanceEntries);
+    const cleanValue = (value) => {
+      const formatted = formatValue(value);
+      return formatted === 'N/A' ? '' : formatted;
+    };
+    const joinValues = (...values) => values
+      .map(cleanValue)
+      .filter((p) => p && p.trim() !== '')
+      .join('\n\n');
+
+    children.push(makeSimpleTable(
+      [
+        { key: 'col1', label: 'Hierarchy of targeted results₁' },
+        { key: 'col2', label: 'Objectively verifiable indicators (OVI)₂' },
+        { key: 'col3', label: 'Baseline data₃' },
+        { key: 'col4', label: 'Targets₄' },
+        { key: 'col5', label: 'Data collection methods₅' },
+        { key: 'col6', label: 'Responsibility to collect data₆' }
+      ],
+      [
+        {
+          col1: cleanValue(perfObj.perf_g1_results),
+          col2: joinValues(perfObj.perf_g1_indicators_a, perfObj.perf_g1_indicators_b),
+          col3: joinValues(perfObj.perf_g1_baseline_a, perfObj.perf_g1_baseline_b),
+          col4: joinValues(perfObj.perf_g1_targets_a, perfObj.perf_g1_targets_b),
+          col5: cleanValue(perfObj.perf_g1_methods),
+          col6: cleanValue(perfObj.perf_g1_responsibility)
+        },
+        {
+          col1: joinValues(perfObj.perf_g2_results, perfObj.perf_g3_results),
+          col2: joinValues(
+            perfObj.perf_g2_indicators_a,
+            perfObj.perf_g2_indicators_b,
+            perfObj.perf_g3_indicators_a,
+            perfObj.perf_g3_indicators_b,
+            perfObj.perf_g3_indicators_c
+          ),
+          col3: joinValues(
+            perfObj.perf_g2_baseline_a,
+            perfObj.perf_g2_baseline_b,
+            perfObj.perf_g3_baseline_a,
+            perfObj.perf_g3_baseline_b,
+            perfObj.perf_g3_baseline_c
+          ),
+          col4: joinValues(
+            perfObj.perf_g2_targets_a,
+            perfObj.perf_g2_targets_b,
+            perfObj.perf_g3_targets_a,
+            perfObj.perf_g3_targets_b,
+            perfObj.perf_g3_targets_c
+          ),
+          col5: joinValues(perfObj.perf_g2_methods, perfObj.perf_g3_methods),
+          col6: joinValues(perfObj.perf_g2_responsibility, perfObj.perf_g3_responsibility)
+        }
+      ]
+    ));
+
+    // ---- PART IV
+    // Deployment table uses submitted requests for the selected cycle (same approach as PDF)
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART IV. RESOURCE REQUIREMENTS'));
+    children.push(makeSubSectionTitle('A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES'));
+
+    // Fetch all submitted requests for the selected year cycle
+    const unitRequests = await Request.find({
+      status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] },
+      year: selectedYearCycle
+    })
+      .populate('userId', 'username email unit campus')
+      .sort({ createdAt: -1 });
+
+    let deploymentData = [];
+    if (unitRequests.length > 0 && yearCycleYears.length > 0) {
+      const cycleYears = yearCycleYears;
+      const itemGroups = {};
+
+      unitRequests.forEach((request) => {
+        const userCampus = request.userId?.campus || '';
+        const normalizedCampus = (!userCampus || userCampus.trim() === '' || userCampus.trim().toLowerCase() === 'main')
+          ? 'DOrSU Main Campus'
+          : userCampus.trim();
+
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach((item) => {
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+              const itemName = item.item.trim().toLowerCase();
+              if (!itemGroups[itemName]) itemGroups[itemName] = {};
+              if (!itemGroups[itemName][normalizedCampus]) {
+                itemGroups[itemName][normalizedCampus] = {};
+                cycleYears.forEach((year) => {
+                  itemGroups[itemName][normalizedCampus][year] = 0;
+                });
+              }
+
+              const quantityByYear = item.quantityByYear || {};
+              let hasQuantityData = false;
+
+              cycleYears.forEach((year) => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                if (qty > 0) hasQuantityData = true;
+                itemGroups[itemName][normalizedCampus][year] += qty;
+              });
+
+              if (!hasQuantityData && Object.keys(quantityByYear).length === 0 && item.quantity > 0) {
+                const totalQty = Number(item.quantity) || 0;
+                const qtyPerYear = Math.ceil(totalQty / cycleYears.length);
+                cycleYears.forEach((year, index) => {
+                  const yearQty = (index === 0 && totalQty % cycleYears.length !== 0)
+                    ? qtyPerYear + (totalQty % cycleYears.length)
+                    : qtyPerYear;
+                  itemGroups[itemName][normalizedCampus][year] += yearQty;
+                });
+              }
+            }
+          });
+        }
+      });
+
+      const itemsFromRequests = [];
+      const sortedItemNames = Object.keys(itemGroups).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+      sortedItemNames.forEach((itemNameKey) => {
+        const campusData = itemGroups[itemNameKey];
+        const campusesWithData = Object.keys(campusData).filter((campus) => cycleYears.some((year) => campusData[campus][year] > 0));
+
+        campusesWithData.sort((a, b) => {
+          if (a === 'DOrSU Main Campus') return -1;
+          if (b === 'DOrSU Main Campus') return 1;
+          return a.localeCompare(b);
+        });
+
+        const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+        itemsFromRequests.push({
+          item: displayItemName,
+          office: '',
+          year1: '',
+          year2: '',
+          year3: ''
+        });
+
+        const itemTotal = {};
+        cycleYears.forEach((year) => {
+          itemTotal[year] = 0;
+        });
+
+        campusesWithData.forEach((campus) => {
+          const yearValues = cycleYears.map((year) => {
+            const qty = campusData[campus][year] || 0;
+            itemTotal[year] += qty;
+            return qty > 0 ? qty.toString() : '';
+          });
+
+          itemsFromRequests.push({
+            item: '',
+            office: campus,
+            year1: yearValues[0] || '',
+            year2: yearValues[1] || '',
+            year3: yearValues[2] || ''
+          });
+        });
+
+        const itemTotalValues = cycleYears.map((year) => {
+          const total = itemTotal[year] || 0;
+          return total > 0 ? total.toString() : '';
+        });
+
+        itemsFromRequests.push({
+          item: 'TOTAL',
+          office: '',
+          year1: itemTotalValues[0] || '',
+          year2: itemTotalValues[1] || '',
+          year3: itemTotalValues[2] || '',
+          isTotalRow: true
+        });
+      });
+
+      deploymentData = itemsFromRequests;
+    }
+
+    if (deploymentData.length > 0) {
+      children.push(makeSimpleTable(
+        [
+          { key: 'item', label: 'ITEM' },
+          { key: 'office', label: 'CAMPUS/OFFICE' },
+          { key: 'year1', label: yearCycleYears[0] ? `YEAR ${yearCycleYears[0]}` : 'YEAR 1' },
+          { key: 'year2', label: yearCycleYears[1] ? `YEAR ${yearCycleYears[1]}` : 'YEAR 2' },
+          { key: 'year3', label: yearCycleYears[2] ? `YEAR ${yearCycleYears[2]}` : 'YEAR 3' }
+        ],
+        deploymentData
+      ));
+    } else {
+      children.push(makeParagraph('Deployment table: no submitted request data found for this cycle.'));
+    }
+
+    // B. ICT Organizational Structure diagrams (URL/text)
+    children.push(makeSubSectionTitle('B. ICT ORGANIZATIONAL STRUCTURE'));
+    children.push(makeParagraph('B.1 EXISTING ICT ORGANIZATIONAL STRUCTURE'));
+    children.push(makeParagraph(resourceRequirements.pageB?.existingStructureUrl || 'No existing structure diagram uploaded.'));
+    children.push(makeParagraph('B.2 PROPOSED ICT ORGANIZATIONAL STRUCTURE'));
+    children.push(makeParagraph(resourceRequirements.pageB?.proposedStructureUrl || 'No proposed structure diagram uploaded.'));
+    children.push(makeParagraph('B.3 PLACEMENT OF THE PROPOSED ICT ORGANIZATIONAL STRUCTURE'));
+    children.push(makeParagraph(resourceRequirements.pageC?.placementStructureUrl || 'No placement structure diagram uploaded.'));
+
+    // ---- PART V
+    children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+    children.push(makeSectionTitle('PART V. DEVELOPMENT AND INVESTMENT PROGRAM'));
+
+    // A. ICT Projects Implementation Schedule
+    children.push(makeSubSectionTitle('A. ICT PROJECTS IMPLEMENTATION SCHEDULE'));
+    children.push(makeSimpleTable(
+      [
+        { key: 'name', label: 'NAME OF ICT PROJECT/S' },
+        { key: 'year1', label: 'YEAR 1' },
+        { key: 'year2', label: 'YEAR 2' },
+        { key: 'year3', label: 'YEAR 3' }
+      ],
+      Array.isArray(developmentProgram.pageA?.projectSchedule) ? developmentProgram.pageA.projectSchedule : []
+    ));
+
+    // B. IS Implementation Schedule
+    children.push(makeSubSectionTitle('B. INFORMATION SYSTEMS (IS) IMPLEMENTATION SCHEDULE'));
+    children.push(makeSimpleTable(
+      [
+        { key: 'name', label: 'NAME OF INFORMATION SYSTEMS / SUB-SYSTEMS OR MODULES' },
+        { key: 'year1', label: 'YEAR 1' },
+        { key: 'year2', label: 'YEAR 2' },
+        { key: 'year3', label: 'YEAR 3' }
+      ],
+      Array.isArray(developmentProgram.pageA?.isSchedule) ? developmentProgram.pageA.isSchedule : []
+    ));
+
+    // C. Summary of Investments
+    children.push(makeSubSectionTitle('C. SUMMARY OF INVESTMENTS'));
+    let summaryInvestmentsData = [];
+    if (unitRequests && unitRequests.length > 0) {
+      const cycleYears = yearCycleYears.length > 0 ? yearCycleYears : getYearsFromCycle(selectedYearCycle);
+      const itemGroups = {};
+
+      unitRequests.forEach((request) => {
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach((item) => {
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+              const itemName = item.item.trim().toLowerCase();
+              if (!itemGroups[itemName]) {
+                itemGroups[itemName] = { quantities: {}, costs: {} };
+                cycleYears.forEach((year) => {
+                  itemGroups[itemName].quantities[year] = 0;
+                  itemGroups[itemName].costs[year] = 0;
+                });
+              }
+
+              const quantityByYear = item.quantityByYear || {};
+              const adminPrice = Number(item.price) || 0;
+
+              cycleYears.forEach((year) => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                itemGroups[itemName].quantities[year] += qty;
+                itemGroups[itemName].costs[year] += qty * adminPrice;
+              });
+            }
+          });
+        }
+      });
+
+      const summaryRows = [];
+      const sortedItemNames = Object.keys(itemGroups).sort();
+
+      sortedItemNames.forEach((itemNameKey) => {
+        const itemData = itemGroups[itemNameKey];
+        const hasQuantities = cycleYears.some((year) => itemData.quantities[year] > 0);
+        if (!hasQuantities) return;
+
+        const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+
+        const year1Qty = itemData.quantities[cycleYears[0]] || 0;
+        const year1Cost = itemData.costs[cycleYears[0]] || 0;
+        const year2Qty = itemData.quantities[cycleYears[1]] || 0;
+        const year2Cost = itemData.costs[cycleYears[1]] || 0;
+        const year3Qty = itemData.quantities[cycleYears[2]] || 0;
+        const year3Cost = itemData.costs[cycleYears[2]] || 0;
+
+        summaryRows.push({
+          item: displayItemName,
+          year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+          year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+          year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+          year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+          year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+          year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+        });
+      });
+
+      let totalYear1Physical = 0;
+      let totalYear1Cost = 0;
+      let totalYear2Physical = 0;
+      let totalYear2Cost = 0;
+      let totalYear3Physical = 0;
+      let totalYear3Cost = 0;
+
+      summaryRows.forEach((row) => {
+        totalYear1Physical += Number(row.year1Physical) || 0;
+        totalYear1Cost += Number(row.year1Cost) || 0;
+        totalYear2Physical += Number(row.year2Physical) || 0;
+        totalYear2Cost += Number(row.year2Cost) || 0;
+        totalYear3Physical += Number(row.year3Physical) || 0;
+        totalYear3Cost += Number(row.year3Cost) || 0;
+      });
+
+      summaryRows.push({
+        item: 'TOTAL',
+        year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+        year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+        year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+        year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+        year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+        year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : '',
+        isTotalRow: true
+      });
+
+      summaryInvestmentsData = summaryRows;
+    } else if (developmentProgram.pageB?.summaryInvestments && developmentProgram.pageB.summaryInvestments.length > 0) {
+      summaryInvestmentsData = developmentProgram.pageB.summaryInvestments;
+    }
+
+    if (summaryInvestmentsData && summaryInvestmentsData.length > 0) {
+      children.push(makeSimpleTable(
+        [
+          { key: 'item', label: 'ITEM' },
+          { key: 'year1Physical', label: yearCycleYears[0] ? `YEAR ${yearCycleYears[0]} PHYSICAL` : 'YEAR 1 PHYSICAL' },
+          { key: 'year1Cost', label: yearCycleYears[0] ? `YEAR ${yearCycleYears[0]} COST` : 'YEAR 1 COST' },
+          { key: 'year2Physical', label: yearCycleYears[1] ? `YEAR ${yearCycleYears[1]} PHYSICAL` : 'YEAR 2 PHYSICAL' },
+          { key: 'year2Cost', label: yearCycleYears[1] ? `YEAR ${yearCycleYears[1]} COST` : 'YEAR 2 COST' },
+          { key: 'year3Physical', label: yearCycleYears[2] ? `YEAR ${yearCycleYears[2]} PHYSICAL` : 'YEAR 3 PHYSICAL' },
+          { key: 'year3Cost', label: yearCycleYears[2] ? `YEAR ${yearCycleYears[2]} COST` : 'YEAR 3 COST' }
+        ],
+        summaryInvestmentsData
+      ));
+    } else {
+      children.push(makeParagraph('No summary investments data available.'));
+    }
+
+    // D. Year 1 Cost Breakdown
+    children.push(makeSubSectionTitle('D. YEAR 1 COST BREAKDOWN'));
+    const costColumns = [
+      { key: 'detailedItem', label: 'DETAILED COST ITEMS' },
+      { key: 'officeProductivity', label: 'OFFICE PRODUCTIVITY' },
+      { key: 'internalProject1', label: 'INTERNAL ICT PROJECT 1' },
+      { key: 'internalProject2', label: 'INTERNAL ICT PROJECT 2' },
+      { key: 'crossAgencyProject1', label: 'CROSS-AGENCY PROJECT 1' },
+      { key: 'crossAgencyProject2', label: 'CROSS-AGENCY PROJECT 2' },
+      { key: 'continuingCosts', label: 'CONTINUING COSTS' }
+    ];
+    children.push(makeSimpleTable(
+      costColumns,
+      Array.isArray(developmentProgram.pageC?.costBreakdown) ? developmentProgram.pageC.costBreakdown : []
+    ));
+
+    const doc = new Document({
+      sections: [{ children }]
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    const downloadFileName = queryUserId
+      ? `issp-report-${queryUserId}-${selectedYearCycle}.docx`
+      : `issp-report-${selectedYearCycle}.docx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadFileName}"`);
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error generating ISSP Word:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Error generating ISSP Word', error: error.message });
+    }
+  }
+});
+
+// Generate ISSP report as Microsoft Word (.doc served as HTML)
+router.get('/generate-word-html', auth, async (req, res) => {
+  try {
+    console.log('[Word Generation] Starting Word generation (HTML .doc)...');
+    const { userId: queryUserId, yearCycle } = req.query;
+    const selectedYearCycle = yearCycle || '2024-2027';
+
+    let targetUser;
+    if (queryUserId) {
+      // Allow admin, president, or Executive roles to generate ISSP for other users
+      if (!(req.user.role === 'admin' || req.user.role === 'president' || req.user.role === 'Executive')) {
+        return res.status(403).json({ message: 'Not authorized to generate ISSP for another user' });
+      }
+
+      if (!mongoose.Types.ObjectId.isValid(queryUserId)) {
+        return res.status(400).json({ message: 'Invalid user identifier' });
+      }
+
+      targetUser = await User.findById(queryUserId);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    } else {
+      targetUser = await User.findById(req.user.id);
+      if (!targetUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    }
+
+    const issp = await getISSPForUser(targetUser);
+    if (!issp) {
+      return res.status(404).json({ message: 'ISSP data not found' });
+    }
+
+    const organizationalProfile = issp.organizationalProfile || {};
+    const informationSystemsStrategy = issp.informationSystemsStrategy || {};
+    const resourceRequirements = issp.resourceRequirements || {};
+    const detailedProjects = issp.detailedIctProjects || {};
+    const developmentProgram = issp.developmentInvestmentProgram || {};
+
+    const escapeHtml = (unsafe) =>
+      String(unsafe ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
+    const formatDocValue = (value) => {
+      const formatted = formatValue(value);
+      return formatted === 'N/A' ? '' : formatted;
+    };
+
+    const toHtml = (value) => {
+      const safe = escapeHtml(formatDocValue(value));
+      return safe.replace(/\n/g, '<br/>');
+    };
+
+    const isDataImageUrl = (value) =>
+      typeof value === 'string' && /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value.trim());
+
+    const WORD_LANDSCAPE_IMAGE_WIDTH_PX = 920;
+
+    const renderImageOrUrl = (value, emptyMessage, label = 'Image URL') => {
+      const raw = formatDocValue(value);
+      if (!raw) {
+        return `<p>${emptyMessage}</p>`;
+      }
+
+      const trimmed = String(raw).trim();
+      if (isDataImageUrl(trimmed)) {
+        return `
+          <p class="issp-image-wrap">
+            <img
+              src="${trimmed}"
+              alt="${escapeHtml(label)}"
+              width="${WORD_LANDSCAPE_IMAGE_WIDTH_PX}"
+              style="width:${WORD_LANDSCAPE_IMAGE_WIDTH_PX}px;height:auto;border:1px solid #ccc;display:block;"
+            />
+          </p>
+        `;
+      }
+
+      return `<p>${escapeHtml(label)}: ${toHtml(trimmed)}</p>`;
+    };
+
+    const pageBreak = '<div style="page-break-after:always;"></div>';
+
+    const renderKeyValueTable = (pairs = []) => {
+      const rows = pairs.map(({ label, value }) => (
+        `<tr><td><b>${escapeHtml(label)}</b></td><td>${toHtml(value)}</td></tr>`
+      )).join('');
+
+      return `
+        <table style="border-collapse:collapse;width:100%;">
+          <tr><th style="border:1px solid #000;padding:4px;">Field</th><th style="border:1px solid #000;padding:4px;">Value</th></tr>
+          ${rows}
+        </table>
+      `;
+    };
+
+    const renderSimpleTable = (columns = [], rows = []) => {
+      const header = columns.map((c) => `<th style="border:1px solid #000;padding:4px;">${escapeHtml(c.label)}</th>`).join('');
+      const body = rows.map((row) => {
+        const cells = columns.map((c) => `<td style="border:1px solid #000;padding:4px;">${toHtml(row?.[c.key])}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+      }).join('');
+
+      return `
+        <table style="border-collapse:collapse;width:100%;">
+          <tr>${header}</tr>
+          ${body}
+        </table>
+      `;
+    };
+
+    const renderBulletList = (items = []) => {
+      const safeItems = items
+        .filter((x) => x !== null && x !== undefined && String(x).trim() !== '')
+        .map((x) => `<li>${toHtml(x)}</li>`)
+        .join('');
+      return `<ul>${safeItems}</ul>`;
+    };
+
+    let html = `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ISSP Report</title>
+    <style>
+      @page Section1 {
+        size: 11.69in 8.27in;
+        mso-page-orientation: landscape;
+        margin: 0.5in;
+      }
+      div.Section1 { page: Section1; }
+      body { font-family: Arial, sans-serif; font-size: 12px; }
+      h1 { font-size: 18px; }
+      h2 { font-size: 14px; }
+      h3 { font-size: 12px; }
+      .issp-image-wrap { margin: 6px 0 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="Section1">
+    <h1>ISSP Report</h1>
+    <p><b>Year Cycle:</b> ${escapeHtml(selectedYearCycle)}</p>
+    <p><b>Generated for:</b> ${escapeHtml(targetUser?.username || targetUser?.email || '')}</p>
+    ${pageBreak}
+    `;
+
+    // ---- PART I
+    html += `<h2>PART I. ORGANIZATIONAL PROFILE</h2>`;
+    html += `<h3>A. DEPARTMENT/AGENCY VISION / MISSION STATEMENT</h3>`;
+    html += `<h3>A.1. Mandate</h3>`;
+    html += `<ul>
+      <li><b>Legal Basis:</b> ${toHtml(organizationalProfile.pageA?.mandate)}</li>
+      <li><b>Functions:</b> ${toHtml(organizationalProfile.pageA?.functions)}</li>
+    </ul>`;
+    html += `<h3>A.2. Vision Statement</h3><p>${toHtml(organizationalProfile.pageA?.visionStatement)}</p>`;
+    html += `<h3>A.3. Mission Statement</h3><p>${toHtml(organizationalProfile.pageA?.missionStatement)}</p>`;
+    html += `<h3>A.4. Major Final Outputs</h3><p>${toHtml(organizationalProfile.pageA?.majorFinalOutput)}</p>`;
+    html += `${pageBreak}`;
+
+    // B. Department/Agency profile
+    html += `<h2>PART I. ORGANIZATIONAL PROFILE</h2>`;
+    html += `<h3>B. DEPARTMENT/AGENCY PROFILE</h3>`;
+    const pageBOrg = organizationalProfile.pageB || {};
+    html += `<h3>B.1. Name of Designated IS Planner</h3>${renderKeyValueTable([
+      { label: 'Plantilla Position', value: pageBOrg.plantillaPosition },
+      { label: 'Organizational Unit', value: pageBOrg.organizationalUnit },
+      { label: 'E-mail Address', value: pageBOrg.emailAddress },
+      { label: 'Contact Number/s', value: pageBOrg.contactNumbers }
+    ])}`;
+    html += `<h3>B.2. Current Annual ICT Budget</h3>${renderKeyValueTable([
+      { label: 'Annual ICT Budget', value: pageBOrg.annualIctBudget },
+      { label: 'Other Sources of Funds', value: pageBOrg.otherFundSources }
+    ])}`;
+    html += `<h3>B.3. Organizational Structure</h3>${renderKeyValueTable([
+      { label: 'Total No. of Employees', value: pageBOrg.totalEmployees },
+      { label: 'No. of Regional/Extension Offices (if any)', value: pageBOrg.regionalOffices },
+      { label: 'No. of Provincial Offices (if any)', value: pageBOrg.provincialOffices },
+      { label: 'No. of Other Offices (e.g. District, Field, etc.)', value: pageBOrg.otherOffices }
+    ])}`;
+
+    // TABLE B-1
+    const pageCOrg = organizationalProfile.pageC || {};
+    const tableDataB1 = Array.isArray(pageCOrg.tableData) ? pageCOrg.tableData : [];
+    html += `<h3>TABLE B-1 (FOR DEPARTMENT-WIDE ORGANIZATIONS ONLY)</h3>`;
+    if (tableDataB1.length > 0) {
+      const columns = Object.keys(tableDataB1[0]).map((k) => ({ key: k, label: k }));
+      html += renderSimpleTable(columns, tableDataB1);
+    } else {
+      html += `<p>No TABLE B-1 data available.</p>`;
+    }
+    html += `${pageBreak}`;
+
+    // C. Functional interface chart
+    html += `<h3>C. THE DEPARTMENT/AGENCY AND ITS ENVIRONMENT (FUNCTIONAL INTERFACE CHART)</h3>`;
+    html += renderImageOrUrl(
+      pageCOrg.functionalInterfaceChartUrl,
+      'No Functional Interface Chart uploaded.',
+      'Functional Interface Chart URL'
+    );
+
+    // D. Strategic challenges
+    html += `<h3>D. PRESENT ICT SITUATION (STRATEGIC CHALLENGES)</h3>`;
+    html += `<p>${toHtml(organizationalProfile.pageD?.strategicChallenges || 'No strategic challenges entered.')}</p>`;
+
+    // E. Strategic concerns
+    html += `<h3>E. STRATEGIC CONCERNS FOR ICT USE</h3>`;
+    const pageERows = parseStrategicConcerns(organizationalProfile.pageE?.strategicConcerns);
+    if (Array.isArray(pageERows) && pageERows.length > 0) {
+      html += renderSimpleTable(
+        [
+          { key: 'majorFinalOutput', label: 'MAJOR FINAL OUTPUT / ORGANIZATIONAL OUTCOME' },
+          { key: 'criticalSystems', label: 'CRITICAL MANAGEMENT / OPERATING / BUSINESS SYSTEMS' },
+          { key: 'problems', label: 'PROBLEMS' },
+          { key: 'intendedUse', label: 'INTENDED USE OF ICT' }
+        ],
+        pageERows
+      );
+    } else {
+      html += `<p>No strategic concerns data provided.</p>`;
+    }
+
+    // ---- PART II
+    html += `${pageBreak}`;
+    html += `<h2>PART II. INFORMATION SYSTEMS STRATEGY</h2>`;
+
+    // A. Diagram
+    const pageAIS = informationSystemsStrategy.pageA || {};
+    html += `<h3>A. CONCEPTUAL FRAMEWORK FOR INFORMATION SYSTEMS (DIAGRAM OF IS INTERFACE)</h3>`;
+    html += renderImageOrUrl(pageAIS.diagramUrl, 'No diagram uploaded.', 'Diagram URL');
+
+    // B. Detailed description
+    const pageBIS = informationSystemsStrategy.pageB || {};
+    html += `<h3>B. DETAILED DESCRIPTION OF PROPOSED INFORMATION SYSTEMS</h3>`;
+    html += renderKeyValueTable([
+      { label: 'NAME OF INFORMATION SYSTEM / SUB-SYSTEM', value: pageBIS.name },
+      { label: 'DESCRIPTION', value: pageBIS.description },
+      { label: 'STATUS', value: pageBIS.status },
+      { label: 'DEVELOPMENT STRATEGY', value: pageBIS.developmentStrategy },
+      { label: 'COMPUTING SCHEME', value: pageBIS.computingScheme },
+      {
+        label: 'USERS',
+        value: [pageBIS.usersInternal ? `INTERNAL: ${pageBIS.usersInternal}` : '', pageBIS.usersExternal ? `EXTERNAL: ${pageBIS.usersExternal}` : ''].filter(Boolean)
+      },
+      { label: 'SYSTEM OWNER', value: pageBIS.systemOwner }
+    ]);
+
+    // C. Databases required
+    const pageCIS = informationSystemsStrategy.pageC || {};
+    html += `<h3>C. DATABASES REQUIRED</h3>`;
+    html += renderKeyValueTable([
+      { label: 'NAME OF DATABASE', value: pageCIS.databaseName },
+      { label: 'GENERAL CONTENTS / DESCRIPTION', value: pageCIS.generalContents },
+      { label: 'STATUS', value: pageCIS.status },
+      { label: 'INFORMATION SYSTEMS SERVED', value: pageCIS.informationSystemsServed },
+      { label: 'DATA ARCHIVING / STORAGE MEDIA', value: pageCIS.dataArchiving },
+      {
+        label: 'USERS',
+        value: [pageCIS.usersInternal ? `INTERNAL: ${pageCIS.usersInternal}` : '', pageCIS.usersExternal ? `EXTERNAL: ${pageCIS.usersExternal}` : ''].filter(Boolean)
+      },
+      { label: 'SYSTEM OWNER', value: pageCIS.owner }
+    ]);
+
+    // D. Network layout
+    const pageDIS = informationSystemsStrategy.pageD || {};
+    html += `<h3>D. NETWORK LAYOUT</h3>`;
+    html += renderImageOrUrl(pageDIS.networkLayoutUrl, 'No network layout uploaded.', 'Network Layout URL');
+
+    // ---- PART III
+    html += `${pageBreak}`;
+    html += `<h2>PART III. DETAILED DESCRIPTION OF ICT PROJECTS</h2>`;
+
+    const internalProject = detailedProjects.internal || {};
+    html += `<h3>A. INTERNAL ICT PROJECTS</h3>`;
+    html += renderSimpleTable(
+      [
+        { key: 'number', label: 'No.' },
+        { key: 'label', label: 'LABEL' },
+        { key: 'value', label: 'VALUE' }
+      ],
+      [
+        { number: '1', label: 'NAME/TITLE', value: [internalProject.nameTitle, internalProject.rank ? `RANK: ${internalProject.rank}` : ''].filter(Boolean).join('\n') },
+        { number: '2', label: 'OBJECTIVES', value: internalProject.objectives },
+        { number: '3', label: 'DURATION', value: internalProject.duration },
+        { number: '4', label: 'DELIVERABLES', value: internalProject.deliverables }
+      ]
+    );
+
+    const crossAgencyProject = detailedProjects.crossAgency || {};
+    html += `${pageBreak}`;
+    html += `<h3>B. CROSS-AGENCY ICT PROJECTS</h3>`;
+    html += renderSimpleTable(
+      [
+        { key: 'number', label: 'No.' },
+        { key: 'label', label: 'LABEL' },
+        { key: 'value', label: 'VALUE' }
+      ],
+      [
+        { number: '1', label: 'NAME/TITLE', value: crossAgencyProject.nameTitle },
+        { number: '2', label: 'OBJECTIVES', value: crossAgencyProject.objectives },
+        { number: '3', label: 'DURATION', value: crossAgencyProject.duration },
+        { number: '4', label: 'DELIVERABLES', value: crossAgencyProject.deliverables },
+        { number: '5', label: 'LEAD AGENCY', value: crossAgencyProject.leadAgency },
+        { number: '6', label: 'IMPLEMENTING AGENCIES', value: crossAgencyProject.implementingAgencies }
+      ]
+    );
+
+    // Performance measurement framework
+    const performanceEntries = Array.isArray(detailedProjects.performance?.frameworkData)
+      ? detailedProjects.performance.frameworkData
+      : [];
+    const perfObj = performanceFrameworkEntriesToObject(performanceEntries);
+    const cleanValue = (value) => {
+      const formatted = formatValue(value);
+      return formatted === 'N/A' ? '' : formatted;
+    };
+    const joinValues = (...values) => values
+      .map(cleanValue)
+      .filter((p) => p && p.trim() !== '')
+      .join('\n\n');
+
+    html += `${pageBreak}`;
+    html += `<h3>C. PERFORMANCE MEASUREMENT FRAMEWORK</h3>`;
+    html += renderSimpleTable(
+      [
+        { key: 'col1', label: 'Hierarchy of targeted results₁' },
+        { key: 'col2', label: 'Objectively verifiable indicators (OVI)₂' },
+        { key: 'col3', label: 'Baseline data₃' },
+        { key: 'col4', label: 'Targets₄' },
+        { key: 'col5', label: 'Data collection methods₅' },
+        { key: 'col6', label: 'Responsibility to collect data₆' }
+      ],
+      [
+        {
+          col1: cleanValue(perfObj.perf_g1_results),
+          col2: joinValues(perfObj.perf_g1_indicators_a, perfObj.perf_g1_indicators_b),
+          col3: joinValues(perfObj.perf_g1_baseline_a, perfObj.perf_g1_baseline_b),
+          col4: joinValues(perfObj.perf_g1_targets_a, perfObj.perf_g1_targets_b),
+          col5: cleanValue(perfObj.perf_g1_methods),
+          col6: cleanValue(perfObj.perf_g1_responsibility)
+        },
+        {
+          col1: joinValues(perfObj.perf_g2_results, perfObj.perf_g3_results),
+          col2: joinValues(
+            perfObj.perf_g2_indicators_a,
+            perfObj.perf_g2_indicators_b,
+            perfObj.perf_g3_indicators_a,
+            perfObj.perf_g3_indicators_b,
+            perfObj.perf_g3_indicators_c
+          ),
+          col3: joinValues(
+            perfObj.perf_g2_baseline_a,
+            perfObj.perf_g2_baseline_b,
+            perfObj.perf_g3_baseline_a,
+            perfObj.perf_g3_baseline_b,
+            perfObj.perf_g3_baseline_c
+          ),
+          col4: joinValues(
+            perfObj.perf_g2_targets_a,
+            perfObj.perf_g2_targets_b,
+            perfObj.perf_g3_targets_a,
+            perfObj.perf_g3_targets_b,
+            perfObj.perf_g3_targets_c
+          ),
+          col5: joinValues(perfObj.perf_g2_methods, perfObj.perf_g3_methods),
+          col6: joinValues(perfObj.perf_g2_responsibility, perfObj.perf_g3_responsibility)
+        }
+      ]
+    );
+
+    // ---- PART IV + V (tables from submitted requests)
+    html += `${pageBreak}`;
+    html += `<h2>PART IV. RESOURCE REQUIREMENTS</h2>`;
+    html += `<h3>A. DEPLOYMENT OF ICT EQUIPMENT AND SERVICES</h3>`;
+
+    const unitRequests = await Request.find({
+      status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] },
+      year: selectedYearCycle
+    })
+      .populate('userId', 'username email unit campus')
+      .sort({ createdAt: -1 });
+
+    const cycleYears = getYearsFromCycle(selectedYearCycle);
+    let deploymentData = [];
+
+    if (unitRequests.length > 0 && cycleYears.length > 0) {
+      const itemGroups = {};
+
+      unitRequests.forEach((request) => {
+        const userCampus = request.userId?.campus || '';
+        const normalizedCampus = (!userCampus || userCampus.trim() === '' || userCampus.trim().toLowerCase() === 'main')
+          ? 'DOrSU Main Campus'
+          : userCampus.trim();
+
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach((item) => {
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+              const itemName = item.item.trim().toLowerCase();
+              if (!itemGroups[itemName]) itemGroups[itemName] = {};
+              if (!itemGroups[itemName][normalizedCampus]) {
+                itemGroups[itemName][normalizedCampus] = {};
+                cycleYears.forEach((year) => { itemGroups[itemName][normalizedCampus][year] = 0; });
+              }
+
+              const quantityByYear = item.quantityByYear || {};
+              let hasQuantityData = false;
+
+              cycleYears.forEach((year) => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                if (qty > 0) hasQuantityData = true;
+                itemGroups[itemName][normalizedCampus][year] += qty;
+              });
+
+              if (!hasQuantityData && Object.keys(quantityByYear).length === 0 && item.quantity > 0) {
+                const totalQty = Number(item.quantity) || 0;
+                const qtyPerYear = Math.ceil(totalQty / cycleYears.length);
+                cycleYears.forEach((year, index) => {
+                  const yearQty = (index === 0 && totalQty % cycleYears.length !== 0)
+                    ? qtyPerYear + (totalQty % cycleYears.length)
+                    : qtyPerYear;
+                  itemGroups[itemName][normalizedCampus][year] += yearQty;
+                });
+              }
+            }
+          });
+        }
+      });
+
+      const itemsFromRequests = [];
+      const sortedItemNames = Object.keys(itemGroups).sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: 'base' })
+      );
+
+      sortedItemNames.forEach((itemNameKey) => {
+        const campusData = itemGroups[itemNameKey];
+        const campusesWithData = Object.keys(campusData).filter((campus) => cycleYears.some((year) => campusData[campus][year] > 0));
+
+        campusesWithData.sort((a, b) => {
+          if (a === 'DOrSU Main Campus') return -1;
+          if (b === 'DOrSU Main Campus') return 1;
+          return a.localeCompare(b);
+        });
+
+        const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+        itemsFromRequests.push({ item: displayItemName, office: '', year1: '', year2: '', year3: '' });
+
+        const itemTotal = {};
+        cycleYears.forEach((year) => { itemTotal[year] = 0; });
+
+        campusesWithData.forEach((campus) => {
+          const yearValues = cycleYears.map((year) => {
+            const qty = campusData[campus][year] || 0;
+            itemTotal[year] += qty;
+            return qty > 0 ? qty.toString() : '';
+          });
+
+          itemsFromRequests.push({
+            item: '',
+            office: campus,
+            year1: yearValues[0] || '',
+            year2: yearValues[1] || '',
+            year3: yearValues[2] || ''
+          });
+        });
+
+        const itemTotalValues = cycleYears.map((year) => {
+          const total = itemTotal[year] || 0;
+          return total > 0 ? total.toString() : '';
+        });
+
+        itemsFromRequests.push({
+          item: 'TOTAL',
+          office: '',
+          year1: itemTotalValues[0] || '',
+          year2: itemTotalValues[1] || '',
+          year3: itemTotalValues[2] || '',
+          isTotalRow: true
+        });
+      });
+
+      deploymentData = itemsFromRequests;
+    }
+
+    const year1Label = cycleYears[0] ? `YEAR ${cycleYears[0]}` : 'YEAR 1';
+    const year2Label = cycleYears[1] ? `YEAR ${cycleYears[1]}` : 'YEAR 2';
+    const year3Label = cycleYears[2] ? `YEAR ${cycleYears[2]}` : 'YEAR 3';
+    html += renderSimpleTable(
+      [
+        { key: 'item', label: 'ITEM' },
+        { key: 'office', label: 'CAMPUS/OFFICE' },
+        { key: 'year1', label: year1Label },
+        { key: 'year2', label: year2Label },
+        { key: 'year3', label: year3Label }
+      ],
+      Array.isArray(deploymentData) ? deploymentData : []
+    );
+
+    html += `<h3>B. ICT ORGANIZATIONAL STRUCTURE</h3>`;
+    html += `<p><b>EXISTING:</b></p>`;
+    html += renderImageOrUrl(
+      resourceRequirements.pageB?.existingStructureUrl,
+      'No existing structure diagram uploaded.',
+      'Existing Structure URL'
+    );
+    html += `<p><b>PROPOSED:</b></p>`;
+    html += renderImageOrUrl(
+      resourceRequirements.pageB?.proposedStructureUrl,
+      'No proposed structure diagram uploaded.',
+      'Proposed Structure URL'
+    );
+    html += `<p><b>PLACEMENT:</b></p>`;
+    html += renderImageOrUrl(
+      resourceRequirements.pageC?.placementStructureUrl,
+      'No placement structure diagram uploaded.',
+      'Placement Structure URL'
+    );
+
+    // ---- PART V
+    html += `${pageBreak}`;
+    html += `<h2>PART V. DEVELOPMENT AND INVESTMENT PROGRAM</h2>`;
+
+    html += `<h3>A. ICT PROJECTS IMPLEMENTATION SCHEDULE</h3>`;
+    html += renderSimpleTable(
+      [
+        { key: 'name', label: 'NAME OF ICT PROJECT/S' },
+        { key: 'year1', label: year1Label },
+        { key: 'year2', label: year2Label },
+        { key: 'year3', label: year3Label }
+      ],
+      Array.isArray(developmentProgram.pageA?.projectSchedule) ? developmentProgram.pageA.projectSchedule : []
+    );
+
+    html += `<h3>B. INFORMATION SYSTEMS (IS) IMPLEMENTATION SCHEDULE</h3>`;
+    html += renderSimpleTable(
+      [
+        { key: 'name', label: 'NAME OF INFORMATION SYSTEMS / SUB-SYSTEMS OR MODULES' },
+        { key: 'year1', label: year1Label },
+        { key: 'year2', label: year2Label },
+        { key: 'year3', label: year3Label }
+      ],
+      Array.isArray(developmentProgram.pageA?.isSchedule) ? developmentProgram.pageA.isSchedule : []
+    );
+
+    // Summary of investments
+    html += `<h3>C. SUMMARY OF INVESTMENTS</h3>`;
+    let summaryInvestmentsData = [];
+
+    if (unitRequests && unitRequests.length > 0) {
+      const itemGroups = {};
+      cycleYears.forEach((year) => { /* init done per-item */ });
+
+      unitRequests.forEach((request) => {
+        if (request.items && Array.isArray(request.items)) {
+          request.items.forEach((item) => {
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+              const itemName = item.item.trim().toLowerCase();
+              if (!itemGroups[itemName]) {
+                itemGroups[itemName] = { quantities: {}, costs: {} };
+                cycleYears.forEach((year) => {
+                  itemGroups[itemName].quantities[year] = 0;
+                  itemGroups[itemName].costs[year] = 0;
+                });
+              }
+
+              const quantityByYear = item.quantityByYear || {};
+              const adminPrice = Number(item.price) || 0;
+
+              cycleYears.forEach((year) => {
+                const yearKey = year.toString();
+                const qty = Number(quantityByYear[yearKey]) || 0;
+                itemGroups[itemName].quantities[year] += qty;
+                itemGroups[itemName].costs[year] += qty * adminPrice;
+              });
+            }
+          });
+        }
+      });
+
+      const summaryRows = [];
+      const sortedItemNames = Object.keys(itemGroups).sort();
+
+      sortedItemNames.forEach((itemNameKey) => {
+        const itemData = itemGroups[itemNameKey];
+        const hasQuantities = cycleYears.some((year) => itemData.quantities[year] > 0);
+        if (!hasQuantities) return;
+
+        const displayItemName = itemNameKey.charAt(0).toUpperCase() + itemNameKey.slice(1);
+        const y1 = cycleYears[0];
+        const y2 = cycleYears[1];
+        const y3 = cycleYears[2];
+
+        const year1Qty = y1 ? itemData.quantities[y1] || 0 : 0;
+        const year1Cost = y1 ? itemData.costs[y1] || 0 : 0;
+        const year2Qty = y2 ? itemData.quantities[y2] || 0 : 0;
+        const year2Cost = y2 ? itemData.costs[y2] || 0 : 0;
+        const year3Qty = y3 ? itemData.quantities[y3] || 0 : 0;
+        const year3Cost = y3 ? itemData.costs[y3] || 0 : 0;
+
+        summaryRows.push({
+          item: displayItemName,
+          year1Physical: year1Qty > 0 ? year1Qty.toString() : '',
+          year1Cost: year1Cost > 0 ? year1Cost.toFixed(2) : '',
+          year2Physical: year2Qty > 0 ? year2Qty.toString() : '',
+          year2Cost: year2Cost > 0 ? year2Cost.toFixed(2) : '',
+          year3Physical: year3Qty > 0 ? year3Qty.toString() : '',
+          year3Cost: year3Cost > 0 ? year3Cost.toFixed(2) : ''
+        });
+      });
+
+      // Totals row
+      let totalYear1Physical = 0;
+      let totalYear1Cost = 0;
+      let totalYear2Physical = 0;
+      let totalYear2Cost = 0;
+      let totalYear3Physical = 0;
+      let totalYear3Cost = 0;
+
+      summaryRows.forEach((row) => {
+        totalYear1Physical += Number(row.year1Physical) || 0;
+        totalYear1Cost += Number(row.year1Cost) || 0;
+        totalYear2Physical += Number(row.year2Physical) || 0;
+        totalYear2Cost += Number(row.year2Cost) || 0;
+        totalYear3Physical += Number(row.year3Physical) || 0;
+        totalYear3Cost += Number(row.year3Cost) || 0;
+      });
+
+      summaryRows.push({
+        item: 'TOTAL',
+        year1Physical: totalYear1Physical > 0 ? totalYear1Physical.toString() : '',
+        year1Cost: totalYear1Cost > 0 ? totalYear1Cost.toFixed(2) : '',
+        year2Physical: totalYear2Physical > 0 ? totalYear2Physical.toString() : '',
+        year2Cost: totalYear2Cost > 0 ? totalYear2Cost.toFixed(2) : '',
+        year3Physical: totalYear3Physical > 0 ? totalYear3Physical.toString() : '',
+        year3Cost: totalYear3Cost > 0 ? totalYear3Cost.toFixed(2) : ''
+      });
+
+      summaryInvestmentsData = summaryRows;
+    } else if (developmentProgram.pageB?.summaryInvestments && Array.isArray(developmentProgram.pageB.summaryInvestments)) {
+      summaryInvestmentsData = developmentProgram.pageB.summaryInvestments;
+    }
+
+    if (summaryInvestmentsData && summaryInvestmentsData.length > 0) {
+      html += renderSimpleTable(
+        [
+          { key: 'item', label: 'ITEM' },
+          { key: 'year1Physical', label: `${year1Label} PHYSICAL` },
+          { key: 'year1Cost', label: `${year1Label} COST` },
+          { key: 'year2Physical', label: `${year2Label} PHYSICAL` },
+          { key: 'year2Cost', label: `${year2Label} COST` },
+          { key: 'year3Physical', label: `${year3Label} PHYSICAL` },
+          { key: 'year3Cost', label: `${year3Label} COST` }
+        ],
+        summaryInvestmentsData
+      );
+    } else {
+      html += `<p>No summary investments data available.</p>`;
+    }
+
+    // Cost breakdown
+    html += `<h3>D. YEAR 1 COST BREAKDOWN</h3>`;
+    const costColumns = [
+      { key: 'detailedItem', label: 'DETAILED COST ITEMS' },
+      { key: 'officeProductivity', label: 'OFFICE PRODUCTIVITY' },
+      { key: 'internalProject1', label: 'INTERNAL ICT PROJECT 1' },
+      { key: 'internalProject2', label: 'INTERNAL ICT PROJECT 2' },
+      { key: 'crossAgencyProject1', label: 'CROSS-AGENCY PROJECT 1' },
+      { key: 'crossAgencyProject2', label: 'CROSS-AGENCY PROJECT 2' },
+      { key: 'continuingCosts', label: 'CONTINUING COSTS' }
+    ];
+    html += renderSimpleTable(
+      costColumns,
+      Array.isArray(developmentProgram.pageC?.costBreakdown) ? developmentProgram.pageC.costBreakdown : []
+    );
+
+    html += `</div></body></html>`;
+
+    const downloadFileName = queryUserId
+      ? `issp-report-${queryUserId}-${selectedYearCycle}.doc`
+      : `issp-report-${selectedYearCycle}.doc`;
+
+    res.setHeader('Content-Type', 'application/msword');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadFileName}"`);
+    res.send(Buffer.from(html, 'utf8'));
+  } catch (error) {
+    console.error('Error generating ISSP Word (HTML):', error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Error generating ISSP Word (HTML)', error: error.message });
     }
   }
 });

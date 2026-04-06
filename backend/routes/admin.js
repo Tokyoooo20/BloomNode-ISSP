@@ -3,23 +3,59 @@ const router = express.Router();
 const Request = require('../models/Request');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const ApprovedItem = require('../models/ApprovedItem');
+const PendingItem = require('../models/PendingItem');
+const DisapprovedItem = require('../models/DisapprovedItem');
 const auth = require('../middleware/auth');
 const { logAuditEvent } = require('../utils/auditLogger');
+const { syncItemToStatusCollection, syncAllItemsFromRequest } = require('../utils/itemSync');
 
 // GET dashboard statistics (admin only)
 router.get('/dashboard/stats', auth, async (req, res) => {
   try {
-    // Get all requests
+    const { yearCycle, compareYearCycle } = req.query; // optional: filter stats by year cycle + compare to previous cycle
+    // Use the new status collections for accurate counting
+    const [totalPendingItems, totalApprovedItems, totalDisapprovedItems] = await Promise.all([
+      PendingItem.countDocuments(),
+      ApprovedItem.countDocuments(),
+      DisapprovedItem.countDocuments()
+    ]);
+    
+    // Total items = sum of all items in status collections
+    const totalItems = totalPendingItems + totalApprovedItems + totalDisapprovedItems;
+    
+    const defaultYearCycle = '2024-2026';
+    const effectiveYearCycle = (yearCycle && String(yearCycle).trim()) || defaultYearCycle;
+    
+    // Get all approved items for the selected year cycle (for Approve vs Reject vs Pending chart)
+    const approvedItemsForYear = await ApprovedItem.find({ year: effectiveYearCycle });
+    
+    // Group approved items by unit+campus to count unique approved units
+    const approvedUnits = new Set();
+    approvedItemsForYear.forEach(item => {
+      const unit = (item.unit && item.unit.trim()) ? item.unit.trim() : 'Unknown Unit';
+      const campus = (item.campus && item.campus.trim()) ? item.campus.trim() : 'Main';
+      const unitKey = `${unit}|||${campus}`;
+      approvedUnits.add(unitKey);
+    });
+    
+    const approvedRequestsCount = approvedUnits.size; // Count unique approved units
+    
+    // Get all requests (then filter by year cycle when computing chart stats)
     const allRequests = await Request.find();
+    const normalizeCycle = (v) => (v && String(v).trim()) || '';
+    const requestsForYearCycle = normalizeCycle(yearCycle)
+      ? allRequests.filter((r) => (r.year || '').trim() === normalizeCycle(yearCycle))
+      : allRequests;
+    const requestsForCompareCycle = normalizeCycle(compareYearCycle)
+      ? allRequests.filter((r) => (r.year || '').trim() === normalizeCycle(compareYearCycle))
+      : [];
     
-    // Total requests
+    // Keep request counts for backward compatibility (but these won't be used in Reports Management)
     const totalRequests = allRequests.length;
-    
-    // Requests by status
     const pendingRequests = allRequests.filter(r => r.status === 'pending').length;
     const submittedRequests = allRequests.filter(r => r.status === 'submitted').length;
     const approvedRequests = allRequests.filter(r => r.status === 'approved').length;
-    // Count rejected requests: currently rejected OR resubmitted (which means they were rejected before)
     const rejectedRequests = allRequests.filter(r => 
       r.status === 'rejected' || 
       r.status === 'resubmitted' || 
@@ -96,26 +132,118 @@ router.get('/dashboard/stats', auth, async (req, res) => {
       yearRangeStats[yearRange].years = years;
     });
     
-    // Calculate approval rate
-    const totalReviewed = approvedRequests + rejectedRequests;
-    const approvalRate = totalReviewed > 0 
-      ? Math.round((approvedRequests / totalReviewed) * 100) 
+    // Calculate approval/reject/pending by year cycle: use requestsForYearCycle for rejected and pending
+    const rejectedUnits = new Set();
+    requestsForYearCycle.forEach(request => {
+      if (request.status === 'rejected' || 
+          request.status === 'resubmitted' || 
+          request.revisionStatus === 'resubmitted') {
+        const unit = (request.unit && request.unit.trim()) 
+          ? request.unit.trim() 
+          : (request.userId?.unit && request.userId.unit.trim()) 
+            ? request.userId.unit.trim() 
+            : 'Unknown Unit';
+        const campus = (request.campus && request.campus.trim()) 
+          ? request.campus.trim() 
+          : (request.userId?.campus && request.userId.campus.trim()) 
+            ? request.userId.campus.trim() 
+            : 'Main';
+        const unitKey = `${unit}|||${campus}`;
+        rejectedUnits.add(unitKey);
+      }
+    });
+    
+    const rejectedRequestsCount = rejectedUnits.size; // Count unique rejected units
+    // Pending units = unique units that are not yet reviewed (not approved/rejected/resubmitted)
+    const pendingUnits = new Set();
+    requestsForYearCycle.forEach(request => {
+      const isReviewed = request.status === 'approved' ||
+        request.status === 'rejected' ||
+        request.status === 'resubmitted' ||
+        request.revisionStatus === 'resubmitted';
+      if (!isReviewed) {
+        const unit = (request.unit && request.unit.trim()) 
+          ? request.unit.trim() 
+          : (request.userId?.unit && request.userId.unit.trim()) 
+            ? request.userId.unit.trim() 
+            : 'Unknown Unit';
+        const campus = (request.campus && request.campus.trim()) 
+          ? request.campus.trim() 
+          : (request.userId?.campus && request.userId.campus.trim()) 
+            ? request.userId.campus.trim() 
+            : 'Main';
+        const unitKey = `${unit}|||${campus}`;
+        pendingUnits.add(unitKey);
+      }
+    });
+    const pendingUnitsCount = pendingUnits.size;
+
+    const totalReviewed = approvedRequestsCount + rejectedRequestsCount;
+    const totalWithPending = totalReviewed + pendingUnitsCount;
+    const approvalRate = totalWithPending > 0 
+      ? Math.round((approvedRequestsCount / totalWithPending) * 100) 
       : 0;
-    const rejectionRate = totalReviewed > 0 
-      ? Math.round((rejectedRequests / totalReviewed) * 100) 
+    const rejectionRate = totalWithPending > 0 
+      ? Math.round((rejectedRequestsCount / totalWithPending) * 100) 
       : 0;
+    const pendingRate = totalWithPending > 0
+      ? Math.max(0, 100 - approvalRate - rejectionRate)
+      : 0;
+
+    // Top 3 most requested items (by item name), filtered by year cycle when provided
+    const itemCounts = {};
+    requestsForYearCycle.forEach(request => {
+      if (request.items && Array.isArray(request.items)) {
+        request.items.forEach(({ item }) => {
+          const name = (item && String(item).trim()) || 'Unnamed';
+          itemCounts[name] = (itemCounts[name] || 0) + 1;
+        });
+      }
+    });
+    const topRequestedItems = Object.entries(itemCounts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3);
+
+    // Monthly request counts for this cycle vs previous cycle (Jan-Dec)
+    const monthlyThisCycle = Array(12).fill(0);
+    const monthlyLastCycle = Array(12).fill(0);
+    requestsForYearCycle.forEach((reqDoc) => {
+      const d = new Date(reqDoc.createdAt || reqDoc.updatedAt || Date.now());
+      const m = d.getMonth(); // 0-11
+      if (m < 0 || m > 11) return;
+      monthlyThisCycle[m] += 1;
+    });
+    requestsForCompareCycle.forEach((reqDoc) => {
+      const d = new Date(reqDoc.createdAt || reqDoc.updatedAt || Date.now());
+      const m = d.getMonth(); // 0-11
+      if (m < 0 || m > 11) return;
+      monthlyLastCycle[m] += 1;
+    });
     
     res.json({
-      totalRequests,
-      pendingRequests,
-      submittedRequests,
-      approvedRequests,
-      rejectedRequests,
-      yearRangeStats,
-      approvalsByYear,
+      // Item-based counts (for Total, Pending, Submitted) - using new collections
+      totalRequests: totalItems, // Total items across all status collections
+      pendingRequests: totalPendingItems, // Pending items from pendingitems collection
+      submittedRequests: totalApprovedItems, // Approved items (submitted = approved items)
+      // Unit-based counts (for Approved, Rejected - matching ISSP.js)
+      approvedRequests: approvedRequestsCount, // Approved UNITS (matching ISSP.js: unique units with status === 'approved')
+      rejectedRequests: rejectedRequestsCount, // Rejected UNITS
+      pendingUnits: pendingUnitsCount, // Pending UNITS (not yet reviewed)
+      totalReviewed: totalReviewed, // Total reviewed units
       approvalRate,
       rejectionRate,
-      totalReviewed
+      pendingRate,
+      // Request-based stats (kept for backward compatibility)
+      yearRangeStats,
+      approvalsByYear,
+      topRequestedItems,
+      monthlyRequestCounts: {
+        thisCycle: effectiveYearCycle,
+        lastCycle: normalizeCycle(compareYearCycle) || null,
+        thisCycleByMonth: monthlyThisCycle,
+        lastCycleByMonth: monthlyLastCycle
+      }
     });
   } catch (error) {
     console.error('Error fetching dashboard stats:', error);
@@ -127,27 +255,26 @@ router.get('/dashboard/stats', auth, async (req, res) => {
 router.get('/office/stats', auth, async (req, res) => {
   try {
     const User = require('../models/User');
+    const { yearCycle } = req.query;
     
     // Get all requests
-    const allRequests = await Request.find().populate('userId', 'unit');
+    const requestQuery = {};
+    if (yearCycle && typeof yearCycle === 'string' && yearCycle.trim()) {
+      requestQuery.year = yearCycle.trim();
+    }
+    const allRequests = await Request.find(requestQuery).populate('userId', 'unit');
     
     // Calculate request trends
     const newRequests = allRequests.filter(r => r.status === 'pending').length;
     const pendingReviews = allRequests.filter(r => r.status === 'submitted').length;
     const completed = allRequests.filter(r => ['approved', 'rejected'].includes(r.status)).length;
-    
-    // Calculate completion rate for current month
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    const currentMonthRequests = allRequests.filter(r => {
-      const requestDate = new Date(r.createdAt);
-      return requestDate.getMonth() === currentMonth && requestDate.getFullYear() === currentYear;
-    });
-    const currentMonthCompleted = currentMonthRequests.filter(r => ['approved', 'rejected'].includes(r.status)).length;
-    const completionRate = currentMonthRequests.length > 0 
-      ? Math.round((currentMonthCompleted / currentMonthRequests.length) * 100)
-      : 0;
-    
+    const totalRequestsInCycle = allRequests.length;
+    // Share of requests in this year cycle that reached a terminal status (admin review done)
+    const requestCompletionRate =
+      totalRequestsInCycle > 0
+        ? Math.round((completed / totalRequestsInCycle) * 100)
+        : null;
+
     // Get all unique units from users - exclude admin, president, and Executive
     // Only show regular unit users (Program heads and regular users)
     const allUsers = await User.find({ 
@@ -182,13 +309,20 @@ router.get('/office/stats', auth, async (req, res) => {
     // Calculate summary
     const submittedCount = unitStats.filter(u => u.hasSubmitted).length;
     const notSubmittedCount = unitStats.filter(u => !u.hasSubmitted).length;
-    
+    const totalUnits = allUnits.length;
+    // Share of approved program-head units that have at least one request in the selected year cycle
+    const unitSubmissionRate =
+      totalUnits > 0 ? Math.round((submittedCount / totalUnits) * 100) : 0;
+
     res.json({
+      yearCycle: yearCycle && typeof yearCycle === 'string' ? yearCycle.trim() : null,
       requestTrends: {
         newRequests,
         pendingReviews,
         completed,
-        completionRate
+        totalRequestsInCycle,
+        unitSubmissionRate,
+        requestCompletionRate
       },
       unitTracking: {
         units: unitStats,
@@ -208,10 +342,15 @@ router.get('/office/stats', auth, async (req, res) => {
 // GET all submitted requests (admin only)
 router.get('/submitted-requests', auth, async (req, res) => {
   try {
-    // Get all requests that are submitted, approved, rejected, or resubmitted
-    const requests = await Request.find({
+    const { yearCycle } = req.query;
+    const requestQuery = {
       status: { $in: ['submitted', 'approved', 'rejected', 'resubmitted'] }
-    })
+    };
+    if (yearCycle && typeof yearCycle === 'string' && yearCycle.trim()) {
+      requestQuery.year = yearCycle.trim();
+    }
+    // Get all requests that are submitted, approved, rejected, or resubmitted
+    const requests = await Request.find(requestQuery)
     .populate('userId', 'username email unit campus') // Populate user info including campus
     .sort({ createdAt: -1 });
 
@@ -298,6 +437,9 @@ router.put('/requests/:requestId/items/:itemId/review', auth, async (req, res) =
 
     await request.save();
 
+    // Sync item to appropriate status collection
+    await syncItemToStatusCollection(request.items[itemIndex], request);
+
     // Create notification for the user
     const notificationType = approvalStatus === 'approved' ? 'item_approved' : 'item_disapproved';
     const notificationTitle = approvalStatus === 'approved' 
@@ -307,17 +449,27 @@ router.put('/requests/:requestId/items/:itemId/review', auth, async (req, res) =
       ? `Your item "${request.items[itemIndex].item}" in request "${request.requestTitle}" has been approved.`
       : `Your item "${request.items[itemIndex].item}" in request "${request.requestTitle}" has been disapproved. Reason: ${approvalReason}`;
 
-    // Get the unit from the request
-    await request.populate('userId', 'unit');
-    await Notification.create({
-      userId: request.userId,
-      unit: request.unit || (request.userId?.unit) || null, // Store unit for department account access
-      type: notificationType,
-      title: notificationTitle,
-      message: notificationMessage,
-      requestId: request._id,
-      itemId: itemId
-    });
+    // Get the unit from the request - ensure userId exists before creating notification
+    try {
+      if (request.userId) {
+        await request.populate('userId', 'unit');
+        // Only create notification if userId is valid after population
+        if (request.userId && request.userId._id) {
+          await Notification.create({
+            userId: request.userId._id || request.userId,
+            unit: request.unit || (request.userId?.unit) || null, // Store unit for department account access
+            type: notificationType,
+            title: notificationTitle,
+            message: notificationMessage,
+            requestId: request._id,
+            itemId: itemId
+          });
+        }
+      }
+    } catch (notificationError) {
+      console.error('Error creating notification (non-fatal):', notificationError);
+      // Don't fail the request if notification creation fails
+    }
 
     await logAuditEvent({
       actor: req.user,
@@ -335,16 +487,19 @@ router.put('/requests/:requestId/items/:itemId/review', auth, async (req, res) =
     // Emit Socket.io event to notify unit
     try {
       const io = req.app.get('io');
-      if (io) {
-        io.emit('item_reviewed', {
-          requestId: request._id,
-          itemId: itemId,
-          itemName: request.items[itemIndex].item,
-          approvalStatus: approvalStatus,
-          approvalReason: approvalReason,
-          requestStatus: request.status,
-          unitUserId: request.userId._id || request.userId
-        });
+      if (io && request.userId) {
+        const userId = request.userId._id || request.userId;
+        if (userId) {
+          io.emit('item_reviewed', {
+            requestId: request._id,
+            itemId: itemId,
+            itemName: request.items[itemIndex].item,
+            approvalStatus: approvalStatus,
+            approvalReason: approvalReason,
+            requestStatus: request.status,
+            unitUserId: userId
+          });
+        }
       }
     } catch (socketError) {
       console.error('Error emitting Socket.io event:', socketError);
@@ -388,6 +543,9 @@ router.put('/requests/:id/status', auth, async (req, res) => {
 
     await request.save();
 
+    // Sync all items to appropriate status collections
+    await syncAllItemsFromRequest(request);
+
     // Create notification for the user
     const notificationType = status === 'approved' ? 'approved' : 'rejected';
     const notificationTitle = status === 'approved' 
@@ -397,16 +555,26 @@ router.put('/requests/:id/status', auth, async (req, res) => {
       ? `Your request "${request.requestTitle}" has been approved.`
       : `Your request "${request.requestTitle}" has been rejected.${reason ? ' Reason: ' + reason : ''}`;
 
-    // Get the unit from the request
-    await request.populate('userId', 'unit');
-    await Notification.create({
-      userId: request.userId,
-      unit: request.unit || (request.userId?.unit) || null, // Store unit for department account access
-      type: notificationType,
-      title: notificationTitle,
-      message: notificationMessage,
-      requestId: request._id
-    });
+    // Get the unit from the request - ensure userId exists before creating notification
+    try {
+      if (request.userId) {
+        await request.populate('userId', 'unit');
+        // Only create notification if userId is valid after population
+        if (request.userId && request.userId._id) {
+          await Notification.create({
+            userId: request.userId._id || request.userId,
+            unit: request.unit || (request.userId?.unit) || null, // Store unit for department account access
+            type: notificationType,
+            title: notificationTitle,
+            message: notificationMessage,
+            requestId: request._id
+          });
+        }
+      }
+    } catch (notificationError) {
+      console.error('Error creating notification (non-fatal):', notificationError);
+      // Don't fail the request if notification creation fails
+    }
 
     await logAuditEvent({
       actor: req.user,
@@ -495,6 +663,127 @@ router.put('/requests/:id/complete-review', auth, async (req, res) => {
 });
 
 // GET approved requests by unit (admin only)
+// POST - Sync approved items to approveditems collection (ensures items are saved)
+router.post('/approved-items/sync', auth, async (req, res) => {
+  try {
+    const { unitName, year } = req.body;
+    
+    if (!unitName) {
+      return res.status(400).json({ message: 'Unit name is required' });
+    }
+    
+    // Find all requests for this unit
+    const User = require('../models/User');
+    const users = await User.find({ unit: unitName }, '_id');
+    const userIds = users.map(u => u._id);
+    
+    // Build query for requests
+    const requestQuery = {
+      userId: { $in: userIds },
+      'items.approvalStatus': 'approved' // Only requests with approved items
+    };
+    
+    if (year) {
+      requestQuery.year = year;
+    }
+    
+    // Get all requests with approved items
+    const requests = await Request.find(requestQuery);
+    
+    let syncedCount = 0;
+    
+    // Sync all approved items from these requests to approveditems collection
+    for (const request of requests) {
+      if (request.items && Array.isArray(request.items)) {
+        for (const item of request.items) {
+          if (item.approvalStatus === 'approved' && item.item && item.item.trim() !== '') {
+            await syncItemToStatusCollection(item, request);
+            syncedCount++;
+          }
+        }
+      }
+    }
+    
+    res.json({ 
+      message: `Synced ${syncedCount} approved items to approveditems collection`,
+      syncedCount 
+    });
+  } catch (error) {
+    console.error('Error syncing approved items:', error);
+    res.status(500).json({ message: 'Error syncing approved items', error: error.message });
+  }
+});
+
+// GET - Get approved items for a specific unit (using approveditems collection)
+router.get('/approved-items/unit/:unitName', auth, async (req, res) => {
+  try {
+    const { unitName } = req.params;
+    const { year } = req.query; // Optional year filter
+    
+    // First, ensure all approved items are synced to approveditems collection
+    try {
+      const User = require('../models/User');
+      const users = await User.find({ unit: unitName }, '_id');
+      const userIds = users.map(u => u._id);
+      
+      const requestQuery = {
+        userId: { $in: userIds },
+        'items.approvalStatus': 'approved'
+      };
+      
+      if (year) {
+        requestQuery.year = year;
+      }
+      
+      const requests = await Request.find(requestQuery);
+      
+      // Sync all approved items to approveditems collection
+      for (const request of requests) {
+        if (request.items && Array.isArray(request.items)) {
+          for (const item of request.items) {
+            if (item.approvalStatus === 'approved' && item.item && item.item.trim() !== '') {
+              await syncItemToStatusCollection(item, request);
+            }
+          }
+        }
+      }
+    } catch (syncError) {
+      console.warn('Error syncing items (non-fatal):', syncError);
+      // Continue even if sync fails
+    }
+    
+    // Build query
+    const query = { unit: unitName };
+    if (year) {
+      query.year = year;
+    }
+    
+    // Get approved items directly from approveditems collection
+    const approvedItems = await ApprovedItem.find(query)
+      .populate('userId', 'username email unit campus')
+      .populate('requestId', 'requestTitle status createdAt updatedAt')
+      .sort({ approvedAt: -1 });
+    
+    // Format items to match expected structure
+    const formattedItems = approvedItems.map(item => ({
+      ...item.toObject(),
+      id: item.itemId,
+      requestId: item.requestId._id.toString(),
+      requestTitle: item.requestId?.requestTitle || item.requestTitle,
+      requestYear: item.year,
+      requestStatus: item.requestId?.status || 'approved',
+      requestCreatedAt: item.requestId?.createdAt || item.createdAt,
+      requestUpdatedAt: item.requestId?.updatedAt || item.updatedAt,
+      userId: item.userId
+    }));
+    
+    res.json({ items: formattedItems });
+  } catch (error) {
+    console.error('Error fetching approved items for unit:', error);
+    res.status(500).json({ message: 'Error fetching approved items', error: error.message });
+  }
+});
+
 router.get('/requests/unit/:unitName', auth, async (req, res) => {
   try {
     const User = require('../models/User');
@@ -569,6 +858,11 @@ router.put('/requests/:requestId/items/:itemId/price', auth, async (req, res) =>
     // Update the item's price
     request.items[itemIndex].price = priceNum;
     await request.save();
+    
+    // Sync price update to approveditems collection if item is approved
+    if (request.items[itemIndex].approvalStatus === 'approved') {
+      await syncItemToStatusCollection(request.items[itemIndex], request);
+    }
     
     // Create notification for the unit user
     try {
@@ -667,6 +961,11 @@ router.put('/requests/:requestId/items/:itemId/quantity', auth, async (req, res)
     
     await request.save();
     
+    // Sync quantity update to approveditems collection if item is approved
+    if (request.items[itemIndex].approvalStatus === 'approved') {
+      await syncItemToStatusCollection(request.items[itemIndex], request);
+    }
+    
     // Create notification for the unit user
     try {
       await request.populate('userId', 'unit');
@@ -752,6 +1051,11 @@ router.put('/requests/:requestId/items/:itemId/specification', auth, async (req,
     // Update the item's specification
     request.items[itemIndex].specification = specification;
     await request.save();
+    
+    // Sync specification update to approveditems collection if item is approved
+    if (request.items[itemIndex].approvalStatus === 'approved') {
+      await syncItemToStatusCollection(request.items[itemIndex], request);
+    }
     
     // Create notification for the unit user
     try {

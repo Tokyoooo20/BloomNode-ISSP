@@ -43,6 +43,11 @@ export const API_ENDPOINTS = {
   admin: {
     dashboardStats: `${API_BASE_URL}/api/admin/dashboard/stats`,
     submittedRequests: `${API_BASE_URL}/api/admin/submitted-requests`,
+    approvedItemsByUnit: (unitName, year) => {
+      const baseUrl = `${API_BASE_URL}/api/admin/approved-items/unit/${encodeURIComponent(unitName)}`;
+      return year ? `${baseUrl}?year=${encodeURIComponent(year)}` : baseUrl;
+    },
+    syncApprovedItems: `${API_BASE_URL}/api/admin/approved-items/sync`,
     requestsByUnit: (unitName) => `${API_BASE_URL}/api/admin/requests/unit/${encodeURIComponent(unitName)}`,
     requestReview: (requestId, itemId) => `${API_BASE_URL}/api/admin/requests/${requestId}/items/${itemId}/review`,
     completeReview: (requestId) => `${API_BASE_URL}/api/admin/requests/${requestId}/complete-review`,
@@ -67,6 +72,7 @@ export const API_ENDPOINTS = {
     detailedIctProjects: `${API_BASE_URL}/api/issp/detailed-ict-projects`,
     developmentInvestmentProgram: `${API_BASE_URL}/api/issp/development-investment-program`,
     generate: `${API_BASE_URL}/api/issp/generate`,
+    generateWord: `${API_BASE_URL}/api/issp/generate-word-html`,
     reviewSubmit: `${API_BASE_URL}/api/issp/review/submit`,
     reviewDecision: `${API_BASE_URL}/api/issp/review/decision`,
     uploadDictApproved: `${API_BASE_URL}/api/issp/upload-dict-approved`,

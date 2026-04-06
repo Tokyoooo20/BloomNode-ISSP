@@ -9,7 +9,17 @@ const programSchema = new mongoose.Schema({
   faculty: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Faculty',
-    required: true
+    required: false
+  },
+  office: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Office',
+    required: false
+  },
+  unit: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Unit',
+    required: false // When set, program is under this unit (e.g. unit under OVPAA)
   },
   campus: {
     type: mongoose.Schema.Types.ObjectId,

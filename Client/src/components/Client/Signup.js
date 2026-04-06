@@ -1,8 +1,87 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
+
+// Searchable dropdown: type to filter, click to select. Options are strings.
+function SearchableSelect({ id, options = [], value, onChange, placeholder, disabled, className = '' }) {
+  const [open, setOpen] = useState(false);
+  const [inputText, setInputText] = useState(value || '');
+  const containerRef = useRef(null);
+
+  const filtered = options.filter((opt) =>
+    String(opt).toLowerCase().includes((inputText || '').toLowerCase())
+  );
+
+  useEffect(() => {
+    setInputText(value || '');
+  }, [value]);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+        setInputText(value || ''); // reset to selected value on blur
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [value]);
+
+  const handleSelect = (opt) => {
+    onChange(opt);
+    setInputText(opt);
+    setOpen(false);
+  };
+
+  const handleInputChange = (e) => {
+    setInputText(e.target.value);
+    setOpen(true);
+    if (!e.target.value) onChange('');
+  };
+
+  const inputClass = `w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500 min-h-[42px] ${className}`;
+  return (
+    <div ref={containerRef} className="relative">
+      <input
+        id={id}
+        type="text"
+        value={inputText}
+        onChange={handleInputChange}
+        onFocus={() => !disabled && setOpen(true)}
+        placeholder={placeholder}
+        disabled={disabled}
+        autoComplete="off"
+        className={inputClass}
+      />
+      {open && !disabled && (
+        <ul
+          className="absolute z-50 mt-1 w-full max-h-60 overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg py-1"
+          role="listbox"
+        >
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-gray-500">No matches</li>
+          ) : (
+            filtered.map((opt) => (
+              <li
+                key={opt}
+                role="option"
+                aria-selected={opt === value}
+                onClick={() => handleSelect(opt)}
+                className={`px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 ${opt === value ? 'bg-gray-50 font-medium' : ''}`}
+              >
+                {opt}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const OVPAA_OFFICE_NAME = 'Office of the Vice President for Academic Affairs';
 
 const defaultSuccessMessage =
   'Your account has been created successfully. You can now login with your credentials.';
@@ -56,6 +135,7 @@ const Signup = () => {
     office: '',
     campus: '',
     universityLevelOffice: '',
+    program: '',
     firstName: '',
     lastName: '',
     email: '',
@@ -118,59 +198,45 @@ const Signup = () => {
     fetchData();
   }, []);
 
-  // Fetch units when office changes
+  // Fetch units when office changes (e.g. "Office of the President" → show its units in Unit dropdown)
   useEffect(() => {
     const fetchUnits = async () => {
-      if (formData.office && formData.campus === 'Main') {
-        try {
-          const selectedOfficeObj = offices.find(o => o.name === formData.office && o.campus?.name === 'Main');
-          if (selectedOfficeObj) {
-            const unitsRes = await axios.get(API_ENDPOINTS.organization.units.list, {
-              params: { officeId: selectedOfficeObj._id },
-              headers: getAuthHeaders()
-            });
-            setUnits(unitsRes.data.filter(u => u.isActive));
-          }
-        } catch (error) {
-          console.error('Error fetching units:', error);
+      if (!formData.office) {
+        setUnits([]);
+        return;
+      }
+      try {
+        // Find office by name (offices are unique by name; may have no campus)
+        const selectedOfficeObj = offices.find(o => o.name === formData.office);
+        if (selectedOfficeObj) {
+          const unitsRes = await axios.get(API_ENDPOINTS.organization.units.list, {
+            params: { officeId: selectedOfficeObj._id },
+            headers: getAuthHeaders()
+          });
+          setUnits(unitsRes.data.filter(u => u.isActive));
+        } else {
+          setUnits([]);
         }
-      } else {
+      } catch (error) {
+        console.error('Error fetching units:', error);
         setUnits([]);
       }
     };
 
     fetchUnits();
-  }, [formData.office, formData.campus, offices]);
+  }, [formData.office, offices]);
 
   // Get campus options
   const getCampusOptions = () => {
     return campuses.map(c => c.name);
   };
 
-  // Get office options (offices for Main campus, faculties for extension campuses)
+  // Get office options: show all offices from Office Management regardless of campus (Main or Extension)
   const getOfficeOptions = () => {
-    if (formData.campus === 'Main') {
-      const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-      if (!mainCampus) return [];
-      
-      const mainOffices = offices.filter(o => 
-        o.campus?._id === mainCampus._id || o.campus?.name === 'Main'
-      );
-      
-      // Group offices by name (unique office names)
-      const uniqueOfficeNames = [...new Set(mainOffices.map(o => o.name))];
-      return uniqueOfficeNames;
-    } else if (formData.campus) {
-      // For extension campuses, return faculties for that campus
-      const selectedCampus = campuses.find(c => c.name === formData.campus);
-      if (!selectedCampus) return [];
-      
-      const campusFaculties = faculties.filter(f => 
-        f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-      );
-      return campusFaculties.map(f => f.name);
-    }
-    return [];
+    if (!formData.campus) return [];
+    // Return all active offices (unique by name) — same list for Main and Extension
+    const uniqueOfficeNames = [...new Set(offices.map(o => o.name))];
+    return uniqueOfficeNames;
   };
 
   // Get University-Level Offices options
@@ -183,9 +249,20 @@ const Signup = () => {
     return [];
   };
 
-  // Get units for selected office (only for Main campus)
+  // Get program options: only when office is OVPAA and a unit is selected; show programs under that unit
+  const getProgramOptions = () => {
+    if (formData.office !== OVPAA_OFFICE_NAME || !formData.unit) return [];
+    const selectedUnit = units.find(u => u.name === formData.unit);
+    if (!selectedUnit) return [];
+    const unitPrograms = programs.filter(
+      p => p.isActive && (p.unit?._id === selectedUnit._id || p.unit?.name === formData.unit)
+    );
+    return unitPrograms.map(p => p.name);
+  };
+
+  // Get units for selected office (when user selects an office like "Office of the President")
   const getUnitsForOffice = () => {
-    if (formData.campus === 'Main' && formData.office) {
+    if (formData.office) {
       return units.map(u => u.name);
     }
     return [];
@@ -295,17 +372,19 @@ const Signup = () => {
       // For other offices, return the units directly
       return getUnitsForOffice();
     } else {
-      // For Extension campuses: show faculties first, then programs for selected faculty
+      // For Extension campuses: show units under selected office, or faculty → programs
       const selectedCampus = campuses.find(c => c.name === formData.campus);
       if (!selectedCampus) return [];
       
-      // If office (faculty) is selected, show programs for that faculty
       if (formData.office) {
         const campusFaculties = faculties.filter(f => 
           f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
         );
         const selectedFaculty = campusFaculties.find(f => f.name === formData.office);
-        
+        // If selected "office" is a regular office (not a faculty), show units under that office
+        if (!selectedFaculty && getUnitsForOffice().length > 0) {
+          return getUnitsForOffice();
+        }
         if (selectedFaculty) {
           // Check if unit value is a faculty name (user just selected a faculty)
           const facultyNames = campusFaculties.map(f => f.name);
@@ -378,62 +457,37 @@ const Signup = () => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     
-    // If campus changes, reset office, unit and selection state (but preserve firstName, lastName, email, password)
+    // If campus changes, reset office and selection state (but preserve firstName, lastName, email, password)
     if (name === 'campus') {
-      // For all campuses, reset office and unit but preserve other fields
       setFormData({
         ...formData, // Preserve firstName, lastName, email, password, confirmPassword
         campus: value,
         office: '', // Clear office
         unit: '', // Clear unit
+        program: '', // Clear program
         universityLevelOffice: value !== 'Main' ? '' : formData.universityLevelOffice // Clear if not Main
       });
       setSelectedOffice('');
       setSelectedFaculty('');
       setIsSelectingProgram(false);
     } else if (name === 'office') {
-      // When office changes, reset unit and faculty selection, and clear university-level office
-      // For extension campuses, office is actually a faculty
-      const isExtensionCampus = formData.campus && formData.campus !== 'Main';
-      
-      if (isExtensionCampus && value) {
-        // For extension campuses: office is faculty, so handle like Main campus Faculties flow
-        const selectedCampus = campuses.find(c => c.name === formData.campus);
-        if (selectedCampus) {
-          const campusFaculties = faculties.filter(f => 
-            f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-          );
-          const facultyNames = campusFaculties.map(f => f.name);
-          
-          if (facultyNames.includes(value)) {
-            // User selected a faculty - store it and show programs next
-            setSelectedFaculty(value);
-            setIsSelectingProgram(true);
-            setFormData({
-              ...formData,
-              office: value,
-              unit: value // Keep faculty name so we know which one was selected
-            });
-          } else {
-            setFormData({
-              ...formData,
-              office: value,
-              unit: ''
-            });
-            setSelectedFaculty('');
-            setIsSelectingProgram(false);
-          }
-        }
-      } else {
-        setFormData({
-          ...formData,
-          office: value,
-          unit: '', // Reset unit when office changes
-          universityLevelOffice: '' // Clear university-level office when regular office is selected
-        });
-        setSelectedFaculty('');
-        setIsSelectingProgram(false);
-      }
+      // When office changes, clear unit and program
+      setFormData({
+        ...formData,
+        office: value,
+        unit: '',
+        program: '',
+        universityLevelOffice: '' // Clear university-level office when regular office is selected
+      });
+      setSelectedFaculty('');
+      setIsSelectingProgram(false);
+    } else if (name === 'unit') {
+      // When unit changes and office is OVPAA, clear program so user picks from programs for new unit
+      setFormData({
+        ...formData,
+        [name]: value,
+        ...(formData.office === OVPAA_OFFICE_NAME ? { program: '' } : {})
+      });
     } else if (name === 'universityLevelOffice') {
       // When University-Level Office is selected
       if (value) {
@@ -445,7 +499,8 @@ const Signup = () => {
             universityLevelOffice: value,
             campus: 'Main', // Auto-set to Main
             office: '', // Clear office
-            unit: '' // Clear unit
+            unit: '', // Clear unit
+            program: '' // Clear program
           });
           setSelectedOffice('');
           setSelectedFaculty('');
@@ -456,7 +511,8 @@ const Signup = () => {
             ...formData,
             universityLevelOffice: value,
             office: '', // Clear regular office
-            unit: '' // Clear unit
+            unit: '', // Clear unit
+            program: '' // Clear program
           });
           setSelectedOffice('');
           setSelectedFaculty('');
@@ -468,98 +524,6 @@ const Signup = () => {
           ...formData,
           universityLevelOffice: value
         });
-      }
-    } else if (name === 'unit') {
-      // Handle unit selection with cascading logic for Faculties
-      const isFacultiesSelected = (formData.campus === 'Main' && formData.office === 'Faculties') || 
-                                  (formData.campus !== 'Main' && formData.universityLevelOffice === 'Faculties');
-      
-      // For extension campuses, office is faculty
-      const isExtensionCampusFaculty = formData.campus && formData.campus !== 'Main' && formData.office;
-      
-      if (isFacultiesSelected) {
-        const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-        if (!mainCampus) {
-          setFormData({ ...formData, unit: value });
-          return;
-        }
-        
-        const mainFaculties = faculties.filter(f => 
-          f.campus?._id === mainCampus._id || f.campus?.name === 'Main'
-        );
-        const facultyNames = mainFaculties.map(f => f.name);
-        
-        // Check if the selected value is a faculty name
-        const isFaculty = facultyNames.includes(value);
-        
-        // Check if current unit is a faculty (user is selecting a program now)
-        const currentUnitIsFaculty = facultyNames.includes(formData.unit);
-        
-        if (isFaculty) {
-          // User selected a faculty - store it and show programs next
-          setSelectedFaculty(value);
-          setIsSelectingProgram(true);
-          setFormData({
-            ...formData,
-            unit: value // Keep faculty name so we know which one was selected
-          });
-        } else if (currentUnitIsFaculty || (selectedFaculty && isSelectingProgram)) {
-          // User selected a program - store just the program name as final value
-          setFormData({
-            ...formData,
-            unit: value // Just the program name (e.g., "BSIT")
-          });
-          // Reset selection state for next time
-          setSelectedFaculty('');
-          setIsSelectingProgram(false);
-        }
-      } else if (isExtensionCampusFaculty) {
-        // For extension campuses: handle faculty → program selection
-        const selectedCampus = campuses.find(c => c.name === formData.campus);
-        if (selectedCampus) {
-          const campusFaculties = faculties.filter(f => 
-            f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-          );
-          const facultyNames = campusFaculties.map(f => f.name);
-          
-          // Check if the selected value is a faculty name
-          const isFaculty = facultyNames.includes(value);
-          
-          // Check if current unit is a faculty (user is selecting a program now)
-          const currentUnitIsFaculty = facultyNames.includes(formData.unit);
-          
-          if (isFaculty) {
-            // User selected a faculty - store it and show programs next
-            setSelectedFaculty(value);
-            setIsSelectingProgram(true);
-            setFormData({
-              ...formData,
-              unit: value // Keep faculty name so we know which one was selected
-            });
-          } else if (currentUnitIsFaculty || (selectedFaculty && isSelectingProgram)) {
-            // User selected a program - store just the program name as final value
-            setFormData({
-              ...formData,
-              unit: value // Just the program name (e.g., "BSIT")
-            });
-            // Reset selection state for next time
-            setSelectedFaculty('');
-            setIsSelectingProgram(false);
-          }
-        }
-      } else {
-        // For other offices (Main campus), just set the unit
-        setFormData({
-          ...formData,
-          unit: value
-        });
-        // Only clear university-level office if it's Main campus
-        if (formData.campus === 'Main') {
-          setFormData(prev => ({
-            ...prev,
-            universityLevelOffice: ''
-          }));
-        }
       }
     } else {
       setFormData({
@@ -575,119 +539,47 @@ const Signup = () => {
     setMessage('');
     
     // Validation
-    // Check if University-Level Office is selected (mutually exclusive with office/unit)
+    // Check if Unit is selected (mutually exclusive with office)
     const hasUniversityLevelOffice = formData.universityLevelOffice && formData.universityLevelOffice.trim() !== '';
-    const hasOfficeAndUnit = formData.office && formData.office.trim() !== '' && formData.unit && formData.unit.trim() !== '';
+    const hasOffice = formData.office && formData.office.trim() !== '';
     
-    if (hasUniversityLevelOffice && hasOfficeAndUnit) {
-      setMessage('Please select either University-Level Office OR Office/Unit, not both');
+    if (hasUniversityLevelOffice && hasOffice) {
+      setMessage('Please select either Unit OR Office, not both');
       setMessageType('error');
       setLoading(false);
       return;
     }
     
-    // For Main campus, ensure either University-Level Office OR office/unit is selected
+    // For Main campus, ensure either Unit OR office is selected
     if (formData.campus === 'Main') {
       if (!hasUniversityLevelOffice && (!formData.office || formData.office.trim() === '')) {
-        setMessage('Please select either a University-Level Office or a regular Office');
+        setMessage('Please select either a Unit or a regular Office');
         setMessageType('error');
         setLoading(false);
         return;
       }
       
-      if (!hasUniversityLevelOffice && (!formData.unit || formData.unit.trim() === '')) {
-        // Check if it's Faculties office (should say program) or other office (should say unit)
-        if (formData.office === 'Faculties') {
-          setMessage('Please select a program');
-        } else {
-          setMessage('Please select your unit');
-        }
-        setMessageType('error');
-        setLoading(false);
-        return;
-      }
-    } else {
-      // For extension campuses, office (faculty) is required
-      if (!formData.office || formData.office.trim() === '') {
-        setMessage('Please select a faculty');
-        setMessageType('error');
-        setLoading(false);
-        return;
-      }
-      
-      // For extension campuses, unit (program) is required
-      if (!formData.unit || formData.unit.trim() === '') {
+      // Program is required only when office is OVPAA and a unit is selected
+      if (formData.office === OVPAA_OFFICE_NAME && formData.unit && (!formData.program || formData.program.trim() === '')) {
         setMessage('Please select a program');
         setMessageType('error');
         setLoading(false);
         return;
       }
-      
-      // Validate that unit is a program (not a faculty name)
-      const selectedCampus = campuses.find(c => c.name === formData.campus);
-      if (selectedCampus) {
-        const campusFaculties = faculties.filter(f => 
-          f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-        );
-        const facultyNames = campusFaculties.map(f => f.name);
-        if (facultyNames.includes(formData.unit)) {
-          setMessage('Please select a program');
-          setMessageType('error');
-          setLoading(false);
-          return;
-        }
+    } else {
+      // For extension campuses, office is required
+      if (!formData.office || formData.office.trim() === '') {
+        setMessage('Please select an office');
+        setMessageType('error');
+        setLoading(false);
+        return;
       }
-    }
-    
-    // For Main campus, ensure a unit is selected (if not using University-Level Office)
-    if (formData.campus === 'Main' && !hasUniversityLevelOffice) {
-      // Special validation for Faculties - ensure a program is selected (not just a faculty)
-      if (formData.office === 'Faculties') {
-        const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-        if (mainCampus) {
-          const mainFaculties = faculties.filter(f => 
-            f.campus?._id === mainCampus._id || f.campus?.name === 'Main'
-          );
-          const facultyNames = mainFaculties.map(f => f.name);
-          if (facultyNames.includes(formData.unit)) {
-            setMessage('Please select a program');
-            setMessageType('error');
-            setLoading(false);
-            return;
-          }
-        }
-      } else {
-        // For other offices, validate unit exists
-        const officeUnits = getUnitsForOffice();
-        if (!officeUnits.includes(formData.unit)) {
-          setMessage('Please select a valid unit');
-          setMessageType('error');
-          setLoading(false);
-          return;
-        }
-      }
-    }
-    
-    // For extension campuses, validate that program exists for selected faculty
-    if (formData.campus && formData.campus !== 'Main' && formData.office) {
-      const selectedCampus = campuses.find(c => c.name === formData.campus);
-      if (selectedCampus) {
-        const campusFaculties = faculties.filter(f => 
-          f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-        );
-        const selectedFaculty = campusFaculties.find(f => f.name === formData.office);
-        if (selectedFaculty) {
-          const facultyPrograms = programs.filter(p => 
-            p.faculty?._id === selectedFaculty._id || p.faculty?.name === formData.office
-          );
-          const programNames = facultyPrograms.map(p => p.name);
-          if (!programNames.includes(formData.unit)) {
-            setMessage('Please select a valid program');
-            setMessageType('error');
-            setLoading(false);
-            return;
-          }
-        }
+      // Program is required only when office is OVPAA and a unit is selected
+      if (formData.office === OVPAA_OFFICE_NAME && formData.unit && (!formData.program || formData.program.trim() === '')) {
+        setMessage('Please select a program');
+        setMessageType('error');
+        setLoading(false);
+        return;
       }
     }
     
@@ -726,11 +618,11 @@ const Signup = () => {
       // Combine first name and last name into username
       const username = `${formData.firstName.trim()} ${formData.lastName.trim()}`;
       
-      // If University-Level Office is selected, use it as the unit value
+      // Unit value: university-level office name, or unit under selected office
       const universityLevelOfficeNames = universityLevelOffices.map(o => o.name);
       const unitValue = hasUniversityLevelOffice && universityLevelOfficeNames.includes(formData.universityLevelOffice)
         ? formData.universityLevelOffice
-        : formData.unit;
+        : (formData.office && formData.unit ? formData.unit : '');
       
       const response = await fetch(API_ENDPOINTS.auth.signup, {
         method: 'POST',
@@ -742,6 +634,7 @@ const Signup = () => {
           campus: formData.campus,
           office: formData.office || '',
           universityLevelOffice: formData.universityLevelOffice || '',
+          program: formData.program || '',
           firstName: formData.firstName,
           lastName: formData.lastName,
           username: username,
@@ -787,6 +680,7 @@ const Signup = () => {
             office: '',
             campus: '',
             universityLevelOffice: '',
+            program: '',
             firstName: '',
             lastName: '',
             email: '',
@@ -874,157 +768,124 @@ const Signup = () => {
                   >
                     Campus
                   </label>
-                  <select
+                  <SearchableSelect
                     id="campus"
-                    name="campus"
+                    placeholder="Select a campus"
+                    options={getCampusOptions()}
                     value={formData.campus}
-                    onChange={handleChange}
-                    className="input-responsive tap-target"
-                    required
+                    onChange={(val) => {
+                      setSelectedOffice('');
+                      setSelectedFaculty('');
+                      setIsSelectingProgram(false);
+                      setFormData((prev) => {
+                        const newCampus = val || '';
+                        return {
+                          ...prev,
+                          campus: newCampus,
+                          office: '',
+                          unit: '',
+                          program: '',
+                          universityLevelOffice: newCampus === 'Main' ? prev.universityLevelOffice : ''
+                        };
+                      });
+                    }}
                     disabled={loading || loadingData}
-                  >
-                    <option value="">Select a campus</option>
-                    {getCampusOptions().map((campus) => (
-                      <option key={campus} value={campus}>
-                        {campus}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
 
-                {/* Office (offices for Main campus, faculties for extension campuses) */}
+                {/* Office */}
                 <div className="form-group-responsive">
                   <label
                     htmlFor="office"
                     className="block text-gray-700 text-responsive-sm font-medium mb-1.5"
                   >
-                    {formData.campus && formData.campus !== 'Main' ? 'Faculty' : 'Office'}
+                    Office
                   </label>
-                  <select
+                  <SearchableSelect
                     id="office"
-                    name="office"
+                    placeholder={
+                      formData.universityLevelOffice
+                        ? 'Not applicable with Unit'
+                        : formData.campus
+                          ? 'Select an office'
+                          : 'Select campus first'
+                    }
+                    options={getOfficeOptions()}
                     value={formData.office}
-                    onChange={handleChange}
-                    className="input-responsive tap-target"
-                    required={(formData.campus === 'Main' && !formData.universityLevelOffice) || (formData.campus && formData.campus !== 'Main')}
+                    onChange={(val) => {
+                      setSelectedFaculty('');
+                      setIsSelectingProgram(false);
+                      setFormData((prev) => ({
+                        ...prev,
+                        office: val || '',
+                        unit: '',
+                        program: '',
+                        universityLevelOffice: ''
+                      }));
+                    }}
                     disabled={loading || loadingData || !formData.campus || (formData.campus === 'Main' && !!formData.universityLevelOffice)}
-                  >
-                  <option value="">
-                    {formData.universityLevelOffice
-                      ? 'Not applicable with University-Level Office'
-                      : formData.campus === 'Main' 
-                        ? 'Select an office' 
-                        : formData.campus 
-                          ? 'Select a faculty'
-                          : 'Select campus first'}
-                  </option>
-                    {getOfficeOptions().map((office, index) => (
-                      <option key={`${office}-${index}`} value={office}>
-                        {office}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
               </div>
 
-              {/* Program and University-Level Offices - Side by side */}
+              {/* Unit and Program - Side by side */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Unit: shows units under selected office, or university-level options when no office selected (Main only) */}
                 <div className="form-group-responsive">
                   <label
-                    htmlFor="unit"
+                    htmlFor={formData.office ? 'unit' : 'universityLevelOffice'}
+                    className="block text-gray-700 text-responsive-sm font-medium mb-1.5"
+                  >
+                    Unit
+                  </label>
+                  <SearchableSelect
+                    id={formData.office ? 'unit' : 'universityLevelOffice'}
+                    placeholder={
+                      !formData.campus
+                        ? 'Select campus first'
+                        : formData.campus === 'Main' && !formData.office && !formData.universityLevelOffice
+                          ? 'Select office first'
+                          : formData.campus !== 'Main' && !formData.office
+                            ? 'Select office first'
+                            : 'Select unit'
+                    }
+                    options={formData.office ? getUnitOptions() : getUniversityLevelOfficeOptions()}
+                    value={formData.office ? formData.unit : formData.universityLevelOffice}
+                    onChange={(val) => setFormData((prev) => {
+                      const value = val || '';
+                      if (prev.office) {
+                        return { ...prev, unit: value, program: prev.office === OVPAA_OFFICE_NAME ? '' : prev.program };
+                      }
+                      return { ...prev, universityLevelOffice: value, office: '', unit: '', program: '' };
+                    })}
+                    disabled={loading || loadingData || !formData.campus || (formData.campus === 'Main' && !formData.office && !formData.universityLevelOffice) || (formData.campus !== 'Main' && !formData.office)}
+                  />
+                </div>
+
+                {/* Program: when office is OVPAA and unit selected, show programs for that unit; otherwise show "Not applicable" */}
+                <div className="form-group-responsive">
+                  <label
+                    htmlFor="program"
                     className="block text-gray-700 text-responsive-sm font-medium mb-1.5"
                   >
                     Program
                   </label>
-                  <select
-                    id="unit"
-                    name="unit"
-                    value={getUnitDisplayValue()}
-                    onChange={handleChange}
-                    className="input-responsive tap-target"
-                  required={(formData.campus === 'Main' && !formData.universityLevelOffice) || (formData.campus && formData.campus !== 'Main')}
-                  disabled={loading || loadingData || !formData.campus || 
-                           (formData.campus === 'Main' && !formData.office && !formData.universityLevelOffice) || 
-                           (formData.campus === 'Main' && formData.universityLevelOffice && universityLevelOffices.some(o => o.name === formData.universityLevelOffice)) ||
-                           (formData.campus && formData.campus !== 'Main' && !formData.office)}
-                  >
-                    <option value="">
-                      {(() => {
-                        if (formData.campus === 'Main') {
-                          const isFacultiesSelected = formData.office === 'Faculties';
-                          const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
-                          
-                          if (formData.universityLevelOffice && universityLevelOffices.some(o => o.name === formData.universityLevelOffice)) {
-                            return 'Not applicable with University-Level Office';
-                          }
-                          if (isFacultiesSelected && mainCampus) {
-                            const mainFaculties = faculties.filter(f => 
-                              f.campus?._id === mainCampus._id || f.campus?.name === 'Main'
-                            );
-                            const facultyNames = mainFaculties.map(f => f.name);
-                            if (facultyNames.includes(formData.unit)) {
-                              return `Select Program for ${formData.unit}`;
-                            }
-                          }
-                          if (!formData.office && !formData.universityLevelOffice) {
-                            return 'Select Office first';
-                          }
-                        } else if (formData.campus && formData.campus !== 'Main') {
-                          // For extension campuses
-                          const selectedCampus = campuses.find(c => c.name === formData.campus);
-                          if (selectedCampus && formData.office) {
-                            const campusFaculties = faculties.filter(f => 
-                              f.campus?._id === selectedCampus._id || f.campus?.name === formData.campus
-                            );
-                            const facultyNames = campusFaculties.map(f => f.name);
-                            if (facultyNames.includes(formData.unit)) {
-                              return `Select Program for ${formData.unit}`;
-                            }
-                          }
-                          if (!formData.office) {
-                            return 'Select Faculty first';
-                          }
-                        }
-                        return 'Select Program';
-                      })()}
-                    </option>
-                    {getUnitOptions().map((option, index) => (
-                      <option key={`${option}-${index}`} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* University-Level Offices */}
-                <div className="form-group-responsive">
-                  <label
-                    htmlFor="universityLevelOffice"
-                    className="block text-gray-700 text-responsive-sm font-medium mb-1.5"
-                  >
-                    University-Level Offices
-                  </label>
-                  <select
-                    id="universityLevelOffice"
-                    name="universityLevelOffice"
-                    value={formData.universityLevelOffice}
-                    onChange={handleChange}
-                    className="input-responsive tap-target"
-                    disabled={loading || loadingData || (formData.campus === 'Main' && formData.office && formData.unit) || (formData.campus && formData.campus !== 'Main') || !formData.campus}
-                  >
-                    <option value="">
-                      {formData.campus === 'Main' && formData.office && formData.unit
-                        ? 'Not applicable when Office and Unit are selected'
-                        : formData.campus && formData.campus !== 'Main'
+                  <SearchableSelect
+                    id="program"
+                    placeholder={
+                      !formData.office
+                        ? 'Select office first'
+                        : formData.office !== OVPAA_OFFICE_NAME
                           ? 'Not applicable'
-                          : 'Select university-level office'}
-                    </option>
-                    {getUniversityLevelOfficeOptions().map((office, index) => (
-                      <option key={`${office}-${index}`} value={office}>
-                        {office}
-                      </option>
-                    ))}
-                  </select>
+                          : !formData.unit
+                            ? 'Select unit first'
+                            : 'Select program'
+                    }
+                    options={formData.office === OVPAA_OFFICE_NAME ? getProgramOptions() : []}
+                    value={formData.office === OVPAA_OFFICE_NAME ? formData.program : ''}
+                    onChange={(val) => setFormData((prev) => ({ ...prev, program: val || '' }))}
+                    disabled={loading || loadingData || !formData.office || formData.office !== OVPAA_OFFICE_NAME || (formData.office === OVPAA_OFFICE_NAME && !formData.unit)}
+                  />
                 </div>
               </div>
 

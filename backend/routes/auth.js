@@ -20,6 +20,90 @@ const UNIVERSITY_LEVEL_OFFICES = [
   'Office of the Chancellor'
 ];
 
+const normalizeCampusValue = (campus) => {
+  if (!campus || typeof campus !== 'string' || campus.trim() === '') {
+    return 'Main';
+  }
+  const trimmed = campus.trim();
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+};
+
+const normalizeUnitValue = (unit) =>
+  String(unit ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const extractBaseUnit = (unit) => {
+  const normalized = normalizeUnitValue(unit).toLowerCase();
+  if (!normalized) return '';
+  const prefixes = ['main ', 'bga ', 'tar ', 'ban ', 'sid ', 'president '];
+  for (const prefix of prefixes) {
+    if (normalized.startsWith(prefix)) {
+      return normalized.slice(prefix.length).trim();
+    }
+  }
+  return normalized;
+};
+
+const isSystemRole = (role, isUniversityLevelOffice) => {
+  const normalized = String(role ?? '').toLowerCase().trim();
+  if (isUniversityLevelOffice) {
+    return normalized === 'admin';
+  }
+  return normalized === 'admin' || normalized === 'president' || normalized === 'executive';
+};
+
+const findApprovedUnitConflict = async ({ userIdToExclude, unit, campus, isUniversityLevelOffice }) => {
+  const campusNormalized = normalizeCampusValue(campus);
+  const baseUnit = extractBaseUnit(unit);
+  const unitNormalized = normalizeUnitValue(unit);
+
+  // Pull candidates for the same campus (and Main aliases), then compare in JS using normalized base unit.
+  const campusQuery = campusNormalized === 'Main'
+    ? {
+        $or: [
+          { campus: 'Main' },
+          { campus: 'main' },
+          { campus: 'MAIN' },
+          { campus: '' },
+          { campus: null },
+          { campus: { $exists: false } }
+        ]
+      }
+    : {
+        $or: [
+          { campus: campusNormalized },
+          { campus: campusNormalized.toLowerCase() },
+          { campus: campusNormalized.toUpperCase() }
+        ]
+      };
+
+  const candidates = await User.find({
+    ...campusQuery,
+    approvalStatus: 'approved',
+    _id: { $ne: userIdToExclude }
+  }).select('-password');
+
+  const conflict = candidates.find((u) => {
+    const candidateUnit = normalizeUnitValue(u.unit);
+    if (!candidateUnit) return false;
+
+    const candidateIsUniversityLevel = UNIVERSITY_LEVEL_OFFICES.includes(candidateUnit);
+    // If we're dealing with a university-level office, the unit must match exactly (after normalization).
+    if (isUniversityLevelOffice || candidateIsUniversityLevel) {
+      const a = normalizeUnitValue(candidateUnit).toLowerCase();
+      const b = normalizeUnitValue(unitNormalized).toLowerCase();
+      if (a !== b) return false;
+      return !isSystemRole(u.role, true);
+    }
+
+    // Regular unit: compare using extracted base unit (handles "BSIT" vs "MAIN BSIT", casing, spacing).
+    return extractBaseUnit(candidateUnit) === baseUnit && !isSystemRole(u.role, false);
+  });
+
+  return conflict || null;
+};
+
 // Configure multer for profile picture uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -536,61 +620,22 @@ router.patch('/approve-user/:userId', auth, async (req, res) => {
       });
     }
 
-    // Normalize campus values consistently (empty/null/undefined -> 'Main', trim, case-insensitive)
-    const normalizeCampus = (campus) => {
-      if (!campus || typeof campus !== 'string' || campus.trim() === '') {
-        return 'Main';
-      }
-      const trimmed = campus.trim();
-      // Case-insensitive normalization: capitalize first letter, lowercase rest
-      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-    };
-    
-    const userToApproveCampus = normalizeCampus(userToApprove.campus);
-    const userToApproveUnit = (userToApprove.unit || '').trim();
+    const userToApproveCampus = normalizeCampusValue(userToApprove.campus);
+    const userToApproveUnit = normalizeUnitValue(userToApprove.unit);
     
     // Check if this is a university-level office (these need special conflict detection)
     const isUniversityLevelOffice = UNIVERSITY_LEVEL_OFFICES.includes(userToApproveUnit);
-    
-    // Build campus query: match normalized campus value or match empty/null/undefined if normalized to 'Main'
-    // Also handle case variations (Main, main, MAIN, etc.)
-    const campusQuery = userToApproveCampus === 'Main' 
-      ? { 
-          $or: [
-            { campus: 'Main' }, 
-            { campus: 'main' },
-            { campus: 'MAIN' },
-            { campus: '' }, 
-            { campus: null }, 
-            { campus: { $exists: false } }
-          ] 
-        }
-      : { 
-          $or: [
-            { campus: userToApproveCampus },
-            { campus: userToApproveCampus.toLowerCase() },
-            { campus: userToApproveCampus.toUpperCase() }
-          ]
-        };
-    
-    // Build role query based on whether this is a university-level office
-    // For university-level offices (especially President), check ALL roles including president/Executive
-    // For regular units, exclude admin/president/Executive roles (these are system roles, not program heads)
-    const roleQuery = isUniversityLevelOffice
-      ? { role: { $ne: 'admin' } } // Only exclude admin role for university-level offices
-      : { role: { $nin: ['admin', 'president', 'Executive'] } }; // Exclude all for regular units
-    
-    const existingUser = await User.findOne({
+
+    const existingUser = await findApprovedUnitConflict({
+      userIdToExclude: userId,
       unit: userToApproveUnit,
-      ...campusQuery,
-      approvalStatus: 'approved',
-      ...roleQuery,
-      _id: { $ne: userId } // Exclude the user being approved
-    }).select('-password');
+      campus: userToApproveCampus,
+      isUniversityLevelOffice
+    });
 
     // If conflict exists and not auto-suspending, return conflict info
     if (existingUser && !autoSuspendConflict) {
-      const existingUserCampus = normalizeCampus(existingUser.campus);
+      const existingUserCampus = normalizeCampusValue(existingUser.campus);
       return res.status(409).json({
         conflict: true,
         message: `Another user with the same unit (${existingUserCampus} campus) is already approved`,
@@ -887,38 +932,19 @@ router.patch('/update-user/:userId', auth, async (req, res) => {
       if (newUnit !== user.unit) {
         // Check for conflict if user is approved
         if (user.approvalStatus === 'approved') {
-          const normalizeCampus = (campus) => {
-            if (!campus || typeof campus !== 'string' || campus.trim() === '') {
-              return 'Main';
-            }
-            const trimmed = campus.trim();
-            return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-          };
-          
-          const userCampus = normalizeCampus(user.campus);
+          const userCampus = normalizeCampusValue(user.campus);
           const isUniversityLevelOffice = UNIVERSITY_LEVEL_OFFICES.includes(newUnit);
-          
-          // Build campus query
-          const campusQuery = userCampus === 'Main' 
-            ? { $or: [{ campus: 'Main' }, { campus: 'main' }, { campus: 'MAIN' }, { campus: '' }, { campus: null }, { campus: { $exists: false } }] }
-            : { $or: [{ campus: userCampus }, { campus: userCampus.toLowerCase() }, { campus: userCampus.toUpperCase() }] };
-          
-          // Build role query
-          const roleQuery = isUniversityLevelOffice
-            ? { role: { $ne: 'admin' } }
-            : { role: { $nin: ['admin', 'president', 'Executive'] } };
-          
-          const existingUser = await User.findOne({
+
+          const existingUser = await findApprovedUnitConflict({
+            userIdToExclude: userId,
             unit: newUnit,
-            ...campusQuery,
-            approvalStatus: 'approved',
-            ...roleQuery,
-            _id: { $ne: userId }
-          }).select('-password');
+            campus: userCampus,
+            isUniversityLevelOffice
+          });
           
           // If conflict exists and not auto-suspending, return conflict info
           if (existingUser && !req.body.autoSuspendConflict) {
-            const existingUserCampus = normalizeCampus(existingUser.campus);
+            const existingUserCampus = normalizeCampusValue(existingUser.campus);
             return res.status(409).json({
               conflict: true,
               message: `Another user with the same unit (${existingUserCampus} campus) is already approved`,

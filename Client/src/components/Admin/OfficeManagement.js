@@ -3,6 +3,8 @@ import axios from 'axios';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
 import Modal from '../common/Modal';
 
+const OVPAA_OFFICE_NAME = 'Office of the Vice President for Academic Affairs';
+
 const OfficeManagement = () => {
   const [activeTab, setActiveTab] = useState('campuses');
   const [loading, setLoading] = useState(false);
@@ -15,8 +17,13 @@ const OfficeManagement = () => {
   const [offices, setOffices] = useState([]);
   const [units, setUnits] = useState([]);
   const [programs, setPrograms] = useState([]);
-  const [universityLevelOffices, setUniversityLevelOffices] = useState([]);
   const [yearCycles, setYearCycles] = useState([]);
+  const [selectedOfficeIdForUnits, setSelectedOfficeIdForUnits] = useState('');
+  const [unitsUnderOffice, setUnitsUnderOffice] = useState([]);
+  const [unitsPage, setUnitsPage] = useState(1);
+  const [unitsPerPage] = useState(10);
+  const [selectedOfficeIdForPrograms, setSelectedOfficeIdForPrograms] = useState('');
+  const [unitsUnderOvpaa, setUnitsUnderOvpaa] = useState([]);
   
   // Modal states
   const [showModal, setShowModal] = useState(false);
@@ -26,6 +33,8 @@ const OfficeManagement = () => {
   const [showUpdateConfirmation, setShowUpdateConfirmation] = useState(false);
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [itemToDelete, setItemToDelete] = useState(null); // { entity, item }
+  const [showOverlapWarning, setShowOverlapWarning] = useState(false);
+  const [overlappingCycles, setOverlappingCycles] = useState([]);
   const formRef = useRef(null);
   
   // Form states
@@ -33,6 +42,7 @@ const OfficeManagement = () => {
     name: '',
     campus: '',
     office: '',
+    unit: '',
     faculty: '',
     isActive: true,
     order: 0
@@ -43,7 +53,7 @@ const OfficeManagement = () => {
     { id: 'faculties', label: 'Faculties' },
     { id: 'programs', label: 'Programs' },
     { id: 'offices', label: 'Offices' },
-    { id: 'universityLevel', label: 'University-Level Offices' },
+    { id: 'units', label: 'Units' },
     { id: 'yearCycles', label: 'Year Cycles' }
   ];
 
@@ -53,10 +63,29 @@ const OfficeManagement = () => {
     fetchFaculties();
     fetchOffices();
     fetchPrograms();
-    fetchUniversityLevelOffices();
     fetchYearCycles();
   }, []);
 
+  // Fetch units: all when no office selected, or only under selected office
+  useEffect(() => {
+    const load = async () => {
+      const list = await fetchUnits(selectedOfficeIdForUnits || null);
+      setUnitsUnderOffice(list || []);
+      setUnitsPage(1);
+    };
+    load();
+  }, [selectedOfficeIdForUnits]);
+
+  // Fetch units under OVPAA when Program modal is open
+  useEffect(() => {
+    const ovpaa = offices.find((o) => o.name === OVPAA_OFFICE_NAME);
+    if (showModal && modalEntity === 'program' && ovpaa) {
+      fetchUnits(ovpaa._id).then((list) => setUnitsUnderOvpaa(list || []));
+    } else {
+      setUnitsUnderOvpaa([]);
+    }
+  }, [showModal, modalEntity, offices]);
+  
   // Fetch functions
   const fetchCampuses = async () => {
     try {
@@ -91,12 +120,11 @@ const OfficeManagement = () => {
     }
   };
 
-  const fetchUnits = async (officeId) => {
+  const fetchUnits = async (officeId = null) => {
     try {
-      const response = await axios.get(API_ENDPOINTS.organization.units.list, {
-        params: { officeId },
-        headers: getAuthHeaders()
-      });
+      const config = { headers: getAuthHeaders() };
+      if (officeId) config.params = { officeId };
+      const response = await axios.get(API_ENDPOINTS.organization.units.list, config);
       return response.data;
     } catch (err) {
       console.error('Error fetching units:', err);
@@ -112,17 +140,6 @@ const OfficeManagement = () => {
       setPrograms(response.data);
     } catch (err) {
       console.error('Error fetching programs:', err);
-    }
-  };
-
-  const fetchUniversityLevelOffices = async () => {
-    try {
-      const response = await axios.get(API_ENDPOINTS.organization.universityLevelOffices.list, {
-        headers: getAuthHeaders()
-      });
-      setUniversityLevelOffices(response.data);
-    } catch (err) {
-      console.error('Error fetching university level offices:', err);
     }
   };
 
@@ -142,10 +159,12 @@ const OfficeManagement = () => {
     setModalType('create');
     setModalEntity(entity);
     setEditingItem(null);
+    const ovpaaOffice = offices.find((o) => o.name === OVPAA_OFFICE_NAME);
     setFormData({
       name: '',
-      campus: '',
-      office: '',
+      campus: entity === 'office' ? '' : '',
+      office: entity === 'unit' ? (selectedOfficeIdForUnits || '') : '',
+      unit: entity === 'program' ? '' : '',
       faculty: '',
       isActive: true,
       order: 0
@@ -160,8 +179,9 @@ const OfficeManagement = () => {
     setEditingItem(item);
     setFormData({
       name: item.name || '',
-      campus: item.campus?._id || item.campus || '',
+      campus: entity === 'office' ? '' : (item.campus?._id || item.campus || ''),
       office: item.office?._id || item.office || '',
+      unit: item.unit?._id || item.unit || '',
       faculty: item.faculty?._id || item.faculty || '',
       isActive: item.isActive !== undefined ? item.isActive : true,
       order: item.order || 0
@@ -199,8 +219,8 @@ const OfficeManagement = () => {
         case 'program':
           endpoint = API_ENDPOINTS.organization.programs.delete(item._id);
           break;
-        case 'universityLevel':
-          endpoint = API_ENDPOINTS.organization.universityLevelOffices.delete(item._id);
+        case 'unit':
+          endpoint = API_ENDPOINTS.organization.units.delete(item._id);
           break;
         case 'yearCycle':
           endpoint = API_ENDPOINTS.organization.yearCycles.delete(item._id);
@@ -214,8 +234,10 @@ const OfficeManagement = () => {
       else if (entity === 'faculty') fetchFaculties();
       else if (entity === 'office') fetchOffices();
       else if (entity === 'program') fetchPrograms();
-      else if (entity === 'universityLevel') fetchUniversityLevelOffices();
-      else if (entity === 'yearCycle') fetchYearCycles();
+      else if (entity === 'unit') {
+        const list = await fetchUnits(selectedOfficeIdForUnits || null);
+        setUnitsUnderOffice(list || []);
+      } else if (entity === 'yearCycle') fetchYearCycles();
       
       setSuccess(`${entity.charAt(0).toUpperCase() + entity.slice(1)} deleted successfully`);
       setTimeout(() => setSuccess(''), 3000);
@@ -229,9 +251,45 @@ const OfficeManagement = () => {
     }
   };
 
+  // Check for year cycle overlaps
+  const checkYearCycleOverlap = (yearCycleName) => {
+    // Parse the year cycle name (e.g., "2033-2035")
+    const parts = yearCycleName.trim().split('-');
+    if (parts.length !== 2) return [];
+    
+    const newStartYear = parseInt(parts[0], 10);
+    const newEndYear = parseInt(parts[1], 10);
+    
+    if (isNaN(newStartYear) || isNaN(newEndYear)) return [];
+    
+    // Find overlapping year cycles
+    const overlaps = yearCycles.filter(cycle => {
+      // Skip the current cycle being edited
+      if (modalType === 'edit' && editingItem && cycle._id === editingItem._id) {
+        return false;
+      }
+      
+      // Check if cycles overlap: (newStart <= existingEnd && newEnd >= existingStart)
+      return newStartYear <= cycle.endYear && newEndYear >= cycle.startYear;
+    });
+    
+    return overlaps;
+  };
+
   // Handle form submit
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
+    // Check for year cycle overlaps before submitting
+    if (modalEntity === 'yearCycle' && formData.name) {
+      const overlaps = checkYearCycleOverlap(formData.name);
+      if (overlaps.length > 0) {
+        setOverlappingCycles(overlaps);
+        setShowOverlapWarning(true);
+        return; // Stop submission
+      }
+    }
+    
     setLoading(true);
     setError('');
     setSuccess('');
@@ -262,19 +320,19 @@ const OfficeManagement = () => {
           endpoint = modalType === 'create'
             ? API_ENDPOINTS.organization.offices.create
             : API_ENDPOINTS.organization.offices.update(editingItem._id);
-          data = { name: formData.name, campus: formData.campus, isActive: formData.isActive, order: formData.order };
+          data = { name: formData.name, isActive: formData.isActive, order: formData.order };
           break;
         case 'program':
           endpoint = modalType === 'create'
             ? API_ENDPOINTS.organization.programs.create
             : API_ENDPOINTS.organization.programs.update(editingItem._id);
-          data = { name: formData.name, faculty: formData.faculty, campus: formData.campus, isActive: formData.isActive, order: formData.order };
+          data = { name: formData.name, campus: formData.campus, unit: formData.unit || null, isActive: formData.isActive, order: formData.order };
           break;
-        case 'universityLevel':
+        case 'unit':
           endpoint = modalType === 'create'
-            ? API_ENDPOINTS.organization.universityLevelOffices.create
-            : API_ENDPOINTS.organization.universityLevelOffices.update(editingItem._id);
-          data = { name: formData.name, isActive: formData.isActive, order: formData.order };
+            ? API_ENDPOINTS.organization.units.create
+            : API_ENDPOINTS.organization.units.update(editingItem._id);
+          data = { name: formData.name, office: formData.office, isActive: formData.isActive, order: formData.order || 0 };
           break;
         case 'yearCycle':
           endpoint = modalType === 'create'
@@ -295,8 +353,10 @@ const OfficeManagement = () => {
       else if (modalEntity === 'faculty') fetchFaculties();
       else if (modalEntity === 'office') fetchOffices();
       else if (modalEntity === 'program') fetchPrograms();
-      else if (modalEntity === 'universityLevel') fetchUniversityLevelOffices();
-      else if (modalEntity === 'yearCycle') fetchYearCycles();
+      else if (modalEntity === 'unit') {
+        const list = await fetchUnits(selectedOfficeIdForUnits || null);
+        setUnitsUnderOffice(list || []);
+      } else if (modalEntity === 'yearCycle') fetchYearCycles();
 
       setShowModal(false);
       setShowUpdateConfirmation(false);
@@ -358,9 +418,11 @@ const OfficeManagement = () => {
         <tbody className="divide-y divide-gray-200 bg-white">
           {faculties.map((faculty) => (
             <tr key={faculty._id} className="hover:bg-gray-50">
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{faculty.name}</td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                {faculty.campus?.name || 'N/A'}
+              <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[240px]" title={faculty.name}>
+                <span className="block truncate">{faculty.name}</span>
+              </td>
+              <td className="px-6 py-4 text-sm text-gray-500 max-w-[120px]" title={faculty.campus?.name || 'N/A'}>
+                <span className="block truncate">{faculty.campus?.name || 'N/A'}</span>
               </td>
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${faculty.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
@@ -385,9 +447,8 @@ const OfficeManagement = () => {
     <div className="hidden md:block table-responsive-wrapper max-h-[600px] overflow-y-auto">
       <table className="table-responsive min-w-full divide-y divide-gray-200">
         <thead className="bg-gray-50 sticky top-0 z-10">
-          <tr>
+            <tr>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Name</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Campus</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Status</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Actions</th>
           </tr>
@@ -395,9 +456,8 @@ const OfficeManagement = () => {
         <tbody className="divide-y divide-gray-200 bg-white">
           {offices.map((office) => (
             <tr key={office._id} className="hover:bg-gray-50">
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{office.name}</td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                {office.campus?.name || 'N/A'}
+              <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[280px]" title={office.name}>
+                <span className="block truncate">{office.name}</span>
               </td>
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${office.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
@@ -417,28 +477,36 @@ const OfficeManagement = () => {
     </div>
   );
 
-  // Render table for programs
-  const renderProgramsTable = () => (
+  // Programs under OVPAA only (for filter dropdown)
+  const ovpaaOffice = offices.find((o) => o.name === OVPAA_OFFICE_NAME);
+  const programsForDisplay = selectedOfficeIdForPrograms
+    ? programs.filter((p) => (p.office?._id || p.office) === selectedOfficeIdForPrograms)
+    : programs;
+
+  // Render table for programs (accepts array to support filtering)
+  const renderProgramsTable = (programsToShow = programsForDisplay) => (
     <div className="hidden md:block table-responsive-wrapper max-h-[600px] overflow-y-auto">
       <table className="table-responsive min-w-full divide-y divide-gray-200">
         <thead className="bg-gray-50 sticky top-0 z-10">
           <tr>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Name</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Faculty</th>
+            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Unit</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Campus</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Status</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200 bg-white">
-          {programs.map((program) => (
+          {programsToShow.map((program) => (
             <tr key={program._id} className="hover:bg-gray-50">
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{program.name}</td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                {program.faculty?.name || 'N/A'}
+              <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[200px]" title={program.name}>
+                <span className="block truncate">{program.name}</span>
               </td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                {program.campus?.name || 'All Campuses'}
+              <td className="px-6 py-4 text-sm text-gray-500 max-w-[180px]" title={program.unit?.name || '—'}>
+                <span className="block truncate">{program.unit?.name || '—'}</span>
+              </td>
+              <td className="px-6 py-4 text-sm text-gray-500 max-w-[120px]" title={program.campus?.name || 'All Campuses'}>
+                <span className="block truncate">{program.campus?.name || 'All Campuses'}</span>
               </td>
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${program.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
@@ -460,10 +528,9 @@ const OfficeManagement = () => {
 
   // Render table for year cycles - display only cycles created by users (from database)
   const renderYearCyclesTable = () => {
-    // Sort cycles by order and startYear
+    // Sort cycles by startYear ascending (oldest to newest)
     const sortedCycles = [...yearCycles].sort((a, b) => {
-      if (a.order !== b.order) return a.order - b.order;
-      return (b.startYear || 0) - (a.startYear || 0);
+      return (a.startYear || 0) - (b.startYear || 0);
     });
     
     return (
@@ -505,30 +572,36 @@ const OfficeManagement = () => {
     );
   };
 
-  // Render table for university level offices
-  const renderUniversityLevelTable = () => (
+  // Render table for units (accepts array to support pagination)
+  const renderUnitsTable = (unitsToShow = unitsUnderOffice) => (
     <div className="hidden md:block table-responsive-wrapper max-h-[600px] overflow-y-auto">
-      <table className="table-responsive min-w-full divide-y divide-gray-200">
+      <table className="table-responsive min-w-full divide-y divide-gray-200 table-fixed">
         <thead className="bg-gray-50 sticky top-0 z-10">
           <tr>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Name</th>
+            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Office</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Status</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200 bg-white">
-          {universityLevelOffices.map((office) => (
-            <tr key={office._id} className="hover:bg-gray-50">
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{office.name}</td>
+          {unitsToShow.map((unit) => (
+            <tr key={unit._id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[200px]" title={unit.name}>
+                <span className="block truncate">{unit.name}</span>
+              </td>
+              <td className="px-6 py-4 text-sm text-gray-500 max-w-[200px]" title={unit.office?.name || 'N/A'}>
+                <span className="block truncate">{unit.office?.name || 'N/A'}</span>
+              </td>
               <td className="px-6 py-4 whitespace-nowrap">
-                <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${office.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
-                  {office.isActive ? 'Active' : 'Inactive'}
+                <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${unit.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                  {unit.isActive ? 'Active' : 'Inactive'}
                 </span>
               </td>
               <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                 <div className="flex items-center gap-1.5 flex-nowrap">
-                  <button onClick={() => handleEdit('universityLevel', office)} className="tap-target bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 border border-blue-200 whitespace-nowrap h-7 flex items-center justify-center">Edit</button>
-                  <button onClick={() => handleDelete('universityLevel', office)} className="tap-target bg-red-200 hover:bg-red-300 text-red-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 whitespace-nowrap h-7 flex items-center justify-center">Delete</button>
+                  <button onClick={() => handleEdit('unit', unit)} className="tap-target bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 border border-blue-200 whitespace-nowrap h-7 flex items-center justify-center">Edit</button>
+                  <button onClick={() => handleDelete('unit', unit)} className="tap-target bg-red-200 hover:bg-red-300 text-red-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 whitespace-nowrap h-7 flex items-center justify-center">Delete</button>
                 </div>
               </td>
             </tr>
@@ -541,6 +614,16 @@ const OfficeManagement = () => {
   // Handle modal confirm (form submission)
   const handleModalConfirm = async () => {
     if (loading) return;
+    
+    // Check for year cycle overlaps before showing confirmation
+    if (modalEntity === 'yearCycle' && formData.name) {
+      const overlaps = checkYearCycleOverlap(formData.name);
+      if (overlaps.length > 0) {
+        setOverlappingCycles(overlaps);
+        setShowOverlapWarning(true);
+        return; // Stop here, don't show confirmation modal
+      }
+    }
     
     // Show confirmation modal for both create and edit
     if (formRef.current) {
@@ -569,7 +652,7 @@ const OfficeManagement = () => {
       faculty: 'Faculty',
       office: 'Office',
       program: 'Program',
-      universityLevel: 'University-Level Office',
+      unit: 'Unit',
       yearCycle: 'Year Cycle'
     };
     return `${modalType === 'create' ? 'Create' : 'Edit'} ${entityNames[modalEntity]}`;
@@ -704,13 +787,97 @@ const OfficeManagement = () => {
           </div>
         )}
 
+        {activeTab === 'units' && (
+          <div>
+            <div className="border-b border-gray-200 px-4 sm:px-6 py-3 sm:py-4 mb-4">
+              <div className="flex flex-wrap items-center gap-3 justify-between">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h3 className="text-base sm:text-lg font-semibold text-gray-900">
+                    Units ({unitsUnderOffice.length})
+                  </h3>
+                  <select
+                    value={selectedOfficeIdForUnits}
+                    onChange={(e) => setSelectedOfficeIdForUnits(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500 text-sm max-w-[280px] min-w-[180px]"
+                    title={offices.find(o => o._id === selectedOfficeIdForUnits)?.name || 'All offices'}
+                  >
+                    <option value="">All offices</option>
+                    {offices.filter(o => o.isActive).map((o) => (
+                      <option key={o._id} value={o._id}>{o.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={() => handleCreate('unit')}
+                  className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors tap-target text-sm font-medium"
+                >
+                  + Add Unit
+                </button>
+              </div>
+            </div>
+            {unitsUnderOffice.length === 0 ? (
+              <div className="p-6 sm:p-8 text-center text-gray-500">
+                <p className="text-base sm:text-lg font-medium">
+                  {selectedOfficeIdForUnits ? 'No units under this office yet.' : 'No units created yet.'}
+                </p>
+                <p className="text-xs sm:text-sm">Click &quot;+ Add Unit&quot; to create one.</p>
+              </div>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+                {renderUnitsTable(unitsUnderOffice.slice((unitsPage - 1) * unitsPerPage, unitsPage * unitsPerPage))}
+                {unitsUnderOffice.length > unitsPerPage && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-gray-200 bg-gray-50 text-sm">
+                    <span className="text-gray-600">
+                      Showing {(unitsPage - 1) * unitsPerPage + 1}–{Math.min(unitsPage * unitsPerPage, unitsUnderOffice.length)} of {unitsUnderOffice.length}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setUnitsPage((p) => Math.max(1, p - 1))}
+                        disabled={unitsPage <= 1}
+                        className="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed tap-target"
+                      >
+                        Previous
+                      </button>
+                      <span className="px-2 py-1 text-gray-600">
+                        Page {unitsPage} of {Math.ceil(unitsUnderOffice.length / unitsPerPage)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setUnitsPage((p) => Math.min(Math.ceil(unitsUnderOffice.length / unitsPerPage), p + 1))}
+                        disabled={unitsPage >= Math.ceil(unitsUnderOffice.length / unitsPerPage)}
+                        className="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed tap-target"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === 'programs' && (
           <div>
             <div className="border-b border-gray-200 px-4 sm:px-6 py-3 sm:py-4 mb-4">
-              <div className="flex justify-between items-center">
-                <h3 className="text-base sm:text-lg font-semibold text-gray-900">
-                  Programs ({programs.length})
-                </h3>
+              <div className="flex flex-wrap items-center gap-3 justify-between">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h3 className="text-base sm:text-lg font-semibold text-gray-900">
+                    Programs ({programsForDisplay.length})
+                  </h3>
+                  <select
+                    value={selectedOfficeIdForPrograms}
+                    onChange={(e) => setSelectedOfficeIdForPrograms(e.target.value)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500 text-sm max-w-[320px] min-w-[180px]"
+                    title={ovpaaOffice && selectedOfficeIdForPrograms === ovpaaOffice._id ? OVPAA_OFFICE_NAME : 'All programs'}
+                  >
+                    <option value="">All programs</option>
+                    {ovpaaOffice && (
+                      <option value={ovpaaOffice._id}>{OVPAA_OFFICE_NAME}</option>
+                    )}
+                  </select>
+                </div>
                 <button 
                   onClick={() => handleCreate('program')}
                   className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors tap-target text-sm font-medium"
@@ -719,48 +886,19 @@ const OfficeManagement = () => {
                 </button>
               </div>
             </div>
-            {programs.length === 0 ? (
+            {programsForDisplay.length === 0 ? (
               <div className="p-6 sm:p-8 text-center text-gray-500">
                 <svg className="mx-auto mb-4 h-10 w-10 sm:h-12 sm:w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                 </svg>
-                <p className="text-base sm:text-lg font-medium">No programs found</p>
-                <p className="text-xs sm:text-sm">Click "Add Program" to create one</p>
+                <p className="text-base sm:text-lg font-medium">
+                  {selectedOfficeIdForPrograms ? 'No programs under this office yet.' : 'No programs found'}
+                </p>
+                <p className="text-xs sm:text-sm">Click &quot;+ Add Program&quot; to create one (under {OVPAA_OFFICE_NAME}).</p>
               </div>
             ) : (
               <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
                 {renderProgramsTable()}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'universityLevel' && (
-          <div>
-            <div className="border-b border-gray-200 px-4 sm:px-6 py-3 sm:py-4 mb-4">
-              <div className="flex justify-between items-center">
-                <h3 className="text-base sm:text-lg font-semibold text-gray-900">
-                  University-Level Offices ({universityLevelOffices.length})
-                </h3>
-                <button 
-                  onClick={() => handleCreate('universityLevel')}
-                  className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors tap-target text-sm font-medium"
-                >
-                  + Add University-Level Office
-                </button>
-              </div>
-            </div>
-            {universityLevelOffices.length === 0 ? (
-              <div className="p-6 sm:p-8 text-center text-gray-500">
-                <svg className="mx-auto mb-4 h-10 w-10 sm:h-12 sm:w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                </svg>
-                <p className="text-base sm:text-lg font-medium">No university-level offices found</p>
-                <p className="text-xs sm:text-sm">Click "Add University-Level Office" to create one</p>
-              </div>
-            ) : (
-              <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-                {renderUniversityLevelTable()}
               </div>
             )}
           </div>
@@ -811,17 +949,77 @@ const OfficeManagement = () => {
         )}
 
         <form ref={formRef} onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-              required
-              disabled={loading}
-            />
-          </div>
+          {/* Unit modal: Office first, then Name (Name disabled until Office is selected) */}
+          {modalEntity === 'unit' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Office *</label>
+              <select
+                value={formData.office}
+                onChange={(e) => setFormData({ ...formData, office: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                required
+                disabled={loading}
+              >
+                <option value="">Select Office</option>
+                {offices.filter(o => o.isActive).map((o) => (
+                  <option key={o._id} value={o._id}>{o.name}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">Select an office first, then enter the unit name below.</p>
+            </div>
+          )}
+
+          {/* Program modal: Unit (under OVPAA) first, then Campus, then Name below */}
+          {modalEntity === 'program' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Unit *</label>
+                <select
+                  value={formData.unit}
+                  onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  required
+                  disabled={loading}
+                >
+                  <option value="">Select Unit</option>
+                  {unitsUnderOvpaa.map((u) => (
+                    <option key={u._id} value={u._id}>{u.name}</option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-gray-500">Programs are under {OVPAA_OFFICE_NAME}. Select a unit under that office first, then fill the rest.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Campus *</label>
+                <select
+                  value={formData.campus}
+                  onChange={(e) => setFormData({ ...formData, campus: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  required
+                  disabled={loading}
+                >
+                  <option value="">Select Campus</option>
+                  {campuses.map(c => (
+                    <option key={c._id} value={c._id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
+
+          {modalEntity !== 'yearCycle' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+              <input
+                type="text"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                required
+                disabled={loading || (modalEntity === 'unit' && !formData.office) || (modalEntity === 'program' && !formData.unit)}
+                placeholder={(modalEntity === 'unit' && !formData.office) ? 'Select office first' : (modalEntity === 'program' && !formData.unit) ? 'Select unit first' : ''}
+              />
+            </div>
+          )}
 
           {modalEntity === 'faculty' && (
             <div>
@@ -839,71 +1037,6 @@ const OfficeManagement = () => {
                 ))}
               </select>
             </div>
-          )}
-
-          {modalEntity === 'office' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Campus *</label>
-              <select
-                value={formData.campus}
-                onChange={(e) => setFormData({ ...formData, campus: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                required
-                disabled={loading}
-              >
-                <option value="">Select Campus</option>
-                {campuses.map(c => (
-                  <option key={c._id} value={c._id}>{c.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {modalEntity === 'program' && (
-            <>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Campus *</label>
-                <select
-                  value={formData.campus}
-                  onChange={(e) => {
-                    setFormData({ ...formData, campus: e.target.value, faculty: '' }); // Clear faculty when campus changes
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                  required
-                  disabled={loading}
-                >
-                  <option value="">Select Campus</option>
-                  {campuses.map(c => (
-                    <option key={c._id} value={c._id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Faculty *</label>
-                <select
-                  value={formData.faculty}
-                  onChange={(e) => setFormData({ ...formData, faculty: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                  required
-                  disabled={loading || !formData.campus}
-                >
-                  <option value="">
-                    {formData.campus ? 'Select Faculty' : 'Select Campus first'}
-                  </option>
-                  {formData.campus && faculties
-                    .filter(f => {
-                      const facultyCampusId = f.campus?._id || f.campus;
-                      const selectedCampusId = formData.campus;
-                      return facultyCampusId === selectedCampusId || 
-                             (typeof facultyCampusId === 'string' && facultyCampusId === selectedCampusId) ||
-                             (typeof selectedCampusId === 'string' && facultyCampusId === selectedCampusId);
-                    })
-                    .map(f => (
-                      <option key={f._id} value={f._id}>{f.name}</option>
-                    ))}
-                </select>
-              </div>
-            </>
           )}
 
           {modalEntity === 'yearCycle' && (
@@ -976,6 +1109,30 @@ const OfficeManagement = () => {
           setItemToDelete(null);
         }}
         closeOnOverlay={!loading}
+        zIndex={60}
+      />
+
+      {/* Year Cycle Overlap Warning Modal */}
+      <Modal
+        isOpen={showOverlapWarning}
+        variant="danger"
+        title="Year Cycle Overlap Detected"
+        message={
+          overlappingCycles.length > 0
+            ? `The year cycle "${formData.name}" overlaps with the following existing year cycle(s):\n\n${overlappingCycles.map(cycle => `• ${cycle.name} (${cycle.startYear}-${cycle.endYear})`).join('\n')}\n\nPlease choose a different year range that does not overlap with existing cycles.`
+            : ''
+        }
+        confirmLabel="OK"
+        cancelLabel={null}
+        onConfirm={() => {
+          setShowOverlapWarning(false);
+          setOverlappingCycles([]);
+        }}
+        onClose={() => {
+          setShowOverlapWarning(false);
+          setOverlappingCycles([]);
+        }}
+        closeOnOverlay={true}
         zIndex={60}
       />
     </div>

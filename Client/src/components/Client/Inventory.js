@@ -10,6 +10,7 @@ const Inventory = () => {
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedRequest, setSelectedRequest] = useState(null); // Track selected request for detail view
+  const [selectedYearCycle, setSelectedYearCycle] = useState(null); // Track selected year cycle group
   const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
@@ -46,8 +47,63 @@ const Inventory = () => {
     fetchInventoryItems();
   }, []);
 
-  // Group items by name (case-insensitive) across all requests
-  const groupedItems = inventoryItems.reduce((acc, item) => {
+  // First, group items by year cycle
+  const itemsByYearCycle = inventoryItems.reduce((acc, item) => {
+    const yearCycle = item.requestYear || 'N/A';
+    if (!acc[yearCycle]) {
+      acc[yearCycle] = [];
+    }
+    acc[yearCycle].push(item);
+    return acc;
+  }, {});
+
+  // Convert to array format for year cycle groups
+  const yearCycleGroups = Object.entries(itemsByYearCycle).map(([year, items]) => {
+    // Count unique item names and total quantity for this year cycle
+    const uniqueItems = new Set(items.map(item => (item.name || '').toLowerCase().trim()));
+    const totalQuantity = items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+    const approvedCount = items.filter(item => 
+      item.status === 'Approved' || item.approvalStatus === 'approved'
+    ).length;
+    const disapprovedCount = items.filter(item => 
+      item.status === 'Disapproved' || item.status === 'disapproved' || 
+      item.approvalStatus === 'disapproved'
+    ).length;
+    
+    return {
+      year,
+      items,
+      totalItems: uniqueItems.size,
+      totalQuantity,
+      approvedCount,
+      disapprovedCount,
+      pendingCount: items.length - approvedCount - disapprovedCount
+    };
+  }).sort((a, b) => {
+    // Sort by year cycle (oldest to newest)
+    if (a.year === 'N/A') return 1;
+    if (b.year === 'N/A') return -1;
+    // Parse start year from year cycle (e.g., "2024-2026" -> 2024)
+    const aStartYear = parseInt(a.year.split('-')[0]) || 0;
+    const bStartYear = parseInt(b.year.split('-')[0]) || 0;
+    return aStartYear - bStartYear; // Sort ascending (oldest to newest)
+  });
+
+  // Filter year cycle groups based on search term (when viewing year cycle cards)
+  const filteredYearCycleGroups = yearCycleGroups.filter(group => {
+    if (!searchTerm.trim()) return true;
+    const searchLower = searchTerm.toLowerCase();
+    // Search by year cycle name
+    return group.year.toLowerCase().includes(searchLower);
+  });
+
+  // Get items for selected year cycle (or all items if none selected)
+  const itemsForSelectedCycle = selectedYearCycle 
+    ? itemsByYearCycle[selectedYearCycle] || []
+    : inventoryItems;
+
+  // Group items by name (case-insensitive) for the selected year cycle
+  const groupedItems = itemsForSelectedCycle.reduce((acc, item) => {
     const itemNameKey = (item.name || '').toLowerCase().trim();
     if (!itemNameKey) return acc;
     
@@ -78,7 +134,10 @@ const Inventory = () => {
     if (item.status) {
       group.statuses.add(item.status);
     }
-    if (item.reason && item.reason.trim()) {
+    // Only collect reasons for disapproved/rejected items
+    if (item.reason && item.reason.trim() && 
+        (item.status === 'Disapproved' || item.status === 'disapproved' || 
+         item.approvalStatus === 'disapproved' || item.status?.toLowerCase().includes('disapprove'))) {
       group.reasons.add(item.reason.trim());
     }
     if (item.price && item.price > 0) {
@@ -128,10 +187,10 @@ const Inventory = () => {
   const endIndex = startIndex + itemsPerPage;
   const paginatedItems = filteredItems.slice(startIndex, endIndex);
 
-  // Reset to page 1 when search changes
+  // Reset to page 1 when search changes or year cycle changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm]);
+  }, [searchTerm, selectedYearCycle]);
 
   return (
     <div className={`space-y-4 sm:space-y-6 transition-opacity duration-500 ${animateInventory ? 'opacity-100' : 'opacity-0'}`}>
@@ -170,7 +229,319 @@ const Inventory = () => {
           {/* Inventory Items - Grouped and Paginated View */}
           {!loading && !error && (
             <>
-              {selectedRequest ? (
+              {selectedYearCycle ? (
+                // Year Cycle Detail View - Show items table for selected year cycle
+                <div className="space-y-4">
+                  {/* Back Button and Header */}
+                  <div className="flex items-center justify-between mb-6">
+                    <button
+                      onClick={() => {
+                        setSelectedYearCycle(null);
+                        setCurrentPage(1);
+                      }}
+                      className="flex items-center space-x-2 text-gray-600 hover:text-gray-900 transition-colors"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      </svg>
+                      <span className="text-sm font-medium">Back to Year Cycles</span>
+                    </button>
+                  </div>
+
+                  {/* Year Cycle Info Card */}
+                  <div className="bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-200 rounded-lg p-4 sm:p-6">
+                    <h3 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">{selectedYearCycle}</h3>
+                    <div className="flex flex-wrap items-center gap-4 mt-4">
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Item</span>
+                        <p className="text-sm font-semibold text-gray-900 mt-1">{yearCycleGroups.find(g => g.year === selectedYearCycle)?.totalItems || 0}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Quantity</span>
+                        <p className="text-sm font-semibold text-gray-900 mt-1">{yearCycleGroups.find(g => g.year === selectedYearCycle)?.totalQuantity || 0}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Approved</span>
+                        <p className="text-sm font-semibold text-green-700 mt-1">{yearCycleGroups.find(g => g.year === selectedYearCycle)?.approvedCount || 0}</p>
+                      </div>
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Disapproved</span>
+                        <p className="text-sm font-semibold text-red-700 mt-1">{yearCycleGroups.find(g => g.year === selectedYearCycle)?.disapprovedCount || 0}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Items Table for Selected Year Cycle */}
+                  {(() => {
+                    const cycleItems = itemsByYearCycle[selectedYearCycle] || [];
+                    const cycleGroupedItems = cycleItems.reduce((acc, item) => {
+                      const itemNameKey = (item.name || '').toLowerCase().trim();
+                      if (!itemNameKey) return acc;
+                      
+                      if (!acc[itemNameKey]) {
+                        acc[itemNameKey] = {
+                          name: item.name,
+                          quantity: 0,
+                          specifications: new Set(),
+                          purposes: new Set(),
+                          statuses: new Set(),
+                          reasons: new Set(),
+                          prices: [],
+                          requestTitles: new Set(),
+                          originalItems: []
+                        };
+                      }
+                      
+                      const itemGroup = acc[itemNameKey];
+                      itemGroup.quantity += Number(item.quantity) || 0;
+                      if (item.specification && item.specification.trim()) {
+                        itemGroup.specifications.add(item.specification.trim());
+                      }
+                      if (item.purpose && item.purpose.trim()) {
+                        itemGroup.purposes.add(item.purpose.trim());
+                      }
+                      if (item.status) {
+                        itemGroup.statuses.add(item.status);
+                      }
+                      if (item.reason && item.reason.trim() && 
+                          (item.status === 'Disapproved' || item.status === 'disapproved' || 
+                           item.approvalStatus === 'disapproved' || item.status?.toLowerCase().includes('disapprove'))) {
+                        itemGroup.reasons.add(item.reason.trim());
+                      }
+                      if (item.price && item.price > 0) {
+                        itemGroup.prices.push(item.price);
+                      }
+                      if (item.requestTitle) {
+                        itemGroup.requestTitles.add(item.requestTitle);
+                      }
+                      itemGroup.originalItems.push(item);
+                      return acc;
+                    }, {});
+
+                    const cycleGroupedItemsArray = Object.values(cycleGroupedItems).map(g => ({
+                      name: g.name,
+                      quantity: g.quantity,
+                      specification: Array.from(g.specifications).filter(s => s).join('; ') || '—',
+                      purpose: Array.from(g.purposes).filter(p => p).join('; ') || '—',
+                      status: Array.from(g.statuses).join(', ') || 'Pending',
+                      reason: Array.from(g.reasons).filter(r => r).join('; ') || '—',
+                      price: g.prices.length > 0 ? g.prices.reduce((a, b) => a + b, 0) / g.prices.length : 0,
+                      requestTitles: Array.from(g.requestTitles),
+                      originalItems: g.originalItems
+                    }));
+
+                    // Filter by search term
+                    const filteredCycleItems = cycleGroupedItemsArray.filter(item => {
+                      if (!searchTerm.trim()) return true;
+                      const searchLower = searchTerm.toLowerCase();
+                      return (
+                        item.name.toLowerCase().includes(searchLower) ||
+                        item.specification.toLowerCase().includes(searchLower) ||
+                        item.purpose.toLowerCase().includes(searchLower) ||
+                        item.status.toLowerCase().includes(searchLower) ||
+                        item.requestTitles.some(title => title.toLowerCase().includes(searchLower))
+                      );
+                    });
+
+                    // Pagination for cycle items
+                    const cycleTotalPages = Math.ceil(filteredCycleItems.length / itemsPerPage);
+                    const cycleStartIndex = (currentPage - 1) * itemsPerPage;
+                    const cycleEndIndex = cycleStartIndex + itemsPerPage;
+                    const paginatedCycleItems = filteredCycleItems.slice(cycleStartIndex, cycleEndIndex);
+
+                    return (
+                      <>
+                        {filteredCycleItems.length === 0 ? (
+                          <div className="text-center py-12 text-gray-500">
+                            <p className="text-lg font-medium">No items found for {selectedYearCycle}</p>
+                            <p className="text-sm text-gray-400 mt-1">
+                              {searchTerm ? 'Try a different search term' : 'No items in this year cycle'}
+                            </p>
+                          </div>
+                        ) : (
+                          <>
+                            {/* Items Table */}
+                            <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                              <div className="overflow-x-auto">
+                                <table className="min-w-full divide-y divide-gray-200">
+                                  <thead className="bg-gray-50">
+                                    <tr>
+                                      <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Name</th>
+                                      <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Specification</th>
+                                      <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Purpose</th>
+                                      <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
+                                      <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                                      <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                      <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                                      <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">View</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="bg-white divide-y divide-gray-200">
+                                    {paginatedCycleItems.map((item, index) => (
+                                      <tr key={`${item.name}-${index}`} className="hover:bg-gray-50">
+                                        <td className="px-4 sm:px-6 py-4">
+                                          <div className="text-sm font-medium text-gray-900 truncate" title={item.name}>
+                                            {item.name}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4">
+                                          <div className="text-sm text-gray-700">
+                                            {item.specification !== '—' ? (
+                                              <div className="line-clamp-2 break-words" title={item.specification}>
+                                                {item.specification}
+                                              </div>
+                                            ) : (
+                                              <span className="text-gray-400">—</span>
+                                            )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4">
+                                          <div className="text-sm text-gray-700">
+                                            {item.purpose !== '—' ? (
+                                              <div className="line-clamp-2 break-words" title={item.purpose}>
+                                                {item.purpose}
+                                              </div>
+                                            ) : (
+                                              <span className="text-gray-400">—</span>
+                                            )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
+                                          <div className="text-sm font-medium text-gray-900">{item.quantity}</div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
+                                          <div className="text-sm text-gray-900">
+                                            {item.price > 0 ? `₱${Math.round(item.price).toLocaleString()}` : '—'}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
+                                          <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                                            item.status.includes('Approved')
+                                              ? 'bg-green-100 text-green-800'
+                                              : item.status.includes('Disapproved')
+                                              ? 'bg-red-100 text-red-800'
+                                              : 'bg-yellow-100 text-yellow-800'
+                                          }`}>
+                                            {item.status}
+                                          </span>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4">
+                                          <div className="text-sm text-gray-700">
+                                            {(item.status.includes('Disapproved') || item.status.includes('disapproved')) && item.reason !== '—' ? (
+                                              <div className="line-clamp-2 break-words" title={item.reason}>
+                                                {item.reason}
+                                              </div>
+                                            ) : (
+                                              <span className="text-gray-400">—</span>
+                                            )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
+                                          <button
+                                            onClick={() => setViewItemModal({ show: true, item: { ...item, originalItems: item.originalItems } })}
+                                            className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+                                            title="View full item details"
+                                          >
+                                            View
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Pagination Controls */}
+                            {cycleTotalPages > 1 && (
+                              <div className="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
+                                <div className="flex flex-1 justify-between sm:hidden">
+                                  <button
+                                    onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                    disabled={currentPage === 1}
+                                    className="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    Previous
+                                  </button>
+                                  <button
+                                    onClick={() => setCurrentPage(prev => Math.min(cycleTotalPages, prev + 1))}
+                                    disabled={currentPage === cycleTotalPages}
+                                    className="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    Next
+                                  </button>
+                                </div>
+                                <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+                                  <div>
+                                    <p className="text-sm text-gray-700">
+                                      Showing <span className="font-medium">{cycleStartIndex + 1}</span> to{' '}
+                                      <span className="font-medium">{Math.min(cycleEndIndex, filteredCycleItems.length)}</span> of{' '}
+                                      <span className="font-medium">{filteredCycleItems.length}</span> items
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
+                                      <button
+                                        onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                        disabled={currentPage === 1}
+                                        className="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                                      >
+                                        <span className="sr-only">Previous</span>
+                                        <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                          <path fillRule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clipRule="evenodd" />
+                                        </svg>
+                                      </button>
+                                      {[...Array(cycleTotalPages)].map((_, i) => {
+                                        const page = i + 1;
+                                        if (
+                                          page === 1 ||
+                                          page === cycleTotalPages ||
+                                          (page >= currentPage - 1 && page <= currentPage + 1)
+                                        ) {
+                                          return (
+                                            <button
+                                              key={page}
+                                              onClick={() => setCurrentPage(page)}
+                                              className={`relative inline-flex items-center px-4 py-2 text-sm font-semibold ${
+                                                currentPage === page
+                                                  ? 'z-10 bg-gray-900 text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900'
+                                                  : 'text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'
+                                              }`}
+                                            >
+                                              {page}
+                                            </button>
+                                          );
+                                        } else if (page === currentPage - 2 || page === currentPage + 2) {
+                                          return (
+                                            <span key={page} className="relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-700 ring-1 ring-inset ring-gray-300 focus:outline-offset-0">
+                                              ...
+                                            </span>
+                                          );
+                                        }
+                                        return null;
+                                      })}
+                                      <button
+                                        onClick={() => setCurrentPage(prev => Math.min(cycleTotalPages, prev + 1))}
+                                        disabled={currentPage === cycleTotalPages}
+                                        className="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                                      >
+                                        <span className="sr-only">Next</span>
+                                        <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                          <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
+                                        </svg>
+                                      </button>
+                                    </nav>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : selectedRequest ? (
                 // Detail View - Show all items from selected request
                 <div className="space-y-4">
                   {/* Back Button and Header */}
@@ -195,7 +566,7 @@ const Inventory = () => {
                         <p className="text-sm font-semibold text-gray-900 mt-1">{selectedRequest.requestYear}</p>
                       </div>
                       <div>
-                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Items</span>
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Item</span>
                         <p className="text-sm font-semibold text-gray-900 mt-1">{selectedRequest.items.length} items</p>
                       </div>
                     </div>
@@ -285,7 +656,8 @@ const Inventory = () => {
                                 </td>
                                 <td className="px-4 sm:px-6 py-4">
                                   <div className="text-sm text-gray-700">
-                                    {item.reason ? (
+                                    {(item.status === 'Disapproved' || item.status === 'disapproved' || 
+                                      item.approvalStatus === 'disapproved' || item.status?.toLowerCase().includes('disapprove')) && item.reason ? (
                                       <div className="line-clamp-2 break-words">
                                         {item.reason}
                                       </div>
@@ -312,196 +684,125 @@ const Inventory = () => {
                   </div>
                 </div>
               ) : (
-                // Grouped Items Table View with Pagination
+                // Year Cycle Groups View
                 <>
-                  {filteredItems.length === 0 ? (
+                  {filteredYearCycleGroups.length === 0 ? (
                     <div className="text-center py-12 text-gray-500">
                       <svg className="w-12 h-12 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
                       </svg>
                       <p className="text-lg font-medium">No inventory items found</p>
                       <p className="text-sm text-gray-400 mt-1">
-                        {searchTerm ? 'Try a different search term' : 'Items will appear here once requests are approved'}
+                        Items will appear here once requests are approved
                       </p>
                     </div>
                   ) : (
-                    <>
-                      {/* Items Table */}
-                      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                              <tr>
-                                <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Name</th>
-                                <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Specification</th>
-                                <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Purpose</th>
-                                <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                                <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
-                                <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                <th className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
-                                <th className="px-4 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">View</th>
-                              </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                              {paginatedItems.map((item, index) => (
-                                <tr key={`${item.name}-${index}`} className="hover:bg-gray-50">
-                                  <td className="px-4 sm:px-6 py-4">
-                                    <div className="text-sm font-medium text-gray-900 truncate" title={item.name}>
-                                      {item.name}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4">
-                                    <div className="text-sm text-gray-700">
-                                      {item.specification !== '—' ? (
-                                        <div className="line-clamp-2 break-words" title={item.specification}>
-                                          {item.specification}
-                                        </div>
-                                      ) : (
-                                        <span className="text-gray-400">—</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4">
-                                    <div className="text-sm text-gray-700">
-                                      {item.purpose !== '—' ? (
-                                        <div className="line-clamp-2 break-words" title={item.purpose}>
-                                          {item.purpose}
-                                        </div>
-                                      ) : (
-                                        <span className="text-gray-400">—</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{item.quantity}</div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
-                                    <div className="text-sm text-gray-900">
-                                      {item.price > 0 ? `₱${Math.round(item.price).toLocaleString()}` : '—'}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4 text-center whitespace-nowrap">
-                                    <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                                      item.status.includes('Approved')
-                                        ? 'bg-green-100 text-green-800'
-                                        : item.status.includes('Disapproved')
-                                        ? 'bg-red-100 text-red-800'
-                                        : 'bg-yellow-100 text-yellow-800'
-                                    }`}>
-                                      {item.status}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4">
-                                    <div className="text-sm text-gray-700">
-                                      {item.reason !== '—' ? (
-                                        <div className="line-clamp-2 break-words" title={item.reason}>
-                                          {item.reason}
-                                        </div>
-                                      ) : (
-                                        <span className="text-gray-400">—</span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
-                                    <button
-                                      onClick={() => setViewItemModal({ show: true, item: { ...item, originalItems: item.originalItems } })}
-                                      className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                                      title="View full item details"
-                                    >
-                                      View
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
+                    <div className="space-y-4">
+                      {filteredYearCycleGroups.map((group) => {
+                        // Filter items for this year cycle and group by name
+                        const cycleItems = group.items;
+                        const cycleGroupedItems = cycleItems.reduce((acc, item) => {
+                          const itemNameKey = (item.name || '').toLowerCase().trim();
+                          if (!itemNameKey) return acc;
+                          
+                          if (!acc[itemNameKey]) {
+                            acc[itemNameKey] = {
+                              name: item.name,
+                              quantity: 0,
+                              specifications: new Set(),
+                              purposes: new Set(),
+                              statuses: new Set(),
+                              reasons: new Set(),
+                              prices: [],
+                              requestTitles: new Set(),
+                              originalItems: []
+                            };
+                          }
+                          
+                          const itemGroup = acc[itemNameKey];
+                          itemGroup.quantity += Number(item.quantity) || 0;
+                          if (item.specification && item.specification.trim()) {
+                            itemGroup.specifications.add(item.specification.trim());
+                          }
+                          if (item.purpose && item.purpose.trim()) {
+                            itemGroup.purposes.add(item.purpose.trim());
+                          }
+                          if (item.status) {
+                            itemGroup.statuses.add(item.status);
+                          }
+                          if (item.reason && item.reason.trim() && 
+                              (item.status === 'Disapproved' || item.status === 'disapproved' || 
+                               item.approvalStatus === 'disapproved' || item.status?.toLowerCase().includes('disapprove'))) {
+                            itemGroup.reasons.add(item.reason.trim());
+                          }
+                          if (item.price && item.price > 0) {
+                            itemGroup.prices.push(item.price);
+                          }
+                          if (item.requestTitle) {
+                            itemGroup.requestTitles.add(item.requestTitle);
+                          }
+                          itemGroup.originalItems.push(item);
+                          return acc;
+                        }, {});
 
-                      {/* Pagination Controls */}
-                      {totalPages > 1 && (
-                        <div className="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
-                          <div className="flex flex-1 justify-between sm:hidden">
-                            <button
-                              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                              disabled={currentPage === 1}
-                              className="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              Previous
-                            </button>
-                            <button
-                              onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                              disabled={currentPage === totalPages}
-                              className="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              Next
-                            </button>
-                          </div>
-                          <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
-                            <div>
-                              <p className="text-sm text-gray-700">
-                                Showing <span className="font-medium">{startIndex + 1}</span> to{' '}
-                                <span className="font-medium">{Math.min(endIndex, filteredItems.length)}</span> of{' '}
-                                <span className="font-medium">{filteredItems.length}</span> items
-                              </p>
+                        const cycleGroupedItemsArray = Object.values(cycleGroupedItems).map(g => ({
+                          name: g.name,
+                          quantity: g.quantity,
+                          specification: Array.from(g.specifications).filter(s => s).join('; ') || '—',
+                          purpose: Array.from(g.purposes).filter(p => p).join('; ') || '—',
+                          status: Array.from(g.statuses).join(', ') || 'Pending',
+                          reason: Array.from(g.reasons).filter(r => r).join('; ') || '—',
+                          price: g.prices.length > 0 ? g.prices.reduce((a, b) => a + b, 0) / g.prices.length : 0,
+                          requestTitles: Array.from(g.requestTitles),
+                          originalItems: g.originalItems
+                        }));
+
+                        return (
+                          <div key={group.year} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+                            <div className="flex items-start justify-between mb-4">
+                              <div className="flex-1">
+                                <h2 className="text-lg font-bold text-gray-900 mb-3">
+                                  {group.year}
+                                </h2>
+                                <div className="space-y-1.5">
+                                  <div className="text-sm text-gray-700">
+                                    <span className="font-medium">Total Item:</span> {group.totalItems} item{group.totalItems !== 1 ? 's' : ''}
+                                  </div>
+                                  <div className="text-sm text-gray-700">
+                                    <span className="font-medium">Total Quantity:</span> {group.totalQuantity}
+                                  </div>
+                                  <div className="flex gap-4 text-sm">
+                                    <div className="text-green-700">
+                                      <span className="font-medium">Approved:</span> {group.approvedCount}
+                                    </div>
+                                    <div className="text-red-700">
+                                      <span className="font-medium">Disapproved:</span> {group.disapprovedCount}
+                                    </div>
+                                    {group.pendingCount > 0 && (
+                                      <div className="text-yellow-700">
+                                        <span className="font-medium">Pending:</span> {group.pendingCount}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
                             </div>
-                            <div>
-                              <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
-                                <button
-                                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                                  disabled={currentPage === 1}
-                                  className="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                  <span className="sr-only">Previous</span>
-                                  <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                    <path fillRule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clipRule="evenodd" />
-                                  </svg>
-                                </button>
-                                {[...Array(totalPages)].map((_, i) => {
-                                  const page = i + 1;
-                                  if (
-                                    page === 1 ||
-                                    page === totalPages ||
-                                    (page >= currentPage - 1 && page <= currentPage + 1)
-                                  ) {
-                                    return (
-                                      <button
-                                        key={page}
-                                        onClick={() => setCurrentPage(page)}
-                                        className={`relative inline-flex items-center px-4 py-2 text-sm font-semibold ${
-                                          currentPage === page
-                                            ? 'z-10 bg-gray-900 text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900'
-                                            : 'text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'
-                                        }`}
-                                      >
-                                        {page}
-                                      </button>
-                                    );
-                                  } else if (page === currentPage - 2 || page === currentPage + 2) {
-                                    return (
-                                      <span key={page} className="relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-700 ring-1 ring-inset ring-gray-300 focus:outline-offset-0">
-                                        ...
-                                      </span>
-                                    );
-                                  }
-                                  return null;
-                                })}
-                                <button
-                                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                                  disabled={currentPage === totalPages}
-                                  className="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                  <span className="sr-only">Next</span>
-                                  <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                                    <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
-                                  </svg>
-                                </button>
-                              </nav>
+
+                            <div className="flex justify-end pt-4 border-t border-gray-200 mt-4">
+                              <button
+                                onClick={() => {
+                                  setSelectedYearCycle(group.year);
+                                  setCurrentPage(1);
+                                }}
+                                className="px-4 py-2 bg-gray-400 hover:bg-gray-500 text-white rounded-lg text-sm font-medium transition-colors"
+                              >
+                                View Items
+                              </button>
                             </div>
                           </div>
-                        </div>
-                      )}
-                    </>
+                        );
+                      })}
+                    </div>
                   )}
                 </>
               )}
@@ -600,11 +901,12 @@ const Inventory = () => {
               </div>
             )}
 
-            {/* Reasons (all unique values) */}
-            {viewItemModal.item.reason && viewItemModal.item.reason !== '—' && (
+            {/* Reasons (only show for disapproved items) */}
+            {viewItemModal.item.reason && viewItemModal.item.reason !== '—' && 
+             (viewItemModal.item.status?.includes('Disapproved') || viewItemModal.item.status?.includes('disapproved')) && (
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Reasons
+                  Disapproval Reasons
                 </label>
                 <div className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
                   {viewItemModal.item.reason}

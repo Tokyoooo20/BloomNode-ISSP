@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
 import Modal from '../common/Modal';
-import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
+import { API_ENDPOINTS } from '../../utils/api';
 
 const UNIT_OPTIONS_STORAGE_KEY = 'adminUnitOptions';
 
@@ -495,7 +494,7 @@ const Users = () => {
             ...prevSelections,
             [user._id]: selectedUnit
           }));
-          await updateUserUnit(user, selectedUnit, true); // Pass flag to auto-suspend conflict
+          await updateUserUnit(user, selectedUnit, { suspendUserId: existingConflict._id });
         },
         onCancel: () => {
           setUnitSelections((prevSelections) => ({
@@ -528,9 +527,40 @@ const Users = () => {
     });
   };
 
+  const suspendUserDirect = async (userId) => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      throw new Error('No authentication token found. Please login again.');
+    }
+
+    const response = await fetch(API_ENDPOINTS.auth.suspendUser(userId), {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    let data = {};
+    try {
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      }
+    } catch (e) {
+      // ignore parsing errors; we only need status
+    }
+
+    if (!response.ok) {
+      const message = data?.message || response.statusText || `Failed to suspend user (status ${response.status}).`;
+      throw new Error(message);
+    }
+  };
+
   // Update user unit
-  const updateUserUnit = async (user, selectedUnit) => {
+  const updateUserUnit = async (user, selectedUnit, options = {}) => {
     const originalUnit = user.unit || '';
+    const { suspendUserId } = options || {};
 
     try {
       setUpdatingUserId(user._id);
@@ -545,6 +575,11 @@ const Users = () => {
         }
       }
       
+      // If requested, suspend the conflicting user before moving unit ownership
+      if (suspendUserId) {
+        await suspendUserDirect(suspendUserId);
+      }
+
       const response = await fetch(API_ENDPOINTS.auth.updateUser(user._id), {
         method: 'PATCH',
         headers: {
@@ -1720,9 +1755,11 @@ const Users = () => {
 
     // Check if this is a President user (by campus, role, or unit)
     // Case-insensitive check for President campus
-    const isPresidentUser = campusValue.toLowerCase() === 'president' || 
-                            user.role === 'president' || 
-                            user.role === 'Executive' && unitValue === 'Executive';
+    const roleLower = (user.role || '').toLowerCase().trim();
+    const isPresidentUser =
+      campusValue.toLowerCase() === 'president' ||
+      roleLower === 'president' ||
+      (roleLower === 'executive' && unitValue === 'Executive');
     
     // President users show unit without campus prefix
     if (isPresidentUser) {
@@ -1784,9 +1821,12 @@ const Users = () => {
     }
     
     // Check if this is a President user (by campus, role, or unit) - legacy check
-    const isPresidentUser = user.campus === 'President' || 
-                            user.role === 'president' || 
-                            (user.role === 'Executive' && unitValue === 'Executive');
+    const campusLower = (user.campus || '').toLowerCase().trim();
+    const roleLower = (user.role || '').toLowerCase().trim();
+    const isPresidentUser =
+      campusLower === 'president' ||
+      roleLower === 'president' ||
+      (roleLower === 'executive' && unitValue === 'Executive');
     
     // For President users, show "PRESIDENT" in role column
     if (isPresidentUser) {

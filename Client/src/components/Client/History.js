@@ -168,7 +168,13 @@ const History = () => {
   // Get unique year ranges from requests
   const getYearRanges = () => {
     const years = [...new Set(requests.map(req => req.year).filter(Boolean))];
-    return years.sort().reverse();
+    // Sort by start year ascending (oldest to newest)
+    return years.sort((a, b) => {
+      // Parse start year from year cycle (e.g., "2024-2026" -> 2024)
+      const aStartYear = parseInt(a.split('-')[0]) || 0;
+      const bStartYear = parseInt(b.split('-')[0]) || 0;
+      return aStartYear - bStartYear; // Sort ascending (oldest to newest)
+    });
   };
 
   return (
@@ -312,7 +318,7 @@ const History = () => {
                       <tr>
                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Priority</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Description</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Date Submitted</th>
                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Items</th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Submitted By</th>
@@ -322,6 +328,28 @@ const History = () => {
                       {selectedYearGroup.requests.map((request) => {
                         const badgeStyles = STATUS_TOKENS[request.status]?.badge || STATUS_TOKENS.default.badge;
                         const priorityStyles = PRIORITY_TOKENS[request.priority] || PRIORITY_TOKENS.low;
+
+                        // Extract purposes from items
+                        const getRequestPurpose = () => {
+                          if (!request.items || request.items.length === 0) {
+                            return null;
+                          }
+                          
+                          // Get all unique purposes from items (filter out empty/null)
+                          const purposes = request.items
+                            .map(item => item.purpose)
+                            .filter(purpose => purpose && purpose.trim())
+                            .filter((value, index, self) => self.indexOf(value) === index); // Get unique values
+                          
+                          if (purposes.length === 0) {
+                            return null;
+                          }
+                          
+                          // Return combined purposes or single purpose
+                          return purposes.join('; ');
+                        };
+
+                        const requestPurpose = getRequestPurpose();
 
                         return (
                           <tr key={request._id} className="hover:bg-gray-50">
@@ -337,7 +365,7 @@ const History = () => {
                             </td>
                             <td className="px-4 py-3">
                               <div className="text-sm text-gray-900 max-w-xs break-words">
-                                {request.description || <span className="text-gray-400">No description provided.</span>}
+                                {requestPurpose || <span className="text-gray-400">No purpose provided.</span>}
                               </div>
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-center">

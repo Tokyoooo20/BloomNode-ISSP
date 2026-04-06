@@ -339,6 +339,7 @@ const Request = ({ onRequestUpdate }) => {
   const [deleteItemModal, setDeleteItemModal] = useState({ show: false, requestId: null, itemId: null, itemName: '' });
   const [deletingItem, setDeletingItem] = useState(false);
   const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
+  const [availableYearCycles, setAvailableYearCycles] = useState([]);
 
   useEffect(() => {
     aiStatusRef.current = aiStatus;
@@ -546,8 +547,79 @@ const Request = ({ onRequestUpdate }) => {
     }
   };
 
+  // Fetch available year cycles from admin ISSP configuration
+  const fetchAvailableYearCycles = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get(API_ENDPOINTS.issp.get, {
+        headers: { 'x-auth-token': token }
+      });
+      
+      const isspData = response.data;
+      
+      // Backend now always includes admin's acceptingEntries for all users
+      if (isspData && isspData.acceptingEntries) {
+        const acceptingEntries = isspData.acceptingEntries;
+        
+        // Handle Mongoose Map format - when serialized to JSON, Maps become objects
+        let entriesObject = acceptingEntries;
+        
+        // Convert Map to object if needed (though Mongoose should serialize it automatically)
+        if (acceptingEntries instanceof Map) {
+          entriesObject = Object.fromEntries(acceptingEntries);
+        }
+        
+        // Ensure it's an object with keys
+        if (typeof entriesObject === 'object' && entriesObject !== null && !Array.isArray(entriesObject)) {
+          // Extract year cycles that have "accepting" status
+          const acceptingYearCycles = Object.keys(entriesObject)
+            .filter(yearCycle => {
+              const entry = entriesObject[yearCycle];
+              
+              // Entry should be an object with a status property
+              if (entry && typeof entry === 'object') {
+                const status = entry.status;
+                return status === 'accepting';
+              }
+              return false;
+            })
+            .sort((a, b) => {
+              // Parse start year from year cycle (e.g., "2024-2026" -> 2024)
+              const aStartYear = parseInt(a.split('-')[0]) || 0;
+              const bStartYear = parseInt(b.split('-')[0]) || 0;
+              return aStartYear - bStartYear; // Sort ascending (oldest to newest)
+            });
+          
+          setAvailableYearCycles(acceptingYearCycles);
+          
+          // Set default year cycle if current one is not in accepting list or if no year is set
+          if (acceptingYearCycles.length > 0) {
+            if (!requestForm.year || !acceptingYearCycles.includes(requestForm.year)) {
+              setRequestForm(prev => ({
+                ...prev,
+                year: acceptingYearCycles[0]
+              }));
+            }
+          } else {
+            setAvailableYearCycles([]);
+          }
+        } else {
+          setAvailableYearCycles([]);
+        }
+      } else {
+        // If no accepting entries configured, set empty array
+        setAvailableYearCycles([]);
+      }
+    } catch (error) {
+      console.error('Error fetching available year cycles:', error);
+      // On error, set empty array
+      setAvailableYearCycles([]);
+    }
+  };
+
   useEffect(() => {
     fetchRequests();
+    fetchAvailableYearCycles();
   }, []);
 
   // Socket.io real-time updates
@@ -2792,12 +2864,24 @@ const Request = ({ onRequestUpdate }) => {
                       value={requestForm.year}
                       onChange={handleRequestFormChange}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
+                      disabled={availableYearCycles.length === 0}
                     >
-                      <option value="2024-2026">2024-2026</option>
-                      <option value="2027-2029">2027-2029</option>
-                      <option value="2030-2032">2030-2032</option>
-                      <option value="2033-2035">2033-2035</option>
+                      {availableYearCycles.length > 0 ? (
+                        availableYearCycles.map(yearCycle => (
+                          <option key={yearCycle} value={yearCycle}>{yearCycle}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="2024-2026">2024-2026</option>
+                          <option value="2027-2029">2027-2029</option>
+                          <option value="2030-2032">2030-2032</option>
+                          <option value="2033-2035">2033-2035</option>
+                        </>
+                      )}
                     </select>
+                    {availableYearCycles.length === 0 && (
+                      <p className="mt-1 text-xs text-yellow-600">No year cycles are currently accepting entries. Please contact the administrator.</p>
+                    )}
                   </div>
                   
                   <div>
@@ -3087,14 +3171,25 @@ const Request = ({ onRequestUpdate }) => {
                       name="year"
                       value={requestForm.year}
                       onChange={handleRequestFormChange}
-                      disabled={editingRequest.status === 'submitted' || editingRequest.status === 'approved' || editingRequest.status === 'rejected'}
+                      disabled={editingRequest.status === 'submitted' || editingRequest.status === 'approved' || editingRequest.status === 'rejected' || availableYearCycles.length === 0}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     >
-                      <option value="2024-2026">2024-2026</option>
-                      <option value="2027-2029">2027-2029</option>
-                      <option value="2030-2032">2030-2032</option>
-                      <option value="2033-2035">2033-2035</option>
+                      {availableYearCycles.length > 0 ? (
+                        availableYearCycles.map(yearCycle => (
+                          <option key={yearCycle} value={yearCycle}>{yearCycle}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="2024-2026">2024-2026</option>
+                          <option value="2027-2029">2027-2029</option>
+                          <option value="2030-2032">2030-2032</option>
+                          <option value="2033-2035">2033-2035</option>
+                        </>
+                      )}
                     </select>
+                    {availableYearCycles.length === 0 && (
+                      <p className="mt-1 text-xs text-yellow-600">No year cycles are currently accepting entries. Please contact the administrator.</p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import Offices from './Offices';
@@ -28,8 +28,17 @@ const Dashboard = () => {
   const [userData, setUserData] = useState({ unit: '', username: '', profilePicture: null });
   const [priceDistribution, setPriceDistribution] = useState(null);
   const [loadingPriceDistribution, setLoadingPriceDistribution] = useState(false);
-  const [priceDistributionYearCycle, setPriceDistributionYearCycle] = useState('2024-2026');
-  const [priceDistributionDropdownOpen, setPriceDistributionDropdownOpen] = useState(false);
+  const [activeReportsTab, setActiveReportsTab] = useState('reports'); // 'reports' or 'priceDistribution'
+  const [itemYearRangeData, setItemYearRangeData] = useState({}); // Store item-based statistics by year cycle
+  const [loadingItemStats, setLoadingItemStats] = useState(false);
+  const reviewStatusChartRef = useRef(null);
+  const [reviewStatusTooltip, setReviewStatusTooltip] = useState(null); // { x, y, label, value }
+  
+  // Default year cycles (fallback if database is empty)
+  const defaultYearCycles = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
+  
+  // State for year cycles fetched from database - initialize with defaults so they're always visible
+  const [availableYearCycles, setAvailableYearCycles] = useState(defaultYearCycles);
 
   // Fetch notifications
   const fetchNotifications = async () => {
@@ -80,7 +89,155 @@ const Dashboard = () => {
     return years;
   };
 
-  // Fetch price distribution statistics
+  // Fetch item-based statistics for chart (same logic as Price Distribution)
+  const fetchItemYearRangeStats = useCallback(async () => {
+    try {
+      setLoadingItemStats(true);
+      
+      // Guard: if no year cycles available, return empty data
+      if (!availableYearCycles || !Array.isArray(availableYearCycles) || availableYearCycles.length === 0) {
+        setItemYearRangeData({});
+        setLoadingItemStats(false);
+        return;
+      }
+      
+      const requestsResponse = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
+        headers: getAuthHeaders()
+      });
+
+      const requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
+      
+      // Process all year cycles
+      const yearCycleStats = {};
+      
+      availableYearCycles.forEach(yearCycle => {
+        try {
+          // Filter requests by year cycle
+          const filteredRequests = requests.filter(request => {
+            const requestYear = request.year || '';
+            return requestYear === yearCycle;
+          });
+          
+          const cycleYears = getYearsFromCycle(yearCycle);
+          
+          // Skip if cycleYears is empty (invalid year cycle format)
+          if (!cycleYears || cycleYears.length === 0) {
+            return;
+          }
+          
+          // Group items by normalized item name (same logic as Price Distribution)
+          const itemGroups = {}; // Group items by normalized item name
+          
+          filteredRequests.forEach(request => {
+            if (request.items && Array.isArray(request.items)) {
+              request.items.forEach(item => {
+                // Only process approved items (matching ISSP.js line 3276)
+                if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
+                  // Normalize item name: trim, lowercase (matching ISSP.js line 3277)
+                  const itemName = item.item.trim().toLowerCase();
+                  
+                  // Initialize item group if it doesn't exist (ensures each unique item name is counted ONCE)
+                  if (!itemGroups[itemName]) {
+                    itemGroups[itemName] = {
+                      quantities: {},
+                      byYear: {} // Track which years this item appears in
+                    };
+                    cycleYears.forEach(year => {
+                      itemGroups[itemName].quantities[year] = 0;
+                      itemGroups[itemName].byYear[year] = false;
+                    });
+                  }
+                  
+                  // Sum quantities by year (accumulates across ALL requests)
+                  const quantityByYear = item.quantityByYear || {};
+                  cycleYears.forEach(year => {
+                    const yearKey = year.toString();
+                    const qty = Number(quantityByYear[yearKey]) || 0;
+                    itemGroups[itemName].quantities[year] += qty;
+                    // Mark that this item exists in this year if it has quantity OR if it's an approved item
+                    if (qty > 0) {
+                      itemGroups[itemName].byYear[year] = true;
+                    }
+                  });
+                }
+              });
+            }
+          });
+          
+          // Calculate item counts by year (matching Price Distribution logic exactly)
+          // This matches the logic in Price Distribution lines 354-362
+          const years = [];
+          const totalUniqueItems = Object.keys(itemGroups).length;
+          
+          // Initialize year counts (similar to range.byYear[year].count in Price Distribution)
+          const yearItemCounts = {};
+          cycleYears.forEach(year => {
+            yearItemCounts[year] = 0;
+          });
+          
+          // Count items per year (matching Price Distribution line 360: range.byYear[year].count += 1)
+          // The condition matches line 359: if ((qty > 0 || totalItemCost === 0) && range.byYear[year])
+          // For our case: count item if qty > 0 OR if it's an approved item with no quantities
+          Object.keys(itemGroups).forEach(itemName => {
+            const itemData = itemGroups[itemName];
+            
+            // Check if item has any quantities across all years
+            const hasAnyQuantity = cycleYears.some(year => (itemData.quantities[year] || 0) > 0);
+            
+            cycleYears.forEach(year => {
+              const qty = itemData.quantities[year] || 0;
+              // Count item in this year if it has quantity > 0
+              // OR if it's an approved item with no quantities (count in all years to match Price Distribution behavior)
+              if (qty > 0) {
+                yearItemCounts[year] += 1;
+              } else if (!hasAnyQuantity) {
+                // Approved item with no quantities - based on third image showing same count per year,
+                // count it in all years (this matches the behavior where items with 0 cost are still counted)
+                yearItemCounts[year] += 1;
+              }
+            });
+          });
+          
+          // Build years array
+          cycleYears.forEach(year => {
+            years.push({
+              year: year.toString(),
+              value: yearItemCounts[year] || 0,
+              percentage: 0 // Will calculate after total is known
+            });
+          });
+          
+          // Calculate total: sum of items across all years (not unique items)
+          // This ensures: Total = 2024 + 2025 + 2026
+          const totalItems = years.reduce((sum, yearData) => sum + (yearData.value || 0), 0);
+          
+          // Recalculate percentages based on total sum
+          years.forEach(yearData => {
+            yearData.percentage = totalItems > 0 
+              ? Math.round((yearData.value / totalItems) * 100) 
+              : 0;
+          });
+          
+          yearCycleStats[yearCycle] = {
+            total: totalItems,
+            years: years
+          };
+        } catch (cycleError) {
+          console.error(`Error processing year cycle ${yearCycle}:`, cycleError);
+          // Continue with other cycles even if one fails
+        }
+      });
+      
+      setItemYearRangeData(yearCycleStats);
+    } catch (error) {
+      console.error('Error fetching item year range stats:', error);
+      setItemYearRangeData({});
+    } finally {
+      setLoadingItemStats(false);
+    }
+  }, [availableYearCycles]);
+
+  // Fetch price distribution statistics (filtered by selected year cycle)
   const fetchPriceDistribution = useCallback(async () => {
     try {
       setLoadingPriceDistribution(true);
@@ -92,13 +249,13 @@ const Dashboard = () => {
 
       const requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
       
-      // Filter requests by selected year cycle
+      // Filter requests by selected year cycle (same dropdown as Reports Management)
       const filteredRequests = requests.filter(request => {
         const requestYear = request.year || '';
-        return requestYear === priceDistributionYearCycle;
+        return requestYear === selectedYearRange;
       });
       
-      console.log('[Price Distribution] Filtering for year cycle:', priceDistributionYearCycle);
+      console.log('[Price Distribution] Filtering for year cycle:', selectedYearRange);
       console.log('[Price Distribution] Total requests:', requests.length);
       console.log('[Price Distribution] Filtered requests:', filteredRequests.length);
       
@@ -111,7 +268,7 @@ const Dashboard = () => {
         { label: '₱200k+', min: 200001, max: Infinity, color: 'rose', count: 0, totalValue: 0 }
       ];
       
-      const cycleYears = getYearsFromCycle(priceDistributionYearCycle);
+      const cycleYears = getYearsFromCycle(selectedYearRange);
       
       // Initialize byYear for each range
       priceRanges.forEach(range => {
@@ -135,11 +292,11 @@ const Dashboard = () => {
         if (request.items && Array.isArray(request.items)) {
           request.items.forEach(item => {
             totalItemsFound++;
-            // Only process approved items
-            if (item.approvalStatus === 'approved' && item.price && item.item && item.item.trim() !== '') {
+            // Only process approved items (matching ISSP.js line 3276)
+            if (item.item && item.item.trim() !== '' && item.approvalStatus === 'approved') {
               approvedItemsFound++;
-              // Normalize item name: trim, lowercase, remove extra spaces
-              const itemName = item.item.trim().toLowerCase().replace(/\s+/g, ' ');
+              // Normalize item name: trim, lowercase (matching ISSP.js line 3277)
+              const itemName = item.item.trim().toLowerCase();
               const adminPrice = Number(item.price) || 0;
               
               // Initialize item group if it doesn't exist (this ensures each unique item name is counted ONCE)
@@ -147,7 +304,7 @@ const Dashboard = () => {
                 itemGroups[itemName] = {
                   quantities: {},
                   costs: {},
-                  price: adminPrice, // Use the admin-set price (should be same for same item name)
+                  price: adminPrice, // Use the admin-set price (0 if not set)
                   requestCount: 0, // Track how many requests this item appears in (for debugging)
                   itemIds: [] // Track item IDs for debugging
                 };
@@ -155,6 +312,11 @@ const Dashboard = () => {
                   itemGroups[itemName].quantities[year] = 0;
                   itemGroups[itemName].costs[year] = 0;
                 });
+              }
+              
+              // Update price if current item has a higher price (in case prices differ)
+              if (adminPrice > 0 && (itemGroups[itemName].price === 0 || adminPrice > itemGroups[itemName].price)) {
+                itemGroups[itemName].price = adminPrice;
               }
               
               // Track that this item name appeared in another request
@@ -170,7 +332,10 @@ const Dashboard = () => {
                 const yearKey = year.toString();
                 const qty = Number(quantityByYear[yearKey]) || 0;
                 itemGroups[itemName].quantities[year] += qty;
-                itemGroups[itemName].costs[year] += qty * adminPrice;
+                // Only calculate cost if price is set
+                if (adminPrice > 0) {
+                  itemGroups[itemName].costs[year] += qty * adminPrice;
+                }
               });
             }
           });
@@ -201,25 +366,30 @@ const Dashboard = () => {
           });
         }
         
-        // If still no cost, skip this item
+        // Include all approved items, even if they have no cost
+        // If no cost and no price, assign to lowest range (0-10k) for display
         if (totalItemCost === 0) {
-          console.warn('[Price Distribution] Skipping item with no cost:', itemNameKey);
-          return;
+          totalItemCost = 0; // Keep as 0, will be assigned to first range
         }
         
         // Categorize item by TOTAL COST (not unit price) - matching ISSP calculation
-        const range = priceRanges.find(r => totalItemCost >= r.min && totalItemCost <= r.max);
+        // Items with 0 cost go to the first range (₱0 - ₱10k)
+        const range = totalItemCost === 0 
+          ? priceRanges[0] // Assign items with no cost to first range
+          : priceRanges.find(r => totalItemCost >= r.min && totalItemCost <= r.max);
+        
         if (range) {
           range.count++; // Count each unique item name once
-          range.totalValue += totalItemCost; // Add total cost
+          range.totalValue += totalItemCost; // Add total cost (can be 0)
           
-          // Count by year - item counts once per year if it has quantity > 0
+          // Count by year - item counts once per year if it has quantity > 0 OR if it exists
           cycleYears.forEach(year => {
             const qty = itemData.quantities[year] || 0;
             const yearCost = itemData.costs[year] || 0;
-            if (qty > 0 && range.byYear[year]) {
+            // Count item if it has quantity OR if it's an approved item (even with 0 quantity)
+            if ((qty > 0 || totalItemCost === 0) && range.byYear[year]) {
               range.byYear[year].count += 1; // Count the ITEM once per year (not the quantity)
-              range.byYear[year].totalValue += yearCost; // Year cost (already calculated)
+              range.byYear[year].totalValue += yearCost; // Year cost (already calculated, can be 0)
             }
           });
         }
@@ -289,7 +459,7 @@ const Dashboard = () => {
     } finally {
       setLoadingPriceDistribution(false);
     }
-  }, [priceDistributionYearCycle]);
+  }, [selectedYearRange]);
 
   // Fetch user data
   const fetchUserData = async () => {
@@ -337,11 +507,17 @@ const Dashboard = () => {
     }
   }, [location.state]);
 
-  // Fetch dashboard statistics
+  const previousYearCycle = useMemo(() => {
+    const idx = Array.isArray(availableYearCycles) ? availableYearCycles.indexOf(selectedYearRange) : -1;
+    if (idx > 0) return availableYearCycles[idx - 1];
+    return '';
+  }, [availableYearCycles, selectedYearRange]);
+
+  // Fetch dashboard statistics (filtered by selected year cycle)
   const fetchDashboardStats = useCallback(async () => {
     try {
-      const token = localStorage.getItem('token');
       const response = await axios.get(API_ENDPOINTS.admin.dashboardStats, {
+        params: { yearCycle: selectedYearRange || undefined, compareYearCycle: previousYearCycle || undefined },
         headers: getAuthHeaders()
       });
       setStats(response.data);
@@ -349,7 +525,7 @@ const Dashboard = () => {
       console.error('Error fetching dashboard stats:', err);
       setStats(null);
     }
-  }, []);
+  }, [selectedYearRange, previousYearCycle]);
 
   useEffect(() => {
     if (activeSection === 'dashboard') {
@@ -357,22 +533,23 @@ const Dashboard = () => {
       fetchNotifications();
       fetchUserData();
       fetchPriceDistribution();
+      // Only fetch item stats if year cycles are available
+      if (availableYearCycles && availableYearCycles.length > 0) {
+        fetchItemYearRangeStats();
+      }
       
       // Refresh stats every 30 seconds when dashboard is active
       const interval = setInterval(() => {
         fetchDashboardStats();
         fetchNotifications();
         fetchPriceDistribution();
+        if (availableYearCycles && availableYearCycles.length > 0) {
+          fetchItemYearRangeStats();
+        }
       }, 30000);
       return () => clearInterval(interval);
     }
-  }, [activeSection, fetchDashboardStats, fetchPriceDistribution]);
-
-  // Default year cycles (fallback if database is empty)
-  const defaultYearCycles = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
-  
-  // State for year cycles fetched from database - initialize with defaults so they're always visible
-  const [availableYearCycles, setAvailableYearCycles] = useState(defaultYearCycles);
+  }, [activeSection, fetchDashboardStats, fetchPriceDistribution, fetchItemYearRangeStats, availableYearCycles, selectedYearRange]);
 
   // Ensure default year cycles exist in database
   const ensureDefaultYearCycles = useCallback(async () => {
@@ -429,10 +606,9 @@ const Dashboard = () => {
       });
       
       if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-        // Sort by order and startYear, then extract names
+        // Sort by startYear ascending (oldest to newest)
         const sortedCycles = [...response.data].sort((a, b) => {
-          if (a.order !== b.order) return a.order - b.order;
-          return (b.startYear || 0) - (a.startYear || 0);
+          return (a.startYear || 0) - (b.startYear || 0);
         });
         const cycleNames = sortedCycles.map(cycle => cycle.name);
         setAvailableYearCycles(cycleNames);
@@ -441,17 +617,11 @@ const Dashboard = () => {
         if (!selectedYearRange && cycleNames.length > 0) {
           setSelectedYearRange(cycleNames[0]);
         }
-        if (!priceDistributionYearCycle && cycleNames.length > 0) {
-          setPriceDistributionYearCycle(cycleNames[0]);
-        }
       } else {
         // Fallback: use defaults if database is empty (shouldn't happen after ensureDefaultYearCycles)
         setAvailableYearCycles(defaultYearCycles);
         if (!selectedYearRange) {
           setSelectedYearRange(defaultYearCycles[0]);
-        }
-        if (!priceDistributionYearCycle) {
-          setPriceDistributionYearCycle(defaultYearCycles[0]);
         }
       }
     } catch (error) {
@@ -460,9 +630,6 @@ const Dashboard = () => {
       setAvailableYearCycles(defaultYearCycles);
       if (!selectedYearRange) {
         setSelectedYearRange(defaultYearCycles[0]);
-      }
-      if (!priceDistributionYearCycle) {
-        setPriceDistributionYearCycle(defaultYearCycles[0]);
       }
     }
   }, [ensureDefaultYearCycles]); // Removed selectedYearRange and priceDistributionYearCycle to prevent unnecessary re-creation
@@ -498,7 +665,14 @@ const Dashboard = () => {
     if (activeSection === 'dashboard') {
       fetchPriceDistribution();
     }
-  }, [priceDistributionYearCycle, activeSection, fetchPriceDistribution]);
+  }, [selectedYearRange, activeSection, fetchPriceDistribution]);
+
+  // Refetch item stats when year cycles are available
+  useEffect(() => {
+    if (activeSection === 'dashboard' && availableYearCycles.length > 0) {
+      fetchItemYearRangeStats();
+    }
+  }, [availableYearCycles, activeSection, fetchItemYearRangeStats]);
 
   // Auto-hide notification dropdown when clicking outside
   useEffect(() => {
@@ -506,16 +680,13 @@ const Dashboard = () => {
       if (showNotifications && !event.target.closest('.notification-container')) {
         setShowNotifications(false);
       }
-      if (priceDistributionDropdownOpen && !event.target.closest('.price-distribution-dropdown')) {
-        setPriceDistributionDropdownOpen(false);
-      }
     };
 
     document.addEventListener('mousedown', handleClickOutside);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [showNotifications, priceDistributionDropdownOpen]);
+  }, [showNotifications]);
 
   useEffect(() => {
     if (activeSection === 'dashboard') {
@@ -533,84 +704,92 @@ const Dashboard = () => {
 
   // Helper function to generate chart path from data
   const generateChartPath = (years, maxValue, chartHeight = 160) => {
-    if (!years || years.length === 0) {
+    try {
+      if (!years || !Array.isArray(years) || years.length === 0) {
+        return `M 0 ${chartHeight} L 800 ${chartHeight} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
+      }
+      
+      const stepX = years.length > 1 ? 800 / (years.length - 1) : 400;
+      const values = years.map(y => Number(y?.value) || 0);
+      const normalizedMax = Math.max(...values, 1);
+      const points = years.map((yearData, index) => {
+        const x = index * stepX;
+        const normalizedValue = normalizedMax > 0 ? ((Number(yearData?.value) || 0) / normalizedMax) : 0;
+        const y = chartHeight - (normalizedValue * (chartHeight - 20)) - 20; // Reserve 20px at bottom
+        return `${x} ${y}`;
+      });
+      
+      const pathPoints = points.map((point, index) => index === 0 ? `M ${point}` : `L ${point}`).join(' ');
+      return `${pathPoints} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
+    } catch (error) {
+      console.error('Error generating chart path:', error);
       return `M 0 ${chartHeight} L 800 ${chartHeight} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
     }
-    
-    const stepX = years.length > 1 ? 800 / (years.length - 1) : 400;
-    const normalizedMax = Math.max(...years.map(y => y.value || 0), 1);
-    const points = years.map((yearData, index) => {
-      const x = index * stepX;
-      const normalizedValue = normalizedMax > 0 ? (yearData.value || 0) / normalizedMax : 0;
-      const y = chartHeight - (normalizedValue * (chartHeight - 20)) - 20; // Reserve 20px at bottom
-      return `${x} ${y}`;
-    });
-    
-    const pathPoints = points.map((point, index) => index === 0 ? `M ${point}` : `L ${point}`).join(' ');
-    return `${pathPoints} L 800 ${chartHeight} L 0 ${chartHeight} Z`;
   };
 
-  // Year range data - use actual database data
-  const yearRangeData = stats ? availableYearCycles.reduce((acc, yearRange) => {
-    // Check if this year range has data in stats
-    const hasData = stats.yearRangeStats && stats.yearRangeStats[yearRange];
-    const data = hasData ? stats.yearRangeStats[yearRange] : null;
-    
-    const [startYear, endYear] = yearRange.split('-').map(Number);
-    const yearCount = endYear - startYear + 1;
-    
-    // Use actual years data from API if available
-    let years = [];
-    if (hasData && data && data.years && Array.isArray(data.years) && data.years.length > 0) {
-      // Use actual data from API
-      years = data.years;
-    } else {
-      // Create empty structure for years with no data
-      for (let i = 0; i < yearCount; i++) {
-        const year = startYear + i;
-        years.push({ year: year.toString(), value: 0, percentage: 0 });
-      }
+  // Year range data - use item-based statistics (same logic as Price Distribution)
+  const yearRangeData = useMemo(() => {
+    if (!availableYearCycles || !Array.isArray(availableYearCycles) || availableYearCycles.length === 0) {
+      return {};
     }
     
-    // Calculate actual total from years data (this is the source of truth)
-    // The years array contains approved requests count per year
-    const actualTotal = years.reduce((sum, y) => sum + (y.value || 0), 0);
-    
-    // Always use actualTotal - if all years have 0 approved requests, total is 0
-    // This ensures accuracy: if no approved requests exist for this cycle, total = 0
-    // We don't use data.total because it counts ALL requests (pending, submitted, approved, rejected)
-    // but we only want to show approved requests count
-    const finalTotal = actualTotal;
-    
-    // If no approved data exists, set everything to 0
-    if (actualTotal === 0) {
-      const emptyPath = generateChartPath(years, 1);
-      acc[yearRange] = {
-        total: 0,
-        years: years,
-        chartPath1: emptyPath,
-        chartPath2: emptyPath
-      };
-      return acc;
+    try {
+      return availableYearCycles.reduce((acc, yearRange) => {
+        try {
+          if (!yearRange || typeof yearRange !== 'string') {
+            return acc;
+          }
+          
+          const [startYear, endYear] = yearRange.split('-').map(Number);
+          if (isNaN(startYear) || isNaN(endYear)) {
+            return acc;
+          }
+          
+          const yearCount = endYear - startYear + 1;
+          
+          // Use item-based statistics if available, otherwise create empty structure
+          const itemData = itemYearRangeData && itemYearRangeData[yearRange] ? itemYearRangeData[yearRange] : null;
+          let years = [];
+          let total = 0;
+          
+          if (itemData && itemData.years && Array.isArray(itemData.years) && itemData.years.length > 0) {
+            // Use item-based data
+            years = itemData.years;
+            total = itemData.total || 0;
+          } else {
+            // Create empty structure for years with no data
+            for (let i = 0; i < yearCount; i++) {
+              const year = startYear + i;
+              years.push({ year: year.toString(), value: 0, percentage: 0 });
+            }
+            total = 0;
+          }
+          
+          // Generate chart paths based on item data
+          const maxValue = Math.max(...years.map(y => y.value || 0), 1);
+          const chartPath1 = generateChartPath(years, maxValue);
+          // For second path, use a slightly different visualization
+          const chartPath2 = generateChartPath(
+            years.map(y => ({ ...y, value: (y.value || 0) * 0.8 })), 
+            maxValue
+          );
+          
+          acc[yearRange] = {
+            total: total,
+            years: years,
+            chartPath1: chartPath1,
+            chartPath2: chartPath2
+          };
+        } catch (error) {
+          console.error(`Error processing year range ${yearRange}:`, error);
+        }
+        return acc;
+      }, {});
+    } catch (error) {
+      console.error('Error calculating yearRangeData:', error);
+      return {};
     }
-    
-    // Generate chart paths based on actual data
-    const maxValue = Math.max(...years.map(y => y.value || 0), 1);
-    const chartPath1 = generateChartPath(years, maxValue);
-    // For second path, use a slightly different visualization (e.g., pending/submitted)
-    const chartPath2 = generateChartPath(
-      years.map(y => ({ ...y, value: (y.value || 0) * 0.8 })), 
-      maxValue
-    );
-    
-    acc[yearRange] = {
-      total: finalTotal,
-      years: years,
-      chartPath1: chartPath1,
-      chartPath2: chartPath2
-    };
-    return acc;
-  }, {}) : {};
+  }, [availableYearCycles, itemYearRangeData]);
 
   const handleYearRangeChange = (yearRange) => {
     // Update state immediately
@@ -621,22 +800,58 @@ const Dashboard = () => {
   };
 
   // Get current year range data or create empty structure
-  const currentData = yearRangeData[selectedYearRange] || (() => {
-    const [startYear, endYear] = selectedYearRange.split('-').map(Number);
-    const yearCount = endYear - startYear + 1;
-    const emptyYears = [];
-    for (let i = 0; i < yearCount; i++) {
-      const year = startYear + i;
-      emptyYears.push({ year: year.toString(), value: 0, percentage: 0 });
+  const currentData = useMemo(() => {
+    try {
+      if (selectedYearRange && yearRangeData && yearRangeData[selectedYearRange]) {
+        return yearRangeData[selectedYearRange];
+      }
+      
+      if (!selectedYearRange) {
+        // Return empty structure if no year range selected
+        const emptyPath = generateChartPath([], 1);
+        return {
+          total: 0,
+          years: [],
+          chartPath1: emptyPath,
+          chartPath2: emptyPath
+        };
+      }
+      
+      const [startYear, endYear] = selectedYearRange.split('-').map(Number);
+      if (isNaN(startYear) || isNaN(endYear)) {
+        const emptyPath = generateChartPath([], 1);
+        return {
+          total: 0,
+          years: [],
+          chartPath1: emptyPath,
+          chartPath2: emptyPath
+        };
+      }
+      
+      const yearCount = endYear - startYear + 1;
+      const emptyYears = [];
+      for (let i = 0; i < yearCount; i++) {
+        const year = startYear + i;
+        emptyYears.push({ year: year.toString(), value: 0, percentage: 0 });
+      }
+      const emptyPath = generateChartPath(emptyYears, 1);
+      return {
+        total: 0,
+        years: emptyYears,
+        chartPath1: emptyPath,
+        chartPath2: emptyPath
+      };
+    } catch (error) {
+      console.error('Error calculating currentData:', error);
+      const emptyPath = generateChartPath([], 1);
+      return {
+        total: 0,
+        years: [],
+        chartPath1: emptyPath,
+        chartPath2: emptyPath
+      };
     }
-    const emptyPath = generateChartPath(emptyYears, 1);
-    return {
-      total: 0,
-      years: emptyYears,
-      chartPath1: emptyPath,
-      chartPath2: emptyPath
-    };
-  })();
+  }, [selectedYearRange, yearRangeData]);
 
   const handleLogoutClick = () => {
     setShowLogoutConfirmation(true);
@@ -1012,61 +1227,86 @@ const Dashboard = () => {
                     
                     {/* Chart Container */}
                     <div className="relative h-64 sm:h-80 bg-gray-50 rounded-lg p-3 sm:p-4 overflow-x-auto">
-                      <svg className="w-full h-full" viewBox="0 0 800 160">
-                        {/* Grid Lines */}
-                        <defs>
-                          <linearGradient id="grayAreaGradient1" x1="0%" y1="0%" x2="0%" y2="100%">
-                            <stop offset="0%" style={{stopColor: '#9CA3AF', stopOpacity: 0.4}} />
-                            <stop offset="100%" style={{stopColor: '#9CA3AF', stopOpacity: 0.1}} />
-                          </linearGradient>
-                          <linearGradient id="grayAreaGradient2" x1="0%" y1="0%" x2="0%" y2="100%">
-                            <stop offset="0%" style={{stopColor: '#6B7280', stopOpacity: 0.3}} />
-                            <stop offset="100%" style={{stopColor: '#6B7280', stopOpacity: 0.1}} />
-                          </linearGradient>
-                        </defs>
-                        
-                        {/* Gray Background Area */}
-                        <path
-                          d={currentData.chartPath2}
-                          fill="url(#grayAreaGradient2)"
-                          className={`transition-all duration-700 ease-in-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
-                        />
-                        
-                        {/* Gray Area Chart */}
-                        <path
-                          d={currentData.chartPath1}
-                          fill="url(#grayAreaGradient1)"
-                          className={`transition-all duration-700 ease-in-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
-                        />
-                        
-                        {/* Gray Line */}
-                        <path
-                          d={currentData.chartPath1.replace(' L 800 160 L 0 160 Z', '')}
-                          fill="none"
-                          stroke="#6B7280"
-                          strokeWidth="2"
-                          className={`transition-all duration-700 ease-in-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
-                        />
-                        
-                        {/* Gray Line */}
-                        <path
-                          d={currentData.chartPath2.replace(' L 800 160 L 0 160 Z', '')}
-                          fill="none"
-                          stroke="#9CA3AF"
-                          strokeWidth="2"
-                          className={`transition-all duration-700 ease-in-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
-                        />
+                      <svg className="w-full h-full" viewBox="0 0 800 160" role="img" aria-label="Monthly comparison bar chart">
+                        {(() => {
+                          const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+                          const thisYearValues = (stats && stats.monthlyRequestCounts && Array.isArray(stats.monthlyRequestCounts.thisCycleByMonth))
+                            ? stats.monthlyRequestCounts.thisCycleByMonth.map(n => Number(n) || 0)
+                            : Array(12).fill(0);
+                          const lastYearValues = (stats && stats.monthlyRequestCounts && Array.isArray(stats.monthlyRequestCounts.lastCycleByMonth))
+                            ? stats.monthlyRequestCounts.lastCycleByMonth.map(n => Number(n) || 0)
+                            : Array(12).fill(0);
+                          const hasLastCycle = !!(stats && stats.monthlyRequestCounts && stats.monthlyRequestCounts.lastCycle);
+                          const maxValue = Math.max(1, ...thisYearValues, ...lastYearValues);
+
+                          const baselineY = 140;
+                          const chartTop = 18;
+                          const chartHeight = baselineY - chartTop;
+                          const leftPad = 40;
+                          const rightPad = 20;
+                          const width = 800 - leftPad - rightPad;
+                          const groupW = width / months.length;
+                          const barW = Math.max(10, groupW * 0.22);
+                          const gap = Math.max(6, groupW * 0.08);
+                          const scale = chartHeight / maxValue;
+
+                          return (
+                            <>
+                              {/* Baseline */}
+                              <line x1={leftPad} y1={baselineY} x2={800 - rightPad} y2={baselineY} stroke="#e5e7eb" strokeWidth="2" />
+
+                              {months.map((label, i) => {
+                                const vThis = thisYearValues[i];
+                                const vLast = lastYearValues[i];
+                                const hThis = vThis * scale;
+                                const hLast = vLast * scale;
+                                const xCenter = leftPad + i * groupW + groupW / 2;
+                                const xThis = xCenter - (barW + gap / 2);
+                                const xLast = xCenter + (gap / 2);
+
+                                return (
+                                  <g key={label}>
+                                    <rect
+                                      x={xThis}
+                                      y={baselineY - hThis}
+                                      width={barW}
+                                      height={hThis}
+                                      rx="2"
+                                      fill="#0B74FF"
+                                      className={`transition-all duration-700 ease-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
+                                    />
+                                    {hasLastCycle && (
+                                      <rect
+                                        x={xLast}
+                                        y={baselineY - hLast}
+                                        width={barW}
+                                        height={hLast}
+                                        rx="2"
+                                        fill="#D1D5DB"
+                                        className={`transition-all duration-700 ease-out ${chartAnimation ? 'opacity-100' : 'opacity-0'}`}
+                                      />
+                                    )}
+                                    <text x={xCenter} y={156} textAnchor="middle" fontSize="12" fill="#374151">
+                                      {label}
+                                    </text>
+                                  </g>
+                                );
+                              })}
+                            </>
+                          );
+                        })()}
                       </svg>
-                      
-                      {/* Chart Labels */}
-                      <div className="absolute bottom-1 left-0 right-0 flex justify-between text-xs text-gray-600 px-2">
-                        <span>January</span>
-                        <span>February</span>
-                        <span>March</span>
-                        <span>April</span>
-                        <span>May</span>
-                        <span>June</span>
-                        <span>July</span>
+
+                      {/* Legend (match reference style) */}
+                      <div className="absolute bottom-3 right-3 bg-white/80 backdrop-blur rounded-md px-3 py-2 border border-gray-200 flex items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#0B74FF' }} />
+                          <span className="text-xs text-gray-800 font-medium">This cycle</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="inline-block w-3 h-3 rounded-sm bg-gray-400" />
+                          <span className="text-xs text-gray-800 font-medium">Last cycle</span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1086,171 +1326,195 @@ const Dashboard = () => {
                         </div>
                       </div>
                       
-                      {currentData.years.map((yearData, index) => {
-                        return (
-                          <div key={yearData.year}>
-                            <div className="flex justify-between items-center mb-2">
-                              <span className="text-sm text-gray-600">{yearData.year}</span>
-                              <span className="text-sm text-gray-800 font-semibold">{yearData.value}</span>
+                      {currentData.years && Array.isArray(currentData.years) && currentData.years.length > 0 ? (
+                        currentData.years.map((yearData, index) => {
+                          return (
+                            <div key={yearData?.year || index}>
+                              <div className="flex justify-between items-center mb-2">
+                                <span className="text-sm text-gray-600">{yearData?.year || ''}</span>
+                                <span className="text-sm text-gray-800 font-semibold">{yearData?.value || 0}</span>
+                              </div>
+                              <div className="w-full bg-gray-300 rounded-full h-2">
+                                <div 
+                                  className="bg-gray-500 h-2 rounded-full transition-all duration-700 ease-in-out" 
+                                  style={{width: `${yearData?.percentage || 0}%`}}
+                                ></div>
+                              </div>
                             </div>
-                            <div className="w-full bg-gray-300 rounded-full h-2">
-                              <div 
-                                className="bg-gray-500 h-2 rounded-full transition-all duration-700 ease-in-out" 
-                                style={{width: `${yearData.percentage}%`}}
-                              ></div>
+                          );
+                        })
+                      ) : (
+                        <div className="text-sm text-gray-500">No data available</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Tab Navigation for Reports and Price Distribution */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+                <nav className="flex border-b border-gray-200">
+                  <button
+                    onClick={() => setActiveReportsTab('reports')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeReportsTab === 'reports'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Reports Management
+                  </button>
+                  <button
+                    onClick={() => setActiveReportsTab('priceDistribution')}
+                    className={`flex-1 px-4 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap text-center ${
+                      activeReportsTab === 'priceDistribution'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Price Distribution
+                  </button>
+                </nav>
+              </div>
+
+              {/* Tab Content */}
+              {activeReportsTab === 'reports' && (
+                <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-200">
+                  <h2 className="text-2xl font-bold text-gray-800 mb-6">Reports Management</h2>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    {/* Request Trends - Top 3 most requested items */}
+                    <div className="bg-white border border-gray-200 rounded-lg p-6">
+                      <h3 className="text-lg font-semibold text-gray-800 mb-4">Request Trends</h3>
+                      {(stats && stats.topRequestedItems && stats.topRequestedItems.length > 0) ? (
+                        <>
+                          <div className="space-y-3">
+                            {stats.topRequestedItems.map((entry, index) => (
+                              <div key={`${entry.name}-${index}`} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0">
+                                <span className="text-gray-700 font-medium">
+                                  <span className="mr-2 text-gray-500">{index + 1}.</span>
+                                  {entry.name}
+                                </span>
+                                <span className="text-gray-900 font-semibold">{entry.count} request{entry.count !== 1 ? 's' : ''}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-gray-500">No request items yet.</p>
+                      )}
+                    </div>
+                    
+                    {/* Review status chart (Approved / Rejected / Pending) */}
+                    <div className="bg-white border border-gray-200 rounded-lg p-6">
+                      <h3 className="text-lg font-semibold text-gray-800 mb-4">Review Status</h3>
+                        <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 mb-6">
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-3 bg-gray-400 rounded-sm shrink-0" />
+                            <span className="text-gray-700 text-sm">Approved</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-3 bg-gray-600 rounded-sm shrink-0" />
+                            <span className="text-gray-700 text-sm">Rejected</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-3 bg-gray-200 rounded-sm shrink-0" />
+                            <span className="text-gray-700 text-sm">Pending</span>
+                          </div>
+                        </div>
+                        <div className="flex justify-center">
+                          <div className="relative w-36 h-36">
+                            <div ref={reviewStatusChartRef} className="relative">
+                              {reviewStatusTooltip && (
+                                <div
+                                  className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md bg-gray-900 px-2 py-1 text-xs text-white shadow"
+                                  style={{ left: reviewStatusTooltip.x, top: reviewStatusTooltip.y }}
+                                >
+                                  {reviewStatusTooltip.label}: {reviewStatusTooltip.value}%
+                                </div>
+                              )}
+                              <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                              <circle cx="50" cy="50" r="35" fill="none" stroke="#e5e7eb" strokeWidth="14" />
+                              {/* Approved segment */}
+                              <circle
+                                cx="50" cy="50" r="35"
+                                fill="none"
+                                stroke="#9CA3AF"
+                                strokeWidth="14"
+                                strokeDasharray={stats && (stats.approvedRequests + stats.rejectedRequests + (stats.pendingUnits || 0)) > 0 ? `${((stats.approvalRate || 0) / 100) * 219.8} ${219.8 - ((stats.approvalRate || 0) / 100) * 219.8}` : "0 219.8"}
+                                strokeDashoffset={animateReports ? "0" : "218.8"}
+                                className="transition-all duration-[1800ms] ease-out"
+                                style={{ cursor: 'crosshair' }}
+                                onMouseMove={(e) => {
+                                  const rect = reviewStatusChartRef.current?.getBoundingClientRect();
+                                  if (!rect) return;
+                                  setReviewStatusTooltip({
+                                    x: e.clientX - rect.left,
+                                    y: e.clientY - rect.top,
+                                    label: 'Approved',
+                                    value: stats ? (stats.approvalRate || 0) : 0
+                                  });
+                                }}
+                                onMouseLeave={() => setReviewStatusTooltip(null)}
+                              />
+                              {/* Rejected segment */}
+                              <circle
+                                cx="50" cy="50" r="35"
+                                fill="none"
+                                stroke="#6B7280"
+                                strokeWidth="14"
+                                strokeDasharray={stats && (stats.approvedRequests + stats.rejectedRequests + (stats.pendingUnits || 0)) > 0 ? `${((stats.rejectionRate || 0) / 100) * 219.8} ${219.8 - ((stats.rejectionRate || 0) / 100) * 219.8}` : "0 219.8"}
+                                strokeDashoffset={stats && (stats.approvedRequests + stats.rejectedRequests + (stats.pendingUnits || 0)) > 0 ? (animateReports ? `-${((stats.approvalRate || 0) / 100) * 219.8}` : `-${((stats.approvalRate || 0) / 100) * 219.8 - 219.8}`) : "0"}
+                                className="transition-all duration-[1800ms] ease-out"
+                                style={{ transitionDelay: '400ms' }}
+                                onMouseMove={(e) => {
+                                  const rect = reviewStatusChartRef.current?.getBoundingClientRect();
+                                  if (!rect) return;
+                                  setReviewStatusTooltip({
+                                    x: e.clientX - rect.left,
+                                    y: e.clientY - rect.top,
+                                    label: 'Rejected',
+                                    value: stats ? (stats.rejectionRate || 0) : 0
+                                  });
+                                }}
+                                onMouseLeave={() => setReviewStatusTooltip(null)}
+                              />
+                              {/* Pending segment */}
+                              <circle
+                                cx="50" cy="50" r="35"
+                                fill="none"
+                                stroke="#D1D5DB"
+                                strokeWidth="14"
+                                strokeDasharray={stats && (stats.approvedRequests + stats.rejectedRequests + (stats.pendingUnits || 0)) > 0 ? `${((stats.pendingRate || 0) / 100) * 219.8} ${219.8 - ((stats.pendingRate || 0) / 100) * 219.8}` : "0 219.8"}
+                                strokeDashoffset={stats && (stats.approvedRequests + stats.rejectedRequests + (stats.pendingUnits || 0)) > 0 ? (animateReports ? `-${(((stats.approvalRate || 0) + (stats.rejectionRate || 0)) / 100) * 219.8}` : `-${(((stats.approvalRate || 0) + (stats.rejectionRate || 0)) / 100) * 219.8 - 219.8}`) : "0"}
+                                className="transition-all duration-[1800ms] ease-out"
+                                style={{ transitionDelay: '800ms' }}
+                                onMouseMove={(e) => {
+                                  const rect = reviewStatusChartRef.current?.getBoundingClientRect();
+                                  if (!rect) return;
+                                  setReviewStatusTooltip({
+                                    x: e.clientX - rect.left,
+                                    y: e.clientY - rect.top,
+                                    label: 'Pending',
+                                    value: stats ? (stats.pendingRate || 0) : 0
+                                  });
+                                }}
+                                onMouseLeave={() => setReviewStatusTooltip(null)}
+                              />
+                              </svg>
                             </div>
                           </div>
-                        );
-                      })}
+                        </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
 
-              {/* Reports Management Section */}
-              <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-200">
-                <h2 className="text-2xl font-bold text-gray-800 mb-6">Reports Management</h2>
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-                  {/* Request Trends */}
-                  <div className="bg-white border border-gray-200 rounded-lg p-6">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-4">Request Trends</h3>
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Total Requests</span>
-                        <span className="text-gray-900 font-semibold">{stats ? stats.totalRequests : 0}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Pending</span>
-                        <span className="text-gray-900 font-semibold">{stats ? stats.pendingRequests : 0}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Submitted</span>
-                        <span className="text-gray-700 font-semibold">{stats ? stats.submittedRequests : 0}</span>
-                      </div>
-                      <div className="w-full bg-gray-200 rounded-full h-2 mt-4">
-                        <div className="bg-gray-600 h-2 rounded-full transition-all duration-700" style={{width: stats && stats.totalRequests > 0 ? `${Math.round((stats.submittedRequests / stats.totalRequests) * 100)}%` : '0%'}}></div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Review Status */}
-                  <div className="bg-white border border-gray-200 rounded-lg p-6">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-4">Review Status</h3>
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Approved</span>
-                        <span className="text-gray-900 font-semibold">{stats ? stats.approvedRequests : 0}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Rejected</span>
-                        <span className="text-gray-900 font-semibold">{stats ? stats.rejectedRequests : 0}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-700">Awaiting</span>
-                        <span className="text-gray-900 font-semibold">{stats ? stats.submittedRequests : 0}</span>
-                      </div>
-                      <div className="flex justify-between items-center border-t border-gray-300 pt-2">
-                        <span className="text-gray-800 font-semibold">Total Reviewed</span>
-                        <span className="text-gray-900 font-bold text-lg">{stats ? stats.totalReviewed : 0}</span>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Approve/Reject Chart */}
-                  <div className="bg-white border border-gray-200 rounded-lg p-6">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-4">Approve vs Reject</h3>
-                    <div className="flex items-center justify-center">
-                      <div className="relative w-32 h-32">
-                        <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                          {/* Approved Circle */}
-                          <circle
-                            cx="50"
-                            cy="50"
-                            r="35"
-                            fill="none"
-                            stroke="#9CA3AF"
-                            strokeWidth="15"
-                            strokeDasharray={stats && stats.totalReviewed > 0 ? `${(stats.approvalRate / 100) * 219.8} ${219.8 - (stats.approvalRate / 100) * 219.8}` : "0 219.8"}
-                            strokeDashoffset={animateReports ? "0" : "218.8"}
-                            className="transition-all duration-[1800ms] ease-out"
-                          />
-                          {/* Rejected Circle */}
-                          <circle
-                            cx="50"
-                            cy="50"
-                            r="35"
-                            fill="none"
-                            stroke="#6B7280"
-                            strokeWidth="15"
-                            strokeDasharray={stats && stats.totalReviewed > 0 ? `${(stats.rejectionRate / 100) * 219.8} ${219.8 - (stats.rejectionRate / 100) * 219.8}` : "0 219.8"}
-                            strokeDashoffset={stats && stats.totalReviewed > 0 ? (animateReports ? `-${(stats.approvalRate / 100) * 219.8}` : `-${(stats.approvalRate / 100) * 219.8 - 219.8}`) : "0"}
-                            className="transition-all duration-[1800ms] ease-out"
-                            style={{
-                              transitionDelay: '400ms'
-                            }}
-                          />
-                        </svg>
-                      </div>
-                      <div className="ml-4 space-y-2">
-                        <div className="flex items-center">
-                          <div className="w-3 h-3 bg-gray-300 rounded mr-2"></div>
-                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.approvalRate : 0}% Approved</span>
-                        </div>
-                        <div className="flex items-center">
-                          <div className="w-3 h-3 bg-gray-500 rounded mr-2"></div>
-                          <span className="text-gray-800 text-sm font-medium">{stats ? stats.rejectionRate : 0}% Rejected</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Price Distribution Chart */}
-              <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-200 mt-6">
+              {activeReportsTab === 'priceDistribution' && (
+                <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-200">
                 <div className="mb-6 flex items-center justify-between flex-wrap gap-4">
                   <div>
                     <h2 className="text-2xl font-bold text-gray-800 mb-1">Price Distribution Analysis</h2>
-                    <p className="text-sm text-gray-500">Comprehensive breakdown of approved items by price range</p>
-                  </div>
-                  {/* Year Cycle Selector */}
-                  <div className="relative price-distribution-dropdown">
-                    <label className="text-sm font-medium text-gray-700 mr-3">Year Cycle:</label>
-                    <button
-                      onClick={() => setPriceDistributionDropdownOpen(!priceDistributionDropdownOpen)}
-                      className="bg-white border border-gray-300 rounded-lg px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500 flex items-center space-x-2"
-                    >
-                      <span>{priceDistributionYearCycle}</span>
-                      <svg className={`w-4 h-4 transition-transform ${priceDistributionDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    
-                    {priceDistributionDropdownOpen && (
-                      <div className="absolute right-0 mt-2 w-40 bg-white border border-gray-300 rounded-lg shadow-lg z-10">
-                        {availableYearCycles.length === 0 ? (
-                          <div className="px-4 py-2 text-sm text-gray-500">
-                            No year cycles available
-                          </div>
-                        ) : (
-                          availableYearCycles.map((yearRange) => (
-                            <button
-                              key={yearRange}
-                              onClick={() => {
-                                setPriceDistributionYearCycle(yearRange);
-                                setPriceDistributionDropdownOpen(false);
-                              }}
-                              className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
-                                priceDistributionYearCycle === yearRange ? 'bg-gray-50 text-gray-700 font-medium' : 'text-gray-700'
-                              }`}
-                            >
-                              {yearRange}
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
                 
@@ -1387,7 +1651,8 @@ const Dashboard = () => {
                     <p className="text-sm text-gray-500">No price distribution data available yet.</p>
                   </div>
                 )}
-              </div>
+                </div>
+              )}
 
             </div>
           )}

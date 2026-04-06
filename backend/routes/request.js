@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 const auth = require('../middleware/auth');
 const { logAuditEvent } = require('../utils/auditLogger');
+const { syncAllItemsFromRequest, updateApprovedItemStatus } = require('../utils/itemSync');
 
 const sanitizeRequestItems = (items = []) =>
   (Array.isArray(items) ? items : []).map((item = {}, index) => ({
@@ -243,6 +244,9 @@ router.post('/', auth, async (req, res) => {
     });
 
     const savedRequest = await newRequest.save();
+
+    // Sync all items to status collections (initially all pending)
+    await syncAllItemsFromRequest(savedRequest);
 
     // Populate user to get unit for request name
     await savedRequest.populate('userId', 'unit');
@@ -989,6 +993,9 @@ router.put('/:requestId/items/:itemId/status', auth, async (req, res) => {
     request.items[itemIndex].itemStatusUpdatedAt = new Date();
 
     await request.save();
+
+    // Sync itemStatus update to approveditems collection
+    await updateApprovedItemStatus(requestId, itemId, itemStatus, remarks);
 
     // Create notification for admin and president
     try {

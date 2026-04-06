@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
@@ -17,6 +17,7 @@ const Offices = () => {
   const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2026');
   const [selectedUnitGroup, setSelectedUnitGroup] = useState(null); // { unitName, year, requests }
   const [searchQuery, setSearchQuery] = useState('');
+  const latestFetchTokenRef = useRef(0);
   // Pagination for Items for Review table
   const [itemsCurrentPage, setItemsCurrentPage] = useState(1);
   const itemsPerPage = 10;
@@ -148,44 +149,99 @@ const Offices = () => {
     closeAlert();
   }, [alertState.onConfirm, closeAlert]);
 
+  const ITEM_KEY_DELIMITER = '::';
+
+  const makeItemKey = (requestId, itemId) => `${requestId}${ITEM_KEY_DELIMITER}${itemId}`;
+
+  const parseItemKey = (itemKey) => {
+    const key = String(itemKey ?? '');
+    const delimiterIndex = key.indexOf(ITEM_KEY_DELIMITER);
+    if (delimiterIndex === -1) {
+      return { requestId: null, itemId: null };
+    }
+    return {
+      requestId: key.slice(0, delimiterIndex),
+      itemId: key.slice(delimiterIndex + ITEM_KEY_DELIMITER.length)
+    };
+  };
+
   // Fetch office statistics
-  const fetchOfficeStats = async () => {
+  const fetchOfficeStats = async (yearCycle = selectedYearCycle, requestToken = null) => {
     try {
-      const token = localStorage.getItem('token');
       const response = await axios.get(API_ENDPOINTS.admin.officeStats, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
+        params: { yearCycle }
       });
       console.log('Fetched office stats:', response.data);
-      setOfficeStats(response.data);
+      if (requestToken === null || latestFetchTokenRef.current === requestToken) {
+        setOfficeStats(response.data);
+      }
+      return response.data;
     } catch (err) {
       console.error('Error fetching office stats:', err);
+      throw err;
     }
   };
 
   // Fetch submitted requests
-  const fetchSubmittedRequests = async () => {
+  const fetchSubmittedRequests = async (yearCycle = selectedYearCycle, requestToken = null) => {
     try {
-      setLoading(true);
-      setError(null);
-      const token = localStorage.getItem('token');
       const response = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
+        params: { yearCycle }
       });
       console.log('Fetched submitted requests:', response.data);
-      setRequests(response.data);
+      if (requestToken === null || latestFetchTokenRef.current === requestToken) {
+        setRequests(Array.isArray(response.data) ? response.data : []);
+      }
+      return response.data;
     } catch (err) {
       console.error('Error fetching submitted requests:', err);
-      setError('Failed to fetch submitted requests');
-    } finally {
-      setLoading(false);
+      if (requestToken === null || latestFetchTokenRef.current === requestToken) {
+        setError('Failed to fetch submitted requests');
+      }
+      throw err;
     }
   };
 
+  const fetchDashboardData = useCallback(async (yearCycle) => {
+    const fetchToken = Date.now();
+    latestFetchTokenRef.current = fetchToken;
+    setLoading(true);
+    setError(null);
+
+    try {
+      await Promise.all([
+        fetchOfficeStats(yearCycle, fetchToken),
+        fetchSubmittedRequests(yearCycle, fetchToken)
+      ]);
+
+      // Ignore stale responses from an earlier year-cycle request.
+      if (latestFetchTokenRef.current !== fetchToken) {
+        return;
+      }
+    } catch (err) {
+      if (latestFetchTokenRef.current !== fetchToken) {
+        return;
+      }
+      setError('Failed to fetch office dashboard data');
+    } finally {
+      if (latestFetchTokenRef.current === fetchToken) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     setAnimate(true);
-    fetchOfficeStats();
-    fetchSubmittedRequests();
   }, []);
+
+  useEffect(() => {
+    fetchDashboardData(selectedYearCycle);
+    setPendingReviews({});
+    setSelectedUnitGroup(null);
+    setItemsCurrentPage(1);
+  }, [selectedYearCycle, fetchDashboardData]);
 
   // Group requests by unit, campus, and year cycle
   const groupedRequests = useMemo(() => {
@@ -276,9 +332,36 @@ const Offices = () => {
     return filtered;
   }, [groupedRequests, statusFilter, priorityFilter, selectedYearCycle, searchQuery]);
 
+  const sortedTrackingUnits = useMemo(() => {
+    const units = officeStats?.unitTracking?.units;
+    if (!Array.isArray(units) || units.length === 0) {
+      return [];
+    }
+    const statusRank = (u) => {
+      const s = String(u?.status || '').toLowerCase();
+      if (s === 'submitted') return 0;
+      if (s === 'resubmitted') return 1;
+      if (s === 'pending') return 2;
+      if (s === 'rejected') return 3;
+      if (s === 'approved') return 4;
+      return 5;
+    };
+    return [...units].sort((a, b) => {
+      if (Boolean(a.hasSubmitted) !== Boolean(b.hasSubmitted)) {
+        return a.hasSubmitted ? -1 : 1;
+      }
+      if (a.hasSubmitted && b.hasSubmitted) {
+        const ra = statusRank(a);
+        const rb = statusRank(b);
+        if (ra !== rb) return ra - rb;
+      }
+      return (a.unit || '').localeCompare(b.unit || '', undefined, { sensitivity: 'base' });
+    });
+  }, [officeStats, selectedYearCycle]);
+
   // Handle inline approve/disapprove
   const handleItemDecision = (item, decision) => {
-    const itemKey = `${item.requestId}-${item.id}`;
+    const itemKey = makeItemKey(item.requestId, item.id);
     setPendingReviews(prev => ({
       ...prev,
       [itemKey]: {
@@ -290,7 +373,7 @@ const Offices = () => {
 
   // Handle reason change for disapproved items
   const handleReasonChange = (item, reason) => {
-    const itemKey = `${item.requestId}-${item.id}`;
+    const itemKey = makeItemKey(item.requestId, item.id);
     setPendingReviews(prev => ({
       ...prev,
       [itemKey]: {
@@ -340,7 +423,10 @@ const Offices = () => {
           // Process all pending reviews
           await Promise.all(
             pendingKeys.map(async (itemKey) => {
-              const [requestId, itemId] = itemKey.split('-');
+              const { requestId, itemId } = parseItemKey(itemKey);
+              if (!requestId || !itemId) {
+                throw new Error(`Invalid pending review key: ${itemKey}`);
+              }
               const review = pendingReviews[itemKey];
               
               await axios.put(
@@ -517,7 +603,10 @@ const Offices = () => {
     Object.keys(pendingReviews).forEach(itemKey => {
       const review = pendingReviews[itemKey];
       if (review.decision === 'disapproved') {
-        const [requestId, itemId] = itemKey.split('-');
+        const { requestId, itemId } = parseItemKey(itemKey);
+        if (!requestId || !itemId) {
+          return;
+        }
         const item = allGroupItems.find(i => 
           i.requestId === requestId && (i.id === itemId || i._id === itemId)
         );
@@ -1246,61 +1335,21 @@ const Offices = () => {
       <div className="bg-white rounded-lg p-4 sm:p-6 lg:p-8 shadow-sm border border-gray-200">
         <h2 className="text-xl sm:text-2xl font-bold text-gray-800 mb-4 sm:mb-6">Offices Management</h2>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
-          {/* Request Trends */}
-          <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-lg p-4 sm:p-6">
-            <h3 className="text-base sm:text-lg font-semibold text-gray-800 mb-3 sm:mb-4">Request Trends</h3>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <span className="text-gray-700">New Requests</span>
-                <span className="text-gray-900 font-semibold">
-                  {officeStats?.requestTrends?.newRequests || 0}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-700">Pending Reviews</span>
-                <span className="text-gray-900 font-semibold">
-                  {officeStats?.requestTrends?.pendingReviews || 0}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-700">Completed</span>
-                <span className="text-gray-900 font-semibold">
-                  {officeStats?.requestTrends?.completed?.toLocaleString() || 0}
-                </span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2 mt-4">
-                <div 
-                  className="bg-gray-600 h-2 rounded-full transition-all duration-500" 
-                  style={{ width: `${officeStats?.requestTrends?.completionRate || 0}%` }}
-                ></div>
-              </div>
-              <p className="text-gray-600 text-sm">
-                {officeStats?.requestTrends?.completionRate || 0}% completion rate this month
-              </p>
-            </div>
-          </div>
-          
+        <div className="mb-6 sm:mb-8">
           {/* ISSP Request Tracking */}
           <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-lg p-4 sm:p-6">
-            <div className="flex items-center justify-between mb-3 sm:mb-4">
-              <h3 className="text-base sm:text-lg font-semibold text-gray-800">ISSP Request Tracking</h3>
+            <div className="mb-3 sm:mb-4">
+              <h3 className="text-base sm:text-lg font-semibold text-gray-800">
+                ISSP Request Tracking
+              </h3>
             </div>
             <div className="space-y-4">
               {/* Office List with Status */}
               <div className="space-y-3 max-h-64 overflow-y-auto">
-                {officeStats?.unitTracking?.units && officeStats.unitTracking.units.length > 0 ? (
-                  officeStats.unitTracking.units.map((unitData, index) => {
+                {sortedTrackingUnits.length > 0 ? (
+                  sortedTrackingUnits.map((unitData, index) => {
                     const hasSubmitted = unitData.hasSubmitted;
-                    const timeAgo = unitData.lastSubmitted 
-                      ? (() => {
-                          const days = Math.floor((new Date() - new Date(unitData.lastSubmitted)) / (1000 * 60 * 60 * 24));
-                          if (days === 0) return 'today';
-                          if (days === 1) return '1 day ago';
-                          return `${days} days ago`;
-                        })()
-                      : null;
-                    
+
                     // Determine status badge color and text
                     const getStatusBadge = () => {
                       if (!hasSubmitted) {
@@ -1312,6 +1361,8 @@ const Offices = () => {
                           return { color: 'bg-yellow-100 text-yellow-700', text: 'Pending' };
                         case 'submitted':
                           return { color: 'bg-blue-100 text-blue-700', text: 'Submitted' };
+                        case 'resubmitted':
+                          return { color: 'bg-indigo-100 text-indigo-800', text: 'Resubmitted' };
                         case 'approved':
                           return { color: 'bg-green-100 text-green-700', text: 'Approved' };
                         case 'rejected':
@@ -1324,7 +1375,7 @@ const Offices = () => {
                     const statusBadge = getStatusBadge();
                     
                     return (
-                      <div key={index} className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-100 hover:border-gray-300 transition-colors">
+                      <div key={`${unitData.unit || 'unit'}-${index}`} className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-100 hover:border-gray-300 transition-colors">
                         <div className="flex items-center space-x-3 flex-1 min-w-0">
                           <div className={`w-3 h-3 rounded-full flex-shrink-0 ${hasSubmitted ? 'bg-gray-600' : 'bg-gray-400'}`}></div>
                           <div className="flex-1 min-w-0">
@@ -1338,9 +1389,6 @@ const Offices = () => {
                           <span className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${statusBadge.color}`}>
                             {statusBadge.text}
                           </span>
-                          {timeAgo && (
-                            <span className="text-gray-600 text-xs whitespace-nowrap hidden sm:inline">{timeAgo}</span>
-                          )}
                         </div>
                       </div>
                     );

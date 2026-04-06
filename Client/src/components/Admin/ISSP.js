@@ -1184,10 +1184,15 @@ const ISSP = () => {
   const [devSummaryInvestments, setDevSummaryInvestments] = useState(getInitialDevSummaryRows());
   const [devCostBreakdown, setDevCostBreakdown] = useState(getInitialDevCostRows());
   const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [generatingWord, setGeneratingWord] = useState(false);
   const [submitReviewLoading, setSubmitReviewLoading] = useState(false);
   const [uploadingDictApprovedISSP, setUploadingDictApprovedISSP] = useState(false);
   const [dictApprovedISSPDocument, setDictApprovedISSPDocument] = useState(null);
   const dictApprovedISSPInputRef = useRef(null);
+  const [isspActionsOpen, setIsspActionsOpen] = useState(false);
+  const isspActionsRef = useRef(null);
+  const [isspGenerateOpen, setIsspGenerateOpen] = useState(false);
+  const isspGenerateRef = useRef(null);
   const [modalState, setModalState] = useState({
     isOpen: false,
     variant: 'default',
@@ -1719,7 +1724,8 @@ const ISSP = () => {
         return;
       }
 
-      const response = await axios.get(API_ENDPOINTS.admin.requestsByUnit(unitName), {
+      // Use new approved items endpoint (queries from approveditems collection)
+      const response = await axios.get(API_ENDPOINTS.admin.approvedItemsByUnit(unitName, selectedYearCycle), {
         headers: { 'x-auth-token': token }
       });
       
@@ -1735,7 +1741,7 @@ const ISSP = () => {
         message: error.response?.data?.message || error.message || 'Failed to fetch unit items.'
       });
     }
-  }, [showAlert]);
+  }, [showAlert, selectedYearCycle]);
 
   // Handle viewing unit request details (inline view, not modal)
   const handleViewUnitRequest = useCallback(async (unitKey) => {
@@ -1750,6 +1756,20 @@ const ISSP = () => {
           message: 'No authentication token found. Please login again.'
         });
         return;
+      }
+
+      // First, sync approved items to approveditems collection
+      try {
+        await axios.post(API_ENDPOINTS.admin.syncApprovedItems, {
+          unitName: unitName,
+          year: selectedYearCycle
+        }, {
+          headers: { 'x-auth-token': token }
+        });
+        console.log(`Synced approved items for ${unitName} to approveditems collection`);
+      } catch (syncError) {
+        console.warn('Error syncing approved items (non-fatal):', syncError);
+        // Continue even if sync fails
       }
 
       // Get ALL requests for this unit+campus from the grouped data (all year cycles)
@@ -1779,10 +1799,38 @@ const ISSP = () => {
         return;
       }
 
-      // Fetch full details for ALL requests from this unit
+      // Fetch approved items directly from approveditems collection
       try {
-        console.log(`Fetching details for ${unitRequests.length} requests for unit: ${unitName}`);
+        console.log(`Fetching approved items from approveditems collection for unit: ${unitName}`);
         
+        const approvedItemsResponse = await axios.get(
+          API_ENDPOINTS.admin.approvedItemsByUnit(unitName, selectedYearCycle),
+          { headers: { 'x-auth-token': token } }
+        );
+        
+        const approvedItems = approvedItemsResponse.data.items || [];
+        console.log(`Fetched ${approvedItems.length} approved items from approveditems collection`);
+        
+        if (approvedItems.length === 0) {
+          showAlert({
+            variant: 'default',
+            title: 'No Approved Items',
+            message: `No approved items found for ${unitName} in ${selectedYearCycle}.`
+          });
+          return;
+        }
+        
+        // Group items by request for display
+        const itemsByRequest = {};
+        approvedItems.forEach(item => {
+          const requestId = item.requestId;
+          if (!itemsByRequest[requestId]) {
+            itemsByRequest[requestId] = [];
+          }
+          itemsByRequest[requestId].push(item);
+        });
+        
+        // Fetch full request details for context
         const allRequestsData = await Promise.all(
           unitRequests.map(async (request) => {
             try {
@@ -1790,61 +1838,53 @@ const ISSP = () => {
                 headers: { 'x-auth-token': token }
               });
               const requestData = response.data;
-              console.log(`Request ${request._id} (${request.requestTitle || request.title || 'Untitled'}):`, {
-                totalItems: requestData.items?.length || 0,
-                items: requestData.items,
-                hasItems: !!requestData.items,
-                itemsIsArray: Array.isArray(requestData.items)
-              });
-              // Ensure items is always an array
-              if (!Array.isArray(requestData.items)) {
-                console.warn(`Request ${request._id} items is not an array:`, requestData.items);
-                requestData.items = request.items && Array.isArray(request.items) ? request.items : [];
+              // Replace items with approved items from approveditems collection
+              if (itemsByRequest[request._id]) {
+                requestData.items = itemsByRequest[request._id];
+              } else {
+                requestData.items = [];
               }
               return requestData;
             } catch (error) {
               console.error(`Error fetching request ${request._id}:`, error);
-              console.log(`Using cached request data for ${request._id}, items count:`, request.items?.length || 0);
-              // Ensure cached request has items as array
               const fallbackRequest = {
                 ...request,
-                items: request.items && Array.isArray(request.items) ? request.items : []
+                items: itemsByRequest[request._id] || []
               };
               return fallbackRequest;
             }
           })
         );
 
-        // Filter out requests with no items, then combine all items from remaining requests - FILTER TO ONLY APPROVED ITEMS
+        // Use approved items directly from approveditems collection
+        // All items are already approved, so no need to filter
         const requestsWithItems = allRequestsData.filter(request => {
           const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
           return requestItems.length > 0;
         });
 
+        // Combine all approved items from approveditems collection
         const allItems = [];
-        requestsWithItems.forEach((request, index) => {
-          const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
-          console.log(`Request ${index + 1} (${request.requestTitle || request.title || request._id}):`, {
-            totalItems: requestItems.length,
-            approvedItems: requestItems.filter(item => item.approvalStatus === 'approved').length,
-            allStatuses: requestItems.map(item => item.approvalStatus || 'no status')
-          });
-          
-          requestItems.forEach(item => {
-            // Only include items with approved approval status
-            if (item.approvalStatus === 'approved') {
-              allItems.push({
-                ...item,
-                requestId: request._id,
-                requestTitle: request.requestTitle || request.title,
-                requestYear: request.year,
-                requestStatus: request.status,
-                requestCreatedAt: request.createdAt,
-                requestUpdatedAt: request.updatedAt
-              });
-            }
-          });
+        approvedItems.forEach(item => {
+          // Find the corresponding request for context
+          const request = allRequestsData.find(r => r._id === item.requestId);
+          if (request) {
+            allItems.push({
+              ...item,
+              requestId: request._id,
+              requestTitle: request.requestTitle || request.title || item.requestTitle,
+              requestYear: request.year || item.requestYear,
+              requestStatus: request.status || item.requestStatus || 'approved',
+              requestCreatedAt: request.createdAt || item.requestCreatedAt,
+              requestUpdatedAt: request.updatedAt || item.requestUpdatedAt
+            });
+          } else {
+            // If request not found, use item data directly
+            allItems.push(item);
+          }
         });
+        
+        console.log(`Using ${allItems.length} approved items from approveditems collection`);
         
         // Combine items with the same name (group by item name only, regardless of specification)
         const itemGroups = {};
@@ -3154,10 +3194,9 @@ const ISSP = () => {
         });
 
         if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-          // Sort by order and startYear
+          // Sort by startYear ascending (oldest to newest)
           const sortedCycles = [...response.data].sort((a, b) => {
-            if (a.order !== b.order) return a.order - b.order;
-            return (b.startYear || 0) - (a.startYear || 0);
+            return (a.startYear || 0) - (b.startYear || 0);
           });
           
           const yearRanges = sortedCycles.map(cycle => cycle.name);
@@ -4666,7 +4705,7 @@ useEffect(() => {
   }, [showAlert, selectedYearCycle]);
 
   const handleGenerateISSP = useCallback(() => {
-    if (generatingPdf) {
+    if (generatingPdf || generatingWord) {
       return;
     }
 
@@ -4679,7 +4718,71 @@ useEffect(() => {
         await performGenerateISSP();
       }
     });
-  }, [generatingPdf, openModal, performGenerateISSP, selectedYearCycle]);
+  }, [generatingPdf, generatingWord, openModal, performGenerateISSP, selectedYearCycle]);
+
+  const performGenerateISSPWord = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      showAlert({
+        variant: 'danger',
+        title: 'Authentication Required',
+        message: 'No authentication token found. Please login again.'
+      });
+      return;
+    }
+
+    try {
+      setGeneratingWord(true);
+      const response = await axios.get(API_ENDPOINTS.issp.generateWord, {
+        responseType: 'blob',
+        headers: { 'x-auth-token': token },
+        params: { yearCycle: selectedYearCycle }
+      });
+
+      const url = window.URL.createObjectURL(
+        new Blob([response.data], { type: 'application/msword' })
+      );
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `ISSP-report-${selectedYearCycle}.doc`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      showAlert({
+        variant: 'success',
+        title: 'Download Ready',
+        message: `ISSP Word (${selectedYearCycle}) download has started.`
+      });
+    } catch (error) {
+      console.error('Error generating ISSP Word:', error);
+      showAlert({
+        variant: 'danger',
+        title: 'Generation Failed',
+        message: 'Failed to generate ISSP Word document. Please try again.'
+      });
+    } finally {
+      setGeneratingWord(false);
+    }
+  }, [showAlert, selectedYearCycle]);
+
+  const handleGenerateISSPWord = useCallback(() => {
+    if (generatingPdf || generatingWord) {
+      return;
+    }
+
+    openModal({
+      variant: 'confirm',
+      title: 'Generate ISSP (Word)',
+      message: `Generate the complete ISSP report for ${selectedYearCycle} as a Microsoft Word document?`,
+      confirmLabel: 'Generate',
+      onConfirm: async () => {
+        await performGenerateISSPWord();
+      }
+    });
+  }, [generatingPdf, generatingWord, openModal, performGenerateISSPWord, selectedYearCycle]);
 
   const handleSubmitForReview = useCallback(() => {
     if (submitReviewLoading) {
@@ -4946,6 +5049,28 @@ useEffect(() => {
     : reviewStatus === 'pending'
     ? 'Awaiting Presidential Review'
     : 'Send to President';
+
+  // Close ISSP actions dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (isspActionsOpen && isspActionsRef.current && !isspActionsRef.current.contains(event.target)) {
+        setIsspActionsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isspActionsOpen]);
+
+  // Close ISSP generate dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (isspGenerateOpen && isspGenerateRef.current && !isspGenerateRef.current.contains(event.target)) {
+        setIsspGenerateOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isspGenerateOpen]);
 
   return (
     <>
@@ -6245,68 +6370,126 @@ useEffect(() => {
                     </div>
                   </div>
                   
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <button
-                      onClick={handleGenerateISSP}
-                      disabled={generatingPdf}
-                      className={`px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-lg shadow-md transition-all duration-200 flex items-center justify-center space-x-2 ${
-                        generatingPdf ? 'opacity-60 cursor-not-allowed' : 'hover:bg-gray-300 hover:shadow-lg'
-                      }`}
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <span>{generatingPdf ? 'Generating…' : 'Generate ISSP'}</span>
-                    </button>
-                    <button
-                      onClick={handleSubmitForReview}
-                      disabled={!canSubmitForReview || submitReviewLoading}
-                      className={`px-4 py-2 font-medium rounded-lg shadow-md transition-all duration-200 flex items-center justify-center space-x-2 ${
-                        canSubmitForReview && !submitReviewLoading
-                          ? 'bg-gray-200 text-gray-700 hover:bg-gray-300 hover:shadow-lg'
-                          : 'bg-gray-200 text-gray-500 cursor-not-allowed opacity-70'
-                      }`}
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v16h16V4H4zm4 6h8m-8 4h5" />
-                      </svg>
-                      <span>{submitButtonLabel}</span>
-                    </button>
-                    <input
-                      type="file"
-                      ref={dictApprovedISSPInputRef}
-                      accept=".pdf,.jpg,.jpeg,.png"
-                      onChange={handleUploadDictApprovedISSP}
-                      disabled={uploadingDictApprovedISSP}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => dictApprovedISSPInputRef.current?.click()}
-                      disabled={uploadingDictApprovedISSP}
-                      className={`px-4 py-2 font-medium rounded-lg shadow-md transition-all duration-200 flex items-center justify-center space-x-2 ${
-                        uploadingDictApprovedISSP
-                          ? 'bg-gray-200 text-gray-500 cursor-not-allowed opacity-70'
-                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300 hover:shadow-lg cursor-pointer'
-                      }`}
-                    >
-                        {uploadingDictApprovedISSP ? (
-                          <>
-                            <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            <span>Uploading...</span>
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                            </svg>
-                            <span>Upload Approved ISSP</span>
-                          </>
-                        )}
-                    </button>
+                  <div className="flex justify-end items-center gap-2">
+                    {/* Generate dropdown */}
+                    <div ref={isspGenerateRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setIsspGenerateOpen((v) => !v)}
+                        className="px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-lg shadow-md transition-all duration-200 flex items-center justify-center space-x-2 hover:bg-gray-300 hover:shadow-lg"
+                      >
+                        <span>Generate ISSP</span>
+                        <svg className={`w-4 h-4 transition-transform ${isspGenerateOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+
+                      <div
+                        className={`absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-10 overflow-hidden origin-top-right transition-all duration-250 ease-out ${
+                          isspGenerateOpen ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 -translate-y-1 pointer-events-none'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { setIsspGenerateOpen(false); handleGenerateISSP(); }}
+                          disabled={generatingPdf || generatingWord}
+                          className={`w-full text-left px-4 py-3 text-sm flex items-center gap-2 hover:bg-gray-50 ${
+                            generatingPdf || generatingWord ? 'opacity-60 cursor-not-allowed' : 'text-gray-700'
+                          }`}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <span>{generatingPdf ? 'Generating…' : 'PDF'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsspGenerateOpen(false);
+                            handleGenerateISSPWord();
+                          }}
+                          disabled={generatingPdf || generatingWord}
+                          className={`w-full text-left px-4 py-3 text-sm flex items-center gap-2 hover:bg-gray-50 ${
+                            generatingPdf || generatingWord ? 'opacity-60 cursor-not-allowed' : 'text-gray-700'
+                          }`}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 3h10a2 2 0 012 2v14a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2zm2 3h6M9 11h6M9 15h6" />
+                          </svg>
+                          <span>{generatingWord ? 'Generating…' : 'Microsoft Word'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Actions dropdown */}
+                    <div ref={isspActionsRef} className="relative">
+                      <input
+                        type="file"
+                        ref={dictApprovedISSPInputRef}
+                        accept=".pdf,.jpg,.jpeg,.png"
+                        onChange={handleUploadDictApprovedISSP}
+                        disabled={uploadingDictApprovedISSP}
+                        className="hidden"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => setIsspActionsOpen((v) => !v)}
+                        className="px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-lg shadow-md transition-all duration-200 flex items-center justify-center space-x-2 hover:bg-gray-300 hover:shadow-lg"
+                      >
+                        <span>Actions</span>
+                        <svg className={`w-4 h-4 transition-transform ${isspActionsOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+
+                      <div
+                        className={`absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-10 overflow-hidden origin-top-right transition-all duration-250 ease-out ${
+                          isspActionsOpen ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 -translate-y-1 pointer-events-none'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { setIsspActionsOpen(false); handleSubmitForReview(); }}
+                          disabled={!canSubmitForReview || submitReviewLoading}
+                          className={`w-full text-left px-4 py-3 text-sm flex items-center gap-2 hover:bg-gray-50 ${
+                            canSubmitForReview && !submitReviewLoading ? 'text-gray-700' : 'text-gray-400 cursor-not-allowed'
+                          }`}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v16h16V4H4zm4 6h8m-8 4h5" />
+                          </svg>
+                          <span>{submitButtonLabel}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => { setIsspActionsOpen(false); dictApprovedISSPInputRef.current?.click(); }}
+                          disabled={uploadingDictApprovedISSP}
+                          className={`w-full text-left px-4 py-3 text-sm flex items-center gap-2 hover:bg-gray-50 ${
+                            uploadingDictApprovedISSP ? 'text-gray-400 cursor-not-allowed' : 'text-gray-700'
+                          }`}
+                        >
+                          {uploadingDictApprovedISSP ? (
+                            <>
+                              <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              <span>Uploading…</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                              </svg>
+                              <span>Upload Approved ISSP</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                   </div>
                 </div>
