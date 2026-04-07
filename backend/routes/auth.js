@@ -25,7 +25,9 @@ const normalizeCampusValue = (campus) => {
     return 'Main';
   }
   const trimmed = campus.trim();
-  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+  // Be tolerant of values like "Main Campus" coming from UI/legacy data.
+  const withoutSuffix = trimmed.replace(/\s+campus$/i, '').trim();
+  return withoutSuffix.charAt(0).toUpperCase() + withoutSuffix.slice(1).toLowerCase();
 };
 
 const normalizeUnitValue = (unit) =>
@@ -58,33 +60,17 @@ const findApprovedUnitConflict = async ({ userIdToExclude, unit, campus, isUnive
   const baseUnit = extractBaseUnit(unit);
   const unitNormalized = normalizeUnitValue(unit);
 
-  // Pull candidates for the same campus (and Main aliases), then compare in JS using normalized base unit.
-  const campusQuery = campusNormalized === 'Main'
-    ? {
-        $or: [
-          { campus: 'Main' },
-          { campus: 'main' },
-          { campus: 'MAIN' },
-          { campus: '' },
-          { campus: null },
-          { campus: { $exists: false } }
-        ]
-      }
-    : {
-        $or: [
-          { campus: campusNormalized },
-          { campus: campusNormalized.toLowerCase() },
-          { campus: campusNormalized.toUpperCase() }
-        ]
-      };
-
+  // Pull all approved candidates (excluding the user), then compare campus + unit in JS.
+  // This avoids brittle string variations like "Main" vs "Main Campus".
   const candidates = await User.find({
-    ...campusQuery,
     approvalStatus: 'approved',
     _id: { $ne: userIdToExclude }
   }).select('-password');
 
   const conflict = candidates.find((u) => {
+    const candidateCampus = normalizeCampusValue(u.campus);
+    if (candidateCampus !== campusNormalized) return false;
+
     const candidateUnit = normalizeUnitValue(u.unit);
     if (!candidateUnit) return false;
 
@@ -193,120 +179,46 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Check if there's already a pending user with same email or username
-    let existingPendingUser = await PendingUser.findOne({
+    // Drop any stale pending registration for this email or username (no email verification flow)
+    await PendingUser.deleteMany({
       $or: [{ email }, { username }]
     });
 
-    // Generate verification code
-    const verificationCode = generateVerificationCode();
-    const codeExpiration = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const role =
+      campus === 'President' && unit === 'Executive' ? 'Executive' : 'Program head';
 
-    let pendingUser;
+    const newUser = new User({
+      unit,
+      campus,
+      office: office || '',
+      universityLevelOffice: universityLevelOffice || '',
+      firstName: firstName || '',
+      lastName: lastName || '',
+      username,
+      email,
+      password,
+      role,
+      isApproved: false,
+      approvalStatus: 'pending',
+      isEmailVerified: true
+    });
 
-    if (existingPendingUser) {
-      // Update existing pending user with new code and info
-      existingPendingUser.unit = unit;
-      existingPendingUser.campus = campus;
-      existingPendingUser.office = office || '';
-      existingPendingUser.universityLevelOffice = universityLevelOffice || '';
-      existingPendingUser.firstName = firstName || '';
-      existingPendingUser.lastName = lastName || '';
-      existingPendingUser.username = username;
-      existingPendingUser.email = email;
-      existingPendingUser.password = password;
-      existingPendingUser.verificationCode = verificationCode;
-      existingPendingUser.verificationCodeExpires = codeExpiration;
-      
-      pendingUser = await existingPendingUser.save();
-      console.log(`🔄 Updated pending user for ${email} with new verification code`);
-    } else {
-      // Create new pending user (not saved to User collection yet)
-      pendingUser = new PendingUser({
-        unit,
-        campus,
-        office: office || '',
-        universityLevelOffice: universityLevelOffice || '',
-        firstName: firstName || '',
-        lastName: lastName || '',
-        username,
-        email,
-        password,
-        verificationCode,
-        verificationCodeExpires: codeExpiration
-      });
+    await newUser.save();
 
-      await pendingUser.save();
-      console.log(`✨ Created new pending user for ${email}`);
-    }
+    console.log(`✅ Account created for ${newUser.email} (signup without email verification)`);
 
-    // Send verification email
-    let emailSent = false;
-    let emailError = null;
-    try {
-      console.log('\n📧 ============================================');
-      console.log('📧 SENDING VERIFICATION EMAIL');
-      console.log('📧 ============================================');
-      console.log('   User:', username);
-      console.log('   Email:', email);
-      console.log('   Code:', verificationCode);
-      console.log('   Expires:', codeExpiration.toISOString());
-      console.log('📧 ============================================\n');
-      
-      await sendVerificationEmail(email, username, verificationCode);
-      emailSent = true;
-      
-      console.log('\n✅ ============================================');
-      console.log('✅ VERIFICATION EMAIL SENT SUCCESSFULLY');
-      console.log('✅ ============================================');
-      console.log('   Email sent to:', email);
-      console.log('   User should check their inbox (and spam folder)');
-      console.log('✅ ============================================\n');
-    } catch (err) {
-      emailError = err;
-      console.error('\n⚠️  ============================================');
-      console.error('⚠️  VERIFICATION EMAIL FAILED TO SEND');
-      console.error('⚠️  ============================================');
-      console.error('   User registration will continue, but email was not sent.');
-      console.error('   User can use the resend verification endpoint to try again.');
-      console.error('   Verification code has been saved to database.');
-      console.error('\n   📧 Email:', email);
-      console.error('   🔢 Verification Code:', verificationCode);
-      console.error('   ⏰ Expires:', codeExpiration.toISOString());
-      console.error('   💡 User can still verify using this code via POST /api/auth/verify-email');
-      console.error('⚠️  ============================================\n');
-      
-      // Continue even if email fails - user can request resend or use the code directly
-    }
-
-    // Prepare response message based on email status
-    let responseMessage;
-    if (emailSent) {
-      responseMessage = existingPendingUser 
-        ? 'A new verification code has been sent to your email. Please check your email to complete your registration.'
-        : 'Please check your email for the verification code to complete your registration.';
-    } else {
-      responseMessage = 'Registration successful, but email could not be sent. Please use the resend verification option or contact support.';
-    }
-
-    const response = {
-      message: responseMessage,
-      pendingUser: {
-        id: pendingUser._id,
-        username: pendingUser.username,
-        email: pendingUser.email
-      },
-      requiresVerification: true
-    };
-
-    // In development or when email fails, optionally include code in response for testing
-    if ((process.env.NODE_ENV === 'development' || (!process.env.SENDGRID_API_KEY && !process.env.RESEND_API_KEY)) && !emailSent) {
-      response.devMode = true;
-      response.verificationCode = verificationCode; // Include code for testing
-      response.codeExpires = codeExpiration;
-    }
-
-    res.status(201).json(response);
+    res.status(201).json({
+      message:
+        'Registration successful! Your account is pending admin approval. You will be able to log in once an administrator approves your account.',
+      requiresVerification: false,
+      user: {
+        id: newUser._id,
+        username: newUser.username,
+        email: newUser.email,
+        approvalStatus: newUser.approvalStatus,
+        isEmailVerified: true
+      }
+    });
 
   } catch (error) {
     console.error('Signup error:', error);

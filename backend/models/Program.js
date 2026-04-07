@@ -38,8 +38,14 @@ const programSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Compound index to ensure unique program names per faculty
-programSchema.index({ name: 1, faculty: 1 }, { unique: true });
+// Same program name allowed on different campuses; not allowed twice on the same campus (faculty is not part of uniqueness)
+programSchema.index(
+  { name: 1, campus: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { campus: { $exists: true, $ne: null } }
+  }
+);
 
 module.exports = mongoose.model('Program', programSchema);
 

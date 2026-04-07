@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
@@ -84,7 +84,7 @@ function SearchableSelect({ id, options = [], value, onChange, placeholder, disa
 const OVPAA_OFFICE_NAME = 'Office of the Vice President for Academic Affairs';
 
 const defaultSuccessMessage =
-  'Your account has been created successfully. You can now login with your credentials.';
+  'Your account has been created successfully and is pending admin approval.';
 
 const phrasesToStrip = [
   
@@ -129,7 +129,6 @@ const validateStrongPassword = (password) => {
 };
 
 const Signup = () => {
-  const navigate = useNavigate();
   const [formData, setFormData] = useState({
     unit: '',
     office: '',
@@ -656,41 +655,29 @@ const Signup = () => {
       }
 
       if (response.ok) {
-        // Check if email verification is required
-        if (data.requiresVerification) {
-          // Redirect to verification page
-          navigate('/verify-email', { 
-            state: { 
-              email: formData.email 
-            } 
-          });
-        } else {
-          // Old flow - show success modal (fallback)
-          setModalConfig({
-            title: 'Registration Successful!',
-            message: sanitizeSuccessMessage(data.message),
-            variant: 'brand',
-            confirmLabel: 'Got it'
-          });
-          setShowModal(true);
-          
-          // Clear form
-          setFormData({
-            unit: '',
-            office: '',
-            campus: '',
-            universityLevelOffice: '',
-            program: '',
-            firstName: '',
-            lastName: '',
-            email: '',
-            password: '',
-            confirmPassword: ''
-          });
-          setSelectedOffice('');
-          setSelectedFaculty('');
-          setIsSelectingProgram(false);
-        }
+        setModalConfig({
+          title: 'Registration Successful!',
+          message: sanitizeSuccessMessage(data.message),
+          variant: 'brand',
+          confirmLabel: 'Got it'
+        });
+        setShowModal(true);
+
+        setFormData({
+          unit: '',
+          office: '',
+          campus: '',
+          universityLevelOffice: '',
+          program: '',
+          firstName: '',
+          lastName: '',
+          email: '',
+          password: '',
+          confirmPassword: ''
+        });
+        setSelectedOffice('');
+        setSelectedFaculty('');
+        setIsSelectingProgram(false);
       } else {
         setMessage(data.message || data.error || 'Signup failed. Please try again.');
         setMessageType('error');

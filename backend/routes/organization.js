@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const Campus = require('../models/Campus');
 const Faculty = require('../models/Faculty');
@@ -672,6 +673,21 @@ router.post('/programs', auth, async (req, res) => {
       return res.status(400).json({ message: 'Program name is required' });
     }
 
+    if (!campus || !mongoose.Types.ObjectId.isValid(campus)) {
+      return res.status(400).json({ message: 'Campus is required' });
+    }
+
+    const trimmedName = name.trim();
+    const existingSameCampus = await Program.findOne({
+      name: trimmedName,
+      campus
+    }).lean();
+    if (existingSameCampus) {
+      return res.status(400).json({
+        message: 'A program with this name already exists for this campus. Use a different name or pick another campus.'
+      });
+    }
+
     let officeId = office || null;
     if (unit) {
       const unitDoc = await Unit.findById(unit).select('office');
@@ -679,9 +695,9 @@ router.post('/programs', auth, async (req, res) => {
     }
 
     const program = new Program({
-      name: name.trim(),
+      name: trimmedName,
       faculty: faculty || null,
-      campus: campus || null,
+      campus,
       office: officeId,
       unit: unit || null,
       isActive: isActive !== undefined ? isActive : true,
@@ -710,7 +726,9 @@ router.post('/programs', auth, async (req, res) => {
     res.status(201).json(program);
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Program with this name already exists for this faculty' });
+      return res.status(400).json({
+        message: 'A program with this name already exists for this campus. Use a different name or pick another campus.'
+      });
     }
     console.error('Error creating program:', error);
     res.status(500).json({ message: 'Error creating program', error: error.message });
@@ -745,6 +763,19 @@ router.put('/programs/:id', auth, async (req, res) => {
     if (isActive !== undefined) program.isActive = isActive;
     if (order !== undefined) program.order = order;
 
+    if (program.campus) {
+      const dup = await Program.findOne({
+        name: program.name,
+        campus: program.campus,
+        _id: { $ne: program._id }
+      }).lean();
+      if (dup) {
+        return res.status(400).json({
+          message: 'A program with this name already exists for this campus. Use a different name or pick another campus.'
+        });
+      }
+    }
+
     await program.save();
     await program.populate('faculty', 'name');
     if (program.campus) {
@@ -767,7 +798,9 @@ router.put('/programs/:id', auth, async (req, res) => {
     res.json(program);
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Program with this name already exists for this faculty' });
+      return res.status(400).json({
+        message: 'A program with this name already exists for this campus. Use a different name or pick another campus.'
+      });
     }
     console.error('Error updating program:', error);
     res.status(500).json({ message: 'Error updating program', error: error.message });
