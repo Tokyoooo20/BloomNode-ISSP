@@ -22,6 +22,14 @@ const Login = () => {
     variant: 'brand',
     confirmLabel: 'Continue',
   });
+  const [redirectPath, setRedirectPath] = useState('/unitdboard');
+
+  const resolveDashboardPath = (role) => {
+    const normalizedRole = String(role || '').toLowerCase().trim();
+    if (normalizedRole === 'admin') return '/dashboard';
+    if (normalizedRole === 'president' || normalizedRole === 'executive') return '/pdashboard';
+    return '/unitdboard';
+  };
 
   // Initialize email from location state only once on mount
   useEffect(() => {
@@ -73,6 +81,8 @@ const Login = () => {
         // Store JWT token in localStorage
         localStorage.setItem('token', data.token);
         localStorage.setItem('user', JSON.stringify(data.user));
+        const nextPath = resolveDashboardPath(data.user?.role);
+        setRedirectPath(nextPath);
         
         // Show success modal
         setModalConfig({
@@ -85,14 +95,7 @@ const Login = () => {
         
         // Redirect based on user role
         setTimeout(() => {
-          if (data.user.role === 'admin') {
-            window.location.href = '/dashboard';
-          } else if (data.user.role === 'president' || data.user.role === 'Executive') {
-            // Accept both 'president' and 'Executive' as president role
-            window.location.href = '/pdashboard';
-          } else {
-            window.location.href = '/unitdboard';
-          }
+          window.location.href = nextPath;
         }, 2000);
       } else {
         // Check if email verification is required
@@ -118,6 +121,7 @@ const Login = () => {
 
   const handleModalConfirm = () => {
     setShowModal(false);
+    window.location.href = redirectPath;
   };
 
   return (

@@ -55,6 +55,32 @@ const isSystemRole = (role, isUniversityLevelOffice) => {
   return normalized === 'admin' || normalized === 'president' || normalized === 'executive';
 };
 
+const isPresidentOfficeSelection = ({ unit, office, universityLevelOffice }) => {
+  const values = [unit, office, universityLevelOffice]
+    .map((v) => String(v ?? '').toLowerCase().trim())
+    .filter(Boolean);
+
+  return values.some((text) => {
+    return (
+      text.includes('office of the president') ||
+      text.includes('office of the university president') ||
+      text.includes('main office (office of the president)')
+    );
+  });
+};
+
+const resolveRoleForSignup = ({ campus, unit, office, universityLevelOffice }) => {
+  if (isPresidentOfficeSelection({ unit, office, universityLevelOffice })) {
+    return 'president';
+  }
+
+  if (campus === 'President' && unit === 'Executive') {
+    return 'Executive';
+  }
+
+  return 'Program head';
+};
+
 const findApprovedUnitConflict = async ({ userIdToExclude, unit, campus, isUniversityLevelOffice }) => {
   const campusNormalized = normalizeCampusValue(campus);
   const baseUnit = extractBaseUnit(unit);
@@ -184,8 +210,7 @@ router.post('/signup', async (req, res) => {
       $or: [{ email }, { username }]
     });
 
-    const role =
-      campus === 'President' && unit === 'Executive' ? 'Executive' : 'Program head';
+    const role = resolveRoleForSignup({ campus, unit, office, universityLevelOffice });
 
     const newUser = new User({
       unit,
@@ -284,10 +309,12 @@ router.post('/verify-email', async (req, res) => {
     }
 
     // Create actual user account now that email is verified
-    // Set role to 'Executive' if campus is 'President' and unit is 'Executive'
-    const role = (pendingUser.campus === 'President' && pendingUser.unit === 'Executive') 
-      ? 'Executive' 
-      : 'Program head';
+    const role = resolveRoleForSignup({
+      campus: pendingUser.campus,
+      unit: pendingUser.unit,
+      office: pendingUser.office,
+      universityLevelOffice: pendingUser.universityLevelOffice
+    });
     
     const newUser = new User({
       unit: pendingUser.unit,

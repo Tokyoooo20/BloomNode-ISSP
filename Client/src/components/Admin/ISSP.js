@@ -1246,6 +1246,7 @@ const ISSP = () => {
   const aiRequestIdRef = useRef(0);
   const latestQueriedItemRef = useRef('');
   const aiStatusRef = useRef('idle');
+  const approvedItemsSyncCacheRef = useRef(new Set());
   const [showDictStatusModal, setShowDictStatusModal] = useState(false);
   const [dictStatusForm, setDictStatusForm] = useState({ status: '', notes: '' });
   const [updatingDictStatus, setUpdatingDictStatus] = useState(false);
@@ -1477,8 +1478,7 @@ const ISSP = () => {
       const response = await axios.get(API_ENDPOINTS.admin.submittedRequests, {
         headers: { 'x-auth-token': token }
       });
-      
-      console.log('Fetched submitted requests:', response.data);
+
       setSubmittedRequests(response.data);
       
       // Group requests by unit AND campus, filtering out requests without a valid unit
@@ -1512,16 +1512,7 @@ const ISSP = () => {
         }
         return acc;
       }, {});
-      
-      // Debug: Log year cycles for each unit
-      Object.keys(grouped).forEach(unit => {
-        const years = grouped[unit].map(r => r.year).filter(Boolean);
-        const uniqueYears = [...new Set(years)];
-        console.log(`Unit ${unit}: ${grouped[unit].length} requests, years:`, uniqueYears);
-      });
-      
-      console.log('All units with requests:', Object.keys(grouped));
-      console.log('Total units:', Object.keys(grouped).length);
+
       setUnitRequestsGrouped(grouped);
     } catch (error) {
       console.error('Error fetching submitted requests:', error);
@@ -1552,6 +1543,30 @@ const ISSP = () => {
     // Get all unit+campus keys from unitRequestsGrouped (all year cycles)
     const allUnitKeys = Object.keys(unitRequestsGrouped);
     
+    const normalizedSelectedYear = String(selectedYearCycle).trim();
+
+    // Prefer resubmitted requests, else newest by timestamp.
+    const pickBestRequest = (best, candidate) => {
+      if (!candidate) return best;
+      if (!best) return candidate;
+      const bestResubmitted = best.status === 'resubmitted' || best.revisionStatus === 'resubmitted';
+      const candResubmitted = candidate.status === 'resubmitted' || candidate.revisionStatus === 'resubmitted';
+      if (candResubmitted && !bestResubmitted) return candidate;
+      if (!candResubmitted && bestResubmitted) return best;
+      const bestTime = new Date(best.revisedAt || best.updatedAt || best.createdAt || 0).getTime();
+      const candTime = new Date(candidate.revisedAt || candidate.updatedAt || candidate.createdAt || 0).getTime();
+      return candTime > bestTime ? candidate : best;
+    };
+
+    const normalizeStatusLabel = (req) => {
+      if (!req) return 'No Request';
+      if (req.status === 'resubmitted' || req.revisionStatus === 'resubmitted') return 'Resubmitted';
+      if (req.status === 'submitted') return 'Submitted';
+      if (req.status === 'approved') return 'Approved';
+      if (req.status === 'rejected') return 'Rejected';
+      return req.status ? req.status.charAt(0).toUpperCase() + req.status.slice(1) : 'No Request';
+    };
+
     const units = allUnitKeys.map(unitKey => {
       // Parse unit and campus from the key (format: "unit|||campus")
       const [unitName, campus] = unitKey.split('|||');
@@ -1561,18 +1576,8 @@ const ISSP = () => {
       
       // Filter requests for the selected year cycle (trim and normalize for comparison)
       const requestsForSelectedCycle = allUnitRequests.filter(request => {
-        const requestYear = request.year ? String(request.year).trim() : '';
-        const selectedYear = String(selectedYearCycle).trim();
-        const matches = requestYear === selectedYear;
-        
-        // Debug logging for first unit to help diagnose
-        if (unitName === 'BSBA' && allUnitRequests.length > 0 && allUnitRequests.indexOf(request) === 0) {
-          console.log(`[DEBUG BSBA] Total requests: ${allUnitRequests.length}`);
-          console.log(`[DEBUG BSBA] Request year: "${requestYear}", Selected: "${selectedYear}", Matches: ${matches}`);
-          console.log(`[DEBUG BSBA] All request years:`, allUnitRequests.map(r => r.year));
-        }
-        
-        return matches;
+        const requestYear = request?.year ? String(request.year).trim() : '';
+        return requestYear === normalizedSelectedYear;
       });
       
       // Count only requests that have items (not empty requests)
@@ -1585,11 +1590,13 @@ const ISSP = () => {
       let hasApprovedItems = false;
       for (const request of requestsForSelectedCycle) {
         const items = request.items && Array.isArray(request.items) ? request.items : [];
-        const hasApproved = items.some(item => item.approvalStatus === 'approved');
-        if (hasApproved) {
-          hasApprovedItems = true;
-          break;
+        for (const item of items) {
+          if (item && item.approvalStatus === 'approved') {
+            hasApprovedItems = true;
+            break;
+          }
         }
+        if (hasApprovedItems) break;
       }
       
       // Use requests for selected cycle if available, otherwise use all requests
@@ -1597,47 +1604,17 @@ const ISSP = () => {
         ? requestsForSelectedCycle 
         : allUnitRequests;
       
-      // Normalize campus display (empty/null = 'Main')
-      const normalizedCampus = (campus && campus.trim()) || 'Main';
-      
-      // Prioritize resubmitted requests, then sort by most recent
-      const sortedRequests = requestsToUse.sort((a, b) => {
-        const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
-        const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
-        if (aResubmitted && !bResubmitted) return -1;
-        if (!aResubmitted && bResubmitted) return 1;
-        return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
-      });
-      
-      const latestRequest = sortedRequests[0];
-      const lastUpdated = latestRequest ? (latestRequest.revisedAt || latestRequest.updatedAt || latestRequest.createdAt) : null;
-      
-      // Determine status - prioritize resubmitted, then use actual status
-      // Use the latest request from selected cycle if available, otherwise from all requests
-      const statusRequest = requestsForSelectedCycle.length > 0 
-        ? requestsForSelectedCycle.sort((a, b) => {
-            const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
-            const bResubmitted = b.status === 'resubmitted' || b.revisionStatus === 'resubmitted';
-            if (aResubmitted && !bResubmitted) return -1;
-            if (!aResubmitted && bResubmitted) return 1;
-            return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
-          })[0] || latestRequest
-        : latestRequest;
-      
-      let status = 'No Request';
-      if (statusRequest) {
-        if (statusRequest.status === 'resubmitted' || statusRequest.revisionStatus === 'resubmitted') {
-          status = 'Resubmitted';
-        } else if (statusRequest.status === 'submitted') {
-          status = 'Submitted';
-        } else if (statusRequest.status === 'approved') {
-          status = 'Approved';
-        } else if (statusRequest.status === 'rejected') {
-          status = 'Rejected';
-        } else {
-          status = statusRequest.status ? statusRequest.status.charAt(0).toUpperCase() + statusRequest.status.slice(1) : 'No Request';
-        }
+      // Pick best request without sorting (much faster, avoids mutating arrays)
+      let bestRequest = null;
+      for (const req of requestsToUse) {
+        bestRequest = pickBestRequest(bestRequest, req);
       }
+
+      const lastUpdated = bestRequest
+        ? (bestRequest.revisedAt || bestRequest.updatedAt || bestRequest.createdAt)
+        : null;
+
+      const status = normalizeStatusLabel(bestRequest);
       
       // Count requests with items for the selected cycle
       const requestCount = requestsWithItemsForCycle.length;
@@ -1758,18 +1735,21 @@ const ISSP = () => {
         return;
       }
 
-      // First, sync approved items to approveditems collection
-      try {
-        await axios.post(API_ENDPOINTS.admin.syncApprovedItems, {
-          unitName: unitName,
-          year: selectedYearCycle
-        }, {
-          headers: { 'x-auth-token': token }
-        });
-        console.log(`Synced approved items for ${unitName} to approveditems collection`);
-      } catch (syncError) {
-        console.warn('Error syncing approved items (non-fatal):', syncError);
-        // Continue even if sync fails
+      // Sync approved items only once per unit + year per session (this endpoint can be slow).
+      const syncKey = `${unitName}|||${selectedYearCycle}`;
+      if (!approvedItemsSyncCacheRef.current.has(syncKey)) {
+        try {
+          await axios.post(API_ENDPOINTS.admin.syncApprovedItems, {
+            unitName: unitName,
+            year: selectedYearCycle
+          }, {
+            headers: { 'x-auth-token': token }
+          });
+          approvedItemsSyncCacheRef.current.add(syncKey);
+        } catch (syncError) {
+          // Non-fatal: we'll still try to render using whatever the approveditems endpoint returns.
+          console.warn('Error syncing approved items (non-fatal):', syncError);
+        }
       }
 
       // Get ALL requests for this unit+campus from the grouped data (all year cycles)
@@ -1801,16 +1781,12 @@ const ISSP = () => {
 
       // Fetch approved items directly from approveditems collection
       try {
-        console.log(`Fetching approved items from approveditems collection for unit: ${unitName}`);
-        
         const approvedItemsResponse = await axios.get(
           API_ENDPOINTS.admin.approvedItemsByUnit(unitName, selectedYearCycle),
           { headers: { 'x-auth-token': token } }
         );
-        
+
         const approvedItems = approvedItemsResponse.data.items || [];
-        console.log(`Fetched ${approvedItems.length} approved items from approveditems collection`);
-        
         if (approvedItems.length === 0) {
           showAlert({
             variant: 'default',
@@ -1819,72 +1795,27 @@ const ISSP = () => {
           });
           return;
         }
-        
-        // Group items by request for display
-        const itemsByRequest = {};
-        approvedItems.forEach(item => {
-          const requestId = item.requestId;
-          if (!itemsByRequest[requestId]) {
-            itemsByRequest[requestId] = [];
-          }
-          itemsByRequest[requestId].push(item);
-        });
-        
-        // Fetch full request details for context
-        const allRequestsData = await Promise.all(
-          unitRequests.map(async (request) => {
-            try {
-              const response = await axios.get(API_ENDPOINTS.admin.getRequest(request._id), {
-                headers: { 'x-auth-token': token }
-              });
-              const requestData = response.data;
-              // Replace items with approved items from approveditems collection
-              if (itemsByRequest[request._id]) {
-                requestData.items = itemsByRequest[request._id];
-              } else {
-                requestData.items = [];
-              }
-              return requestData;
-            } catch (error) {
-              console.error(`Error fetching request ${request._id}:`, error);
-              const fallbackRequest = {
-                ...request,
-                items: itemsByRequest[request._id] || []
-              };
-              return fallbackRequest;
-            }
-          })
-        );
 
-        // Use approved items directly from approveditems collection
-        // All items are already approved, so no need to filter
-        const requestsWithItems = allRequestsData.filter(request => {
-          const requestItems = request.items && Array.isArray(request.items) ? request.items : [];
-          return requestItems.length > 0;
+        // IMPORTANT: Avoid N+1 network calls.
+        // We already have enough request context in `unitRequests` (from `submittedRequests` grouping).
+        const requestContextById = new Map();
+        unitRequests.forEach((req) => {
+          requestContextById.set(String(req._id), req);
         });
 
-        // Combine all approved items from approveditems collection
-        const allItems = [];
-        approvedItems.forEach(item => {
-          // Find the corresponding request for context
-          const request = allRequestsData.find(r => r._id === item.requestId);
-          if (request) {
-            allItems.push({
-              ...item,
-              requestId: request._id,
-              requestTitle: request.requestTitle || request.title || item.requestTitle,
-              requestYear: request.year || item.requestYear,
-              requestStatus: request.status || item.requestStatus || 'approved',
-              requestCreatedAt: request.createdAt || item.requestCreatedAt,
-              requestUpdatedAt: request.updatedAt || item.requestUpdatedAt
-            });
-          } else {
-            // If request not found, use item data directly
-            allItems.push(item);
-          }
+        const allItems = approvedItems.map((item) => {
+          const req = requestContextById.get(String(item.requestId));
+          return {
+            ...item,
+            requestId: item.requestId,
+            requestTitle: req?.requestTitle || req?.title || item.requestTitle,
+            requestYear: req?.year || item.requestYear,
+            requestStatus: req?.status || item.requestStatus || 'approved',
+            requestCreatedAt: req?.createdAt || item.requestCreatedAt,
+            requestUpdatedAt: req?.updatedAt || item.requestUpdatedAt,
+            userId: req?.userId || item.userId
+          };
         });
-        
-        console.log(`Using ${allItems.length} approved items from approveditems collection`);
         
         // Combine items with the same name (group by item name only, regardless of specification)
         const itemGroups = {};
@@ -2011,17 +1942,8 @@ const ISSP = () => {
           };
         });
         
-        console.log(`Combined ${allItems.length} items into ${combinedItems.length} unique items`);
-
-        console.log(`=== SUMMARY for ${unitName} ===`);
-        console.log(`Total requests fetched: ${allRequestsData.length}`);
-        console.log(`Requests with items: ${requestsWithItems.length}`);
-        console.log(`Total approved items before combining: ${allItems.length}`);
-        console.log(`Total items after combining: ${combinedItems.length}`);
-        console.log(`Combined items:`, combinedItems);
-
-        // Get the first request with items as base (for userId, unit info, etc.)
-        const baseRequest = requestsWithItems[0] || allRequestsData[0];
+        // Use the first request as base (for userId/unit/campus context).
+        const baseRequest = unitRequests[0] || allUnitRequests[0];
         
         // Ensure unit is set on the combined request (use request.unit or userId.unit)
         const unitForRequest = (baseRequest.unit && baseRequest.unit.trim()) 
@@ -2036,8 +1958,8 @@ const ISSP = () => {
           _id: `combined-${unitName}-${selectedYearCycle}`, // Combined ID
           unit: unitForRequest, // Ensure unit is set
           items: combinedItems, // Use combined items instead of allItems
-          requestCount: requestsWithItems.length,
-          allRequests: requestsWithItems // Keep reference only to requests with items
+          requestCount: unitRequests.length,
+          allRequests: unitRequests
         };
 
         // Use the combined request data with all items

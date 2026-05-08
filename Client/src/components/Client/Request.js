@@ -235,6 +235,26 @@ const ItemInsightSidebar = ({ itemName, status, insights, error, onRetry }) => {
 };
 
 const Request = ({ onRequestUpdate }) => {
+  const FALLBACK_REGISTERED_YEAR_CYCLES = ['2024-2026', '2027-2029', '2030-2032', '2033-2035'];
+
+  const isValidThreeYearCycle = (cycle) => {
+    if (!cycle || typeof cycle !== 'string') return false;
+    const trimmed = cycle.trim();
+    if (!/^\d{4}-\d{4}$/.test(trimmed)) return false;
+    const [startRaw, endRaw] = trimmed.split('-');
+    const startYear = parseInt(startRaw, 10);
+    const endYear = parseInt(endRaw, 10);
+    return !isNaN(startYear) && !isNaN(endYear) && endYear - startYear === 2;
+  };
+
+  const normalizeToRegisteredCycle = (cycle, registeredCycles) => {
+    const cleaned = String(cycle || '').trim();
+    if (isValidThreeYearCycle(cleaned) && registeredCycles.includes(cleaned)) {
+      return cleaned;
+    }
+    return registeredCycles[0] || FALLBACK_REGISTERED_YEAR_CYCLES[0];
+  };
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showAddRequest, setShowAddRequest] = useState(false);
@@ -242,7 +262,7 @@ const Request = ({ onRequestUpdate }) => {
   const [requestForm, setRequestForm] = useState({
     requestTitle: '',
     priority: 'medium',
-    year: '2024-2026',
+    year: '',
     description: '',
     items: []
   });
@@ -551,11 +571,24 @@ const Request = ({ onRequestUpdate }) => {
   const fetchAvailableYearCycles = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get(API_ENDPOINTS.issp.get, {
-        headers: { 'x-auth-token': token }
-      });
+      const [isspResponse, registeredCyclesResponse] = await Promise.all([
+        axios.get(API_ENDPOINTS.issp.get, {
+          headers: { 'x-auth-token': token }
+        }),
+        axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+          headers: { 'x-auth-token': token }
+        })
+      ]);
       
-      const isspData = response.data;
+      const isspData = isspResponse.data;
+      const registeredCycles = (registeredCyclesResponse.data || [])
+        .map((cycle) => String(cycle?.name || '').trim())
+        .filter((name) => /^\d{4}-\d{4}$/.test(name))
+        .filter((name) => {
+          const [start, end] = name.split('-').map((n) => parseInt(n, 10));
+          return !isNaN(start) && !isNaN(end) && end - start === 2;
+        });
+      const registeredCycleSet = new Set(registeredCycles);
       
       // Backend now always includes admin's acceptingEntries for all users
       if (isspData && isspData.acceptingEntries) {
@@ -574,6 +607,11 @@ const Request = ({ onRequestUpdate }) => {
           // Extract year cycles that have "accepting" status
           const acceptingYearCycles = Object.keys(entriesObject)
             .filter(yearCycle => {
+              const normalizedYearCycle = String(yearCycle || '').trim();
+              if (!registeredCycleSet.has(normalizedYearCycle)) {
+                return false;
+              }
+
               const entry = entriesObject[yearCycle];
               
               // Entry should be an object with a status property
@@ -602,18 +640,22 @@ const Request = ({ onRequestUpdate }) => {
             }
           } else {
             setAvailableYearCycles([]);
+            setRequestForm(prev => ({ ...prev, year: '' }));
           }
         } else {
           setAvailableYearCycles([]);
+          setRequestForm(prev => ({ ...prev, year: '' }));
         }
       } else {
         // If no accepting entries configured, set empty array
         setAvailableYearCycles([]);
+        setRequestForm(prev => ({ ...prev, year: '' }));
       }
     } catch (error) {
       console.error('Error fetching available year cycles:', error);
       // On error, set empty array
       setAvailableYearCycles([]);
+      setRequestForm(prev => ({ ...prev, year: '' }));
     }
   };
 
@@ -676,16 +718,30 @@ const Request = ({ onRequestUpdate }) => {
 
   // Group requests by year cycle
   const groupedRequests = useMemo(() => {
+    const normalizedRegisteredCycles = (
+      availableYearCycles && availableYearCycles.length > 0
+        ? availableYearCycles
+        : FALLBACK_REGISTERED_YEAR_CYCLES
+    ).filter(isValidThreeYearCycle);
+    const registeredSet = new Set(normalizedRegisteredCycles);
+
     const grouped = {};
     requests.forEach(request => {
-      const year = request.year || '2024-2026';
+      const rawYear = String(request.year || '').trim();
+
+      // Hide malformed or unregistered legacy cycles (e.g., "2024-2027") from the modal/year groups.
+      if (!isValidThreeYearCycle(rawYear) || !registeredSet.has(rawYear)) {
+        return;
+      }
+
+      const year = rawYear;
       if (!grouped[year]) {
         grouped[year] = [];
       }
       grouped[year].push(request);
     });
     return grouped;
-  }, [requests]);
+  }, [requests, availableYearCycles]);
 
   // Helper function to check for rejected/disapproved items in a year group
   const getRejectedItemsInfo = useCallback((yearRequests) => {
@@ -745,7 +801,7 @@ const Request = ({ onRequestUpdate }) => {
     setRequestForm({
       requestTitle: requestToRevise.requestTitle || requestToRevise.title || '',
       priority: requestToRevise.priority || 'medium',
-      year: requestToRevise.year || '2024-2026',
+      year: normalizeToRegisteredCycle(requestToRevise.year, availableYearCycles),
       description: requestToRevise.description || '',
       items: normalizedItems
     });
@@ -920,7 +976,7 @@ const Request = ({ onRequestUpdate }) => {
         setRequestForm({
           requestTitle: updatedRequest.requestTitle || updatedRequest.title,
           priority: updatedRequest.priority,
-          year: updatedRequest.year || '2024-2026',
+          year: normalizeToRegisteredCycle(updatedRequest.year, availableYearCycles),
           description: updatedRequest.description,
           items: normalizedItems
         });
@@ -2871,12 +2927,7 @@ const Request = ({ onRequestUpdate }) => {
                           <option key={yearCycle} value={yearCycle}>{yearCycle}</option>
                         ))
                       ) : (
-                        <>
-                          <option value="2024-2026">2024-2026</option>
-                          <option value="2027-2029">2027-2029</option>
-                          <option value="2030-2032">2030-2032</option>
-                          <option value="2033-2035">2033-2035</option>
-                        </>
+                        <option value="">No accepting year cycles</option>
                       )}
                     </select>
                     {availableYearCycles.length === 0 && (
@@ -3179,12 +3230,7 @@ const Request = ({ onRequestUpdate }) => {
                           <option key={yearCycle} value={yearCycle}>{yearCycle}</option>
                         ))
                       ) : (
-                        <>
-                          <option value="2024-2026">2024-2026</option>
-                          <option value="2027-2029">2027-2029</option>
-                          <option value="2030-2032">2030-2032</option>
-                          <option value="2033-2035">2033-2035</option>
-                        </>
+                        <option value="">No accepting year cycles</option>
                       )}
                     </select>
                     {availableYearCycles.length === 0 && (
