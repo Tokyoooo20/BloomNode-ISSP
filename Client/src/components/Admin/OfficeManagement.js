@@ -13,9 +13,7 @@ const OfficeManagement = () => {
   
   // Data states
   const [campuses, setCampuses] = useState([]);
-  const [faculties, setFaculties] = useState([]);
   const [offices, setOffices] = useState([]);
-  const [units, setUnits] = useState([]);
   const [programs, setPrograms] = useState([]);
   const [yearCycles, setYearCycles] = useState([]);
   const [selectedOfficeIdForUnits, setSelectedOfficeIdForUnits] = useState('');
@@ -24,11 +22,11 @@ const OfficeManagement = () => {
   const [unitsPerPage] = useState(10);
   const [selectedOfficeIdForPrograms, setSelectedOfficeIdForPrograms] = useState('');
   const [unitsUnderOvpaa, setUnitsUnderOvpaa] = useState([]);
-  
+
   // Modal states
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState(''); // 'create' or 'edit'
-  const [modalEntity, setModalEntity] = useState(''); // 'campus', 'faculty', etc.
+  const [modalEntity, setModalEntity] = useState(''); // 'campus', 'office', etc.
   const [editingItem, setEditingItem] = useState(null);
   const [showUpdateConfirmation, setShowUpdateConfirmation] = useState(false);
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
@@ -43,14 +41,12 @@ const OfficeManagement = () => {
     campus: '',
     office: '',
     unit: '',
-    faculty: '',
     isActive: true,
     order: 0
   });
 
   const tabs = [
     { id: 'campuses', label: 'Campuses' },
-    { id: 'faculties', label: 'Faculties' },
     { id: 'programs', label: 'Programs' },
     { id: 'offices', label: 'Offices' },
     { id: 'units', label: 'Units' },
@@ -60,7 +56,6 @@ const OfficeManagement = () => {
   // Fetch all data
   useEffect(() => {
     fetchCampuses();
-    fetchFaculties();
     fetchOffices();
     fetchPrograms();
     fetchYearCycles();
@@ -76,7 +71,7 @@ const OfficeManagement = () => {
     load();
   }, [selectedOfficeIdForUnits]);
 
-  // Fetch units under OVPAA when Program modal is open
+  // Units under OVPAA for the Program modal ("Program" dropdown)
   useEffect(() => {
     const ovpaa = offices.find((o) => o.name === OVPAA_OFFICE_NAME);
     if (showModal && modalEntity === 'program' && ovpaa) {
@@ -85,7 +80,7 @@ const OfficeManagement = () => {
       setUnitsUnderOvpaa([]);
     }
   }, [showModal, modalEntity, offices]);
-  
+
   // Fetch functions
   const fetchCampuses = async () => {
     try {
@@ -95,17 +90,6 @@ const OfficeManagement = () => {
       setCampuses(response.data);
     } catch (err) {
       console.error('Error fetching campuses:', err);
-    }
-  };
-
-  const fetchFaculties = async () => {
-    try {
-      const response = await axios.get(API_ENDPOINTS.organization.faculties.list, {
-        headers: getAuthHeaders()
-      });
-      setFaculties(response.data);
-    } catch (err) {
-      console.error('Error fetching faculties:', err);
     }
   };
 
@@ -163,9 +147,13 @@ const OfficeManagement = () => {
     setFormData({
       name: '',
       campus: entity === 'office' ? '' : '',
-      office: entity === 'unit' ? (selectedOfficeIdForUnits || '') : '',
-      unit: entity === 'program' ? '' : '',
-      faculty: '',
+      office:
+        entity === 'unit'
+          ? (selectedOfficeIdForUnits || '')
+          : entity === 'program'
+            ? (ovpaaOffice?._id || '')
+            : '',
+      unit: '',
       isActive: true,
       order: 0
     });
@@ -177,12 +165,15 @@ const OfficeManagement = () => {
     setModalType('edit');
     setModalEntity(entity);
     setEditingItem(item);
+    const ovpaaForEdit = offices.find((o) => o.name === OVPAA_OFFICE_NAME);
     setFormData({
       name: item.name || '',
       campus: entity === 'office' ? '' : (item.campus?._id || item.campus || ''),
-      office: item.office?._id || item.office || '',
+      office:
+        entity === 'program'
+          ? (ovpaaForEdit?._id || item.office?._id || item.office || '')
+          : (item.office?._id || item.office || ''),
       unit: item.unit?._id || item.unit || '',
-      faculty: item.faculty?._id || item.faculty || '',
       isActive: item.isActive !== undefined ? item.isActive : true,
       order: item.order || 0
     });
@@ -210,9 +201,6 @@ const OfficeManagement = () => {
         case 'campus':
           endpoint = API_ENDPOINTS.organization.campuses.delete(item._id);
           break;
-        case 'faculty':
-          endpoint = API_ENDPOINTS.organization.faculties.delete(item._id);
-          break;
         case 'office':
           endpoint = API_ENDPOINTS.organization.offices.delete(item._id);
           break;
@@ -231,7 +219,6 @@ const OfficeManagement = () => {
       
       // Refresh data
       if (entity === 'campus') fetchCampuses();
-      else if (entity === 'faculty') fetchFaculties();
       else if (entity === 'office') fetchOffices();
       else if (entity === 'program') fetchPrograms();
       else if (entity === 'unit') {
@@ -310,12 +297,6 @@ const OfficeManagement = () => {
             : API_ENDPOINTS.organization.campuses.update(editingItem._id);
           data = { name: formData.name, isActive: formData.isActive, order: formData.order };
           break;
-        case 'faculty':
-          endpoint = modalType === 'create'
-            ? API_ENDPOINTS.organization.faculties.create
-            : API_ENDPOINTS.organization.faculties.update(editingItem._id);
-          data = { name: formData.name, campus: formData.campus, isActive: formData.isActive, order: formData.order };
-          break;
         case 'office':
           endpoint = modalType === 'create'
             ? API_ENDPOINTS.organization.offices.create
@@ -326,7 +307,14 @@ const OfficeManagement = () => {
           endpoint = modalType === 'create'
             ? API_ENDPOINTS.organization.programs.create
             : API_ENDPOINTS.organization.programs.update(editingItem._id);
-          data = { name: formData.name, campus: formData.campus, unit: formData.unit || null, isActive: formData.isActive, order: formData.order };
+          data = {
+            name: formData.name,
+            campus: formData.campus,
+            office: formData.office || null,
+            unit: formData.unit || null,
+            isActive: formData.isActive,
+            order: formData.order
+          };
           break;
         case 'unit':
           endpoint = modalType === 'create'
@@ -350,7 +338,6 @@ const OfficeManagement = () => {
 
       // Refresh data
       if (modalEntity === 'campus') fetchCampuses();
-      else if (modalEntity === 'faculty') fetchFaculties();
       else if (modalEntity === 'office') fetchOffices();
       else if (modalEntity === 'program') fetchPrograms();
       else if (modalEntity === 'unit') {
@@ -394,45 +381,6 @@ const OfficeManagement = () => {
                 <div className="flex items-center gap-1.5 flex-nowrap">
                   <button onClick={() => handleEdit('campus', campus)} className="tap-target bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 border border-blue-200 whitespace-nowrap h-7 flex items-center justify-center">Edit</button>
                   <button onClick={() => handleDelete('campus', campus)} className="tap-target bg-red-200 hover:bg-red-300 text-red-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 whitespace-nowrap h-7 flex items-center justify-center">Delete</button>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-
-  // Render table for faculties
-  const renderFacultiesTable = () => (
-    <div className="hidden md:block table-responsive-wrapper max-h-[600px] overflow-y-auto">
-      <table className="table-responsive min-w-full divide-y divide-gray-200">
-        <thead className="bg-gray-50 sticky top-0 z-10">
-          <tr>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Name</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Campus</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Status</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Actions</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200 bg-white">
-          {faculties.map((faculty) => (
-            <tr key={faculty._id} className="hover:bg-gray-50">
-              <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[240px]" title={faculty.name}>
-                <span className="block truncate">{faculty.name}</span>
-              </td>
-              <td className="px-6 py-4 text-sm text-gray-500 max-w-[120px]" title={faculty.campus?.name || 'N/A'}>
-                <span className="block truncate">{faculty.campus?.name || 'N/A'}</span>
-              </td>
-              <td className="px-6 py-4 whitespace-nowrap">
-                <span className={`px-2 sm:px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${faculty.isActive ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
-                  {faculty.isActive ? 'Active' : 'Inactive'}
-                </span>
-              </td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                <div className="flex items-center gap-1.5 flex-nowrap">
-                  <button onClick={() => handleEdit('faculty', faculty)} className="tap-target bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 border border-blue-200 whitespace-nowrap h-7 flex items-center justify-center">Edit</button>
-                  <button onClick={() => handleDelete('faculty', faculty)} className="tap-target bg-red-200 hover:bg-red-300 text-red-700 px-2 py-1 rounded text-xs font-medium transition-colors duration-200 whitespace-nowrap h-7 flex items-center justify-center">Delete</button>
                 </div>
               </td>
             </tr>
@@ -490,7 +438,7 @@ const OfficeManagement = () => {
         <thead className="bg-gray-50 sticky top-0 z-10">
           <tr>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Name</th>
-            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Unit</th>
+            <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Program</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Campus</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Status</th>
             <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 bg-gray-50">Actions</th>
@@ -502,8 +450,8 @@ const OfficeManagement = () => {
               <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-[200px]" title={program.name}>
                 <span className="block truncate">{program.name}</span>
               </td>
-              <td className="px-6 py-4 text-sm text-gray-500 max-w-[180px]" title={program.unit?.name || '—'}>
-                <span className="block truncate">{program.unit?.name || '—'}</span>
+              <td className="px-6 py-4 text-sm text-gray-500 max-w-[180px]" title={program.name || '—'}>
+                <span className="block truncate">{program.name || '—'}</span>
               </td>
               <td className="px-6 py-4 text-sm text-gray-500 max-w-[120px]" title={program.campus?.name || 'All Campuses'}>
                 <span className="block truncate">{program.campus?.name || 'All Campuses'}</span>
@@ -649,7 +597,6 @@ const OfficeManagement = () => {
   const getModalTitle = () => {
     const entityNames = {
       campus: 'Campus',
-      faculty: 'Faculty',
       office: 'Office',
       program: 'Program',
       unit: 'Unit',
@@ -720,37 +667,6 @@ const OfficeManagement = () => {
             ) : (
               <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
                 {renderCampusesTable()}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'faculties' && (
-          <div>
-            <div className="border-b border-gray-200 px-4 sm:px-6 py-3 sm:py-4 mb-4">
-              <div className="flex justify-between items-center">
-                <h3 className="text-base sm:text-lg font-semibold text-gray-900">
-                  Faculties ({faculties.length})
-                </h3>
-                <button 
-                  onClick={() => handleCreate('faculty')}
-                  className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors tap-target text-sm font-medium"
-                >
-                  + Add Faculty
-                </button>
-              </div>
-            </div>
-            {faculties.length === 0 ? (
-              <div className="p-6 sm:p-8 text-center text-gray-500">
-                <svg className="mx-auto mb-4 h-10 w-10 sm:h-12 sm:w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                </svg>
-                <p className="text-base sm:text-lg font-medium">No faculties found</p>
-                <p className="text-xs sm:text-sm">Click "Add Faculty" to create one</p>
-              </div>
-            ) : (
-              <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-                {renderFacultiesTable()}
               </div>
             )}
           </div>
@@ -969,24 +885,58 @@ const OfficeManagement = () => {
             </div>
           )}
 
-          {/* Program modal: Unit (under OVPAA) first, then Campus, then Name below */}
+          {/* Program modal: Office (OVPAA only) first, then Campus, then Name below */}
           {modalEntity === 'program' && (
             <>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Unit *</label>
-                <select
-                  value={formData.unit}
-                  onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                  required
-                  disabled={loading}
-                >
-                  <option value="">Select Unit</option>
-                  {unitsUnderOvpaa.map((u) => (
-                    <option key={u._id} value={u._id}>{u.name}</option>
-                  ))}
-                </select>
-                <p className="mt-1 text-xs text-gray-500">Programs are under {OVPAA_OFFICE_NAME}. Select a unit under that office first, then fill the rest.</p>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Office *</label>
+                {ovpaaOffice ? (
+                  <select
+                    value={formData.office}
+                    onChange={(e) => setFormData({ ...formData, office: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                    required
+                    disabled={loading}
+                  >
+                    <option value={ovpaaOffice._id}>{OVPAA_OFFICE_NAME}</option>
+                  </select>
+                ) : (
+                  <p className="text-sm text-amber-700">
+                    This program must be under {OVPAA_OFFICE_NAME}, but that office was not found. Add it under the Offices tab (exact name), then try again.
+                  </p>
+                )}
+                <p className="mt-1 text-xs text-gray-500">Programs in this list are always created under {OVPAA_OFFICE_NAME}.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Program *</label>
+                {ovpaaOffice ? (
+                  <>
+                    <select
+                      value={formData.unit}
+                      onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                      required
+                      disabled={loading}
+                    >
+                      <option value="">Select program</option>
+                      {unitsUnderOvpaa
+                        .filter((u) => u.isActive)
+                        .map((u) => (
+                          <option key={u._id} value={u._id}>
+                            {u.name}
+                          </option>
+                        ))}
+                    </select>
+                    {unitsUnderOvpaa.filter((u) => u.isActive).length === 0 && (
+                      <p className="mt-1 text-xs text-amber-700">
+                        No entries yet under {OVPAA_OFFICE_NAME}. Add them in the Units tab (choose this office), then return here.
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-gray-500">
+                      All organizational programs (units) under the Vice President for Academic Affairs.
+                    </p>
+                  </>
+                ) : null}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Campus *</label>
@@ -1015,27 +965,9 @@ const OfficeManagement = () => {
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
                 required
-                disabled={loading || (modalEntity === 'unit' && !formData.office) || (modalEntity === 'program' && !formData.unit)}
-                placeholder={(modalEntity === 'unit' && !formData.office) ? 'Select office first' : (modalEntity === 'program' && !formData.unit) ? 'Select unit first' : ''}
+                disabled={loading || (modalEntity === 'unit' && !formData.office) || (modalEntity === 'program' && (!formData.office || !ovpaaOffice || !formData.unit))}
+                placeholder={(modalEntity === 'unit' && !formData.office) ? 'Select office first' : (modalEntity === 'program' && (!formData.office || !ovpaaOffice || !formData.unit)) ? 'Select program and campus first' : ''}
               />
-            </div>
-          )}
-
-          {modalEntity === 'faculty' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Campus *</label>
-              <select
-                value={formData.campus}
-                onChange={(e) => setFormData({ ...formData, campus: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
-                required
-                disabled={loading}
-              >
-                <option value="">Select Campus</option>
-                {campuses.map(c => (
-                  <option key={c._id} value={c._id}>{c.name}</option>
-                ))}
-              </select>
             </div>
           )}
 

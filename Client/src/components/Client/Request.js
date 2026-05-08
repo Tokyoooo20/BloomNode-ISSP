@@ -1903,7 +1903,6 @@ const Request = ({ onRequestUpdate }) => {
                           const unitName = yearRequests[0]?.userId?.unit || 
                                          yearRequests[0]?.requestTitle || 
                                          'N/A';
-                          const hasInProgress = yearRequests.some(r => r.progress === 'in-progress');
                           
                           return (
                             <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
@@ -1911,12 +1910,7 @@ const Request = ({ onRequestUpdate }) => {
                                 <span className="font-semibold text-gray-900 text-base">
                                   {unitName}
                                 </span>
-                                {hasInProgress && (
-                                  <div className="flex items-center space-x-1.5">
-                                    <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></div>
-                                    <span className="text-orange-600 text-sm font-medium">In Progress</span>
-                                  </div>
-                                )}
+                                
                               </div>
                               <div className="text-sm font-medium text-gray-700">
                                 {totalItems} item{totalItems !== 1 ? 's' : ''}

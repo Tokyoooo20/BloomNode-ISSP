@@ -23,6 +23,12 @@ const formatDateTime = (value) => {
   }
 };
 
+const resolveIsspYearCycle = (issp) =>
+  issp?.yearCycle ||
+  issp?.review?.yearCycle ||
+  issp?.metadata?.yearCycle ||
+  '2024-2027';
+
 const PresISSP = () => {
   const [issps, setIssps] = useState([]);
   const [selectedIsspId, setSelectedIsspId] = useState(null);
@@ -44,6 +50,8 @@ const PresISSP = () => {
   const [showUnitRequestsModal, setShowUnitRequestsModal] = useState(false);
   const [unitRequests, setUnitRequests] = useState([]);
   const [loadingUnitRequests, setLoadingUnitRequests] = useState(false);
+  const [availableYearCycles, setAvailableYearCycles] = useState([]);
+  const [selectedDownloadYearCycle, setSelectedDownloadYearCycle] = useState('');
 
   const showModal = useCallback((config) => {
     setModalState({
@@ -94,6 +102,30 @@ const PresISSP = () => {
   useEffect(() => {
     fetchIssps();
   }, [fetchIssps]);
+
+  useEffect(() => {
+    const fetchYearCycles = async () => {
+      try {
+        const response = await axios.get(API_ENDPOINTS.organization.yearCycles.list, {
+          headers: getAuthHeaders()
+        });
+        const cycles = Array.isArray(response.data)
+          ? response.data
+              .map((entry) => (typeof entry?.name === 'string' ? entry.name.trim() : ''))
+              .filter(Boolean)
+          : [];
+        const uniqueCycles = Array.from(new Set(cycles));
+        setAvailableYearCycles(uniqueCycles);
+        setSelectedDownloadYearCycle((prev) => prev || uniqueCycles[0] || '2024-2027');
+      } catch (error) {
+        console.error('Error loading year cycles for president download:', error);
+        setAvailableYearCycles(['2024-2027']);
+        setSelectedDownloadYearCycle((prev) => prev || '2024-2027');
+      }
+    };
+
+    fetchYearCycles();
+  }, []);
 
   // Socket.io real-time updates
   useEffect(() => {
@@ -181,12 +213,13 @@ const PresISSP = () => {
       typeof issp.userId === 'object' && issp.userId !== null
         ? issp.userId.unit || issp.userId.username || 'issp'
         : 'issp';
+    const yearCycle = selectedDownloadYearCycle || resolveIsspYearCycle(issp);
 
     // Show confirmation modal first
     showModal({
       variant: 'confirm',
       title: 'Generate ISSP Report',
-      message: `Are you sure you want to generate and download the ISSP report for ${unitName}?`,
+      message: `Generate and download the ISSP report for ${unitName} (${yearCycle})?`,
       confirmLabel: 'Generate',
       cancelLabel: 'Cancel',
       onConfirm: async () => {
@@ -202,6 +235,7 @@ const PresISSP = () => {
 
     const userId =
       typeof issp.userId === 'object' && issp.userId !== null ? issp.userId._id : issp.userId;
+    const yearCycle = selectedDownloadYearCycle || resolveIsspYearCycle(issp);
 
     try {
       const token = localStorage.getItem('token');
@@ -219,7 +253,7 @@ const PresISSP = () => {
 
       const response = await axios.get(API_ENDPOINTS.issp.generate, {
         headers: getAuthHeaders(),
-        params: { userId },
+        params: { userId, yearCycle },
         responseType: 'blob',
       });
 
@@ -232,7 +266,7 @@ const PresISSP = () => {
           : 'issp';
 
       link.href = url;
-      link.setAttribute('download', `ISSP-${unitName}.pdf`);
+      link.setAttribute('download', `ISSP-${unitName}-${yearCycle}.pdf`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -241,7 +275,7 @@ const PresISSP = () => {
       showModal({
         variant: 'success',
         title: 'Download Started',
-        message: `ISSP report for ${unitName} has been downloaded successfully.`,
+        message: `ISSP report for ${unitName} (${yearCycle}) has been downloaded successfully.`,
         onConfirm: closeModal
       });
     } catch (err) {
@@ -464,6 +498,20 @@ const PresISSP = () => {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-600">
+                Year Cycle
+              </label>
+              <select
+                value={selectedDownloadYearCycle}
+                onChange={(event) => setSelectedDownloadYearCycle(event.target.value)}
+                className="px-2 py-2 text-sm border border-gray-300 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              >
+                {(availableYearCycles.length ? availableYearCycles : ['2024-2027']).map((cycleName) => (
+                  <option key={cycleName} value={cycleName}>
+                    {cycleName}
+                  </option>
+                ))}
+              </select>
               <button
                 onClick={() => fetchUnitRequests(unitName)}
                 disabled={loadingUnitRequests}

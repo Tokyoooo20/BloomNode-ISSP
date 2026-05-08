@@ -36,7 +36,27 @@ const UnitDboard = () => {
   const [totalItemsCount, setTotalItemsCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [mostRequestedItems, setMostRequestedItems] = useState([]);
-  const [userData, setUserData] = useState({ unit: '', username: '', profilePicture: null });
+  const [userData, setUserData] = useState({ unit: '', program: '', campus: '', username: '', profilePicture: null });
+  const getCampusAbbreviation = (campus) => {
+    const normalized = String(campus || '').trim().toLowerCase();
+    if (!normalized || normalized === 'main' || normalized === 'main campus') return 'MAIN';
+    if (normalized === 'baganga') return 'BGA';
+    if (normalized === 'tarragona') return 'TAR';
+    if (normalized === 'banaybanay' || normalized === 'banaybanay campus') return 'BAN';
+    if (normalized === 'san isidro') return 'SID';
+    if (normalized === 'president') return '';
+    return String(campus || '').trim().toUpperCase();
+  };
+
+  const displayUnitName = (() => {
+    const program = String(userData.program || '').trim();
+    const unit = String(userData.unit || '').trim();
+    const campusAbbr = getCampusAbbreviation(userData.campus);
+    if (program) return campusAbbr ? `${campusAbbr} ${program}` : program;
+    if (unit) return campusAbbr ? `${campusAbbr} ${unit}` : unit;
+    return userData.username || 'User Name';
+  })();
+
   const [approvedISSPDocument, setApprovedISSPDocument] = useState(null);
   const [loadingApprovedISSP, setLoadingApprovedISSP] = useState(false);
   const [dictApprovalStatus, setDictApprovalStatus] = useState(null);
@@ -193,6 +213,8 @@ const UnitDboard = () => {
       });
       setUserData({
         unit: response.data.unit || '',
+        program: response.data.program || '',
+        campus: response.data.campus || '',
         username: response.data.username || '',
         profilePicture: response.data.profilePicture 
           ? getFileUrl(response.data.profilePicture)
@@ -207,6 +229,8 @@ const UnitDboard = () => {
           const parsedUser = JSON.parse(storedUser);
           setUserData({
             unit: parsedUser.unit || '',
+            program: parsedUser.program || '',
+            campus: parsedUser.campus || '',
             username: parsedUser.username || '',
             profilePicture: null
           });
@@ -319,13 +343,13 @@ const UnitDboard = () => {
                 />
               ) : (
                 <span className="text-white font-semibold text-sm">
-                  {(userData.unit || userData.username || 'U').charAt(0).toUpperCase()}
+                  {(displayUnitName || 'U').charAt(0).toUpperCase()}
                 </span>
               )}
             </div>
             <div>
               <h3 className="text-white font-semibold text-sm">
-                {userData.unit || userData.username || 'User Name'}
+                {displayUnitName}
               </h3>
             </div>
           </div>

@@ -1,16 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
-import PresISSP from './PresISSP';
 import ActivityLog from '../common/ActivityLog';
 import Profile from '../common/Profile';
 import { API_ENDPOINTS, getAuthHeaders, getFileUrl } from '../../utils/api';
 import { connectSocket, disconnectSocket, subscribe, unsubscribe } from '../../utils/socket';
 
 const statusStyles = {
-  draft: 'bg-gray-50 text-gray-700',
-  pending: 'bg-gray-50 text-gray-700',
-  approved: 'bg-gray-50 text-gray-700',
-  rejected: 'bg-gray-50 text-gray-700',
+  draft: 'bg-gray-100 text-gray-700 border border-gray-200',
+  pending: 'bg-blue-100 text-blue-700 border border-blue-200',
+  approved: 'bg-emerald-100 text-emerald-700 border border-emerald-200',
+  rejected: 'bg-red-100 text-red-700 border border-red-200',
 };
 
 const formatStatusLabel = (status = '') =>
@@ -54,7 +53,8 @@ const Pdashboard = () => {
   const [dashboardStats, setDashboardStats] = useState(null);
   const [recentRequests, setRecentRequests] = useState([]);
   const [topItems, setTopItems] = useState([]);
-  const [isspStats, setIsspStats] = useState({ approved: 0, rejected: 0, pending: 0 });
+  /** Mirrors Admin Dashboard KPIs — from office stats API (`unitTracking.summary`), not ISSP review list. */
+  const [isspOfficeStats, setIsspOfficeStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notifications, setNotifications] = useState([]);
@@ -63,13 +63,22 @@ const Pdashboard = () => {
   const [userData, setUserData] = useState({ unit: '', username: '', profilePicture: null });
   const [approvedISSPDocument, setApprovedISSPDocument] = useState(null);
   const [loadingApprovedISSP, setLoadingApprovedISSP] = useState(false);
-  const [dictApprovalStatus, setDictApprovalStatus] = useState(null);
   const [itemStatistics, setItemStatistics] = useState(null);
   const [loadingItemStats, setLoadingItemStats] = useState(false);
   const [priceDistribution, setPriceDistribution] = useState(null);
   const [loadingPriceDistribution, setLoadingPriceDistribution] = useState(false);
   const [priceDistributionYearCycle, setPriceDistributionYearCycle] = useState('2024-2026');
   const [priceDistributionDropdownOpen, setPriceDistributionDropdownOpen] = useState(false);
+  const [downloadingIsspId, setDownloadingIsspId] = useState(null);
+
+  const isspTrackingSummary = useMemo(() => {
+    const s = isspOfficeStats?.unitTracking?.summary;
+    return {
+      total: typeof s?.total === 'number' ? s.total : 0,
+      submitted: typeof s?.submitted === 'number' ? s.submitted : 0,
+      pending: typeof s?.notSubmitted === 'number' ? s.notSubmitted : 0
+    };
+  }, [isspOfficeStats]);
 
   // Fetch notifications
   const fetchNotifications = async () => {
@@ -147,11 +156,9 @@ const Pdashboard = () => {
         headers: getAuthHeaders()
       });
       setApprovedISSPDocument(response.data.dictApprovedISSPDocument || null);
-      setDictApprovalStatus(response.data.dictApproval || null);
     } catch (error) {
       console.error('Error fetching approved ISSP:', error);
       setApprovedISSPDocument(null);
-      setDictApprovalStatus(null);
     } finally {
       setLoadingApprovedISSP(false);
     }
@@ -253,14 +260,22 @@ const Pdashboard = () => {
       const token = localStorage.getItem('token');
       
       // Fetch both requests and office stats to get all units
+      const officeStatsParams =
+        priceDistributionYearCycle && String(priceDistributionYearCycle).trim()
+          ? { yearCycle: String(priceDistributionYearCycle).trim() }
+          : {};
+
       const [requestsResponse, officeStatsResponse] = await Promise.all([
         axios.get(API_ENDPOINTS.admin.submittedRequests, {
           headers: getAuthHeaders()
         }),
         axios.get(API_ENDPOINTS.admin.officeStats, {
-          headers: getAuthHeaders()
+          headers: getAuthHeaders(),
+          params: officeStatsParams
         }).catch(() => ({ data: { unitTracking: { units: [] } } })) // Fallback if endpoint fails
       ]);
+
+      setIsspOfficeStats(officeStatsResponse?.data ?? null);
 
       let requests = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
       
@@ -400,6 +415,7 @@ const Pdashboard = () => {
       });
     } catch (error) {
       console.error('Error fetching item statistics:', error);
+      setIsspOfficeStats(null);
       setItemStatistics([]);
     } finally {
       setLoadingItemStats(false);
@@ -423,15 +439,7 @@ const Pdashboard = () => {
       const statsData = statsResponse.data;
       let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
       let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
-      
-      // Calculate ISSP review statistics from ALL ISSPs (before filtering by year cycle)
-      // ISSPs don't have year cycles like requests, so we show all of them
-      const isspReviewStats = {
-        approved: reviewData.filter(issp => issp.review?.status === 'approved').length,
-        rejected: reviewData.filter(issp => issp.review?.status === 'rejected').length,
-        pending: reviewData.filter(issp => issp.review?.status === 'pending').length
-      };
-      
+
       // Filter requests by selected year cycle (for top items display)
       requestsData = requestsData.filter(request => {
         const requestYear = request.year || '';
@@ -449,7 +457,6 @@ const Pdashboard = () => {
       setDashboardStats(statsData);
       setRecentRequests(filteredReviewData);
       setTopItems(aggregateItemSummary(requestsData));
-      setIsspStats(isspReviewStats);
     } catch (err) {
       console.error('Error loading president dashboard data:', err);
     }
@@ -476,15 +483,7 @@ const Pdashboard = () => {
         const statsData = statsResponse.data;
         let reviewData = Array.isArray(reviewResponse.data) ? reviewResponse.data : [];
         let requestsData = Array.isArray(requestsResponse.data) ? requestsResponse.data : [];
-        
-        // Calculate ISSP review statistics from ALL ISSPs (before filtering by year cycle)
-        // ISSPs don't have year cycles like requests, so we show all of them
-        const isspReviewStats = {
-          approved: reviewData.filter(issp => issp.review?.status === 'approved').length,
-          rejected: reviewData.filter(issp => issp.review?.status === 'rejected').length,
-          pending: reviewData.filter(issp => issp.review?.status === 'pending').length
-        };
-        
+
         // Filter requests by selected year cycle (for top items display)
         requestsData = requestsData.filter(request => {
           const requestYear = request.year || '';
@@ -502,7 +501,6 @@ const Pdashboard = () => {
         setDashboardStats(statsData);
         setRecentRequests(filteredReviewData);
         setTopItems(aggregateItemSummary(requestsData));
-        setIsspStats(isspReviewStats);
       } catch (err) {
         console.error('Error loading president dashboard data:', err);
         const message = err.response?.data?.message || err.message || 'Failed to load dashboard data.';
@@ -510,7 +508,6 @@ const Pdashboard = () => {
         setDashboardStats(null);
         setRecentRequests([]);
         setTopItems([]);
-        setIsspStats({ approved: 0, rejected: 0, pending: 0 });
       } finally {
         setLoading(false);
       }
@@ -551,6 +548,7 @@ const Pdashboard = () => {
         console.log('ISSP sent event received in dashboard:', data);
         // Refresh all dashboard data
         refetchDashboardData();
+        fetchItemStatistics();
         fetchNotifications();
         fetchApprovedISSP();
       };
@@ -564,7 +562,7 @@ const Pdashboard = () => {
     } catch (error) {
       console.error('Error setting up Socket.io:', error);
     }
-  }, [refetchDashboardData]);
+  }, [refetchDashboardData, fetchItemStatistics]);
 
   // Refetch all data when year cycle changes
   useEffect(() => {
@@ -593,9 +591,49 @@ const Pdashboard = () => {
   }, [showNotifications, priceDistributionDropdownOpen]);
 
   const visibleRequests = recentRequests.slice(0, 5);
-  const topItemsMaxQuantity =
-    topItems.reduce((max, item) => Math.max(max, item.quantity), 0) || 1;
-  const topItemsTotal = topItems.reduce((sum, item) => sum + item.quantity, 0);
+
+  const handleDashboardIsspDownload = async (issp) => {
+    if (!issp?._id || downloadingIsspId) {
+      return;
+    }
+
+    const userId =
+      typeof issp.userId === 'object' && issp.userId !== null ? issp.userId._id : issp.userId;
+    const unitName =
+      typeof issp.userId === 'object' && issp.userId !== null
+        ? issp.userId.unit || issp.userId.username || 'issp'
+        : 'issp';
+    const yearCycle = (priceDistributionYearCycle || '2024-2027').trim();
+
+    try {
+      setDownloadingIsspId(issp._id);
+      const response = await axios.get(API_ENDPOINTS.issp.generate, {
+        headers: getAuthHeaders(),
+        params: { userId, yearCycle },
+        responseType: 'blob'
+      });
+
+      const blobUrl = window.URL.createObjectURL(
+        new Blob([response.data], { type: 'application/pdf' })
+      );
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.setAttribute('download', `ISSP-${unitName}-${yearCycle}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (downloadError) {
+      console.error('Error downloading ISSP from dashboard:', downloadError);
+      setError(
+        downloadError.response?.data?.message ||
+          downloadError.message ||
+          'Failed to download ISSP PDF.'
+      );
+    } finally {
+      setDownloadingIsspId(null);
+    }
+  };
 
   const handleLogoutClick = () => {
     setShowLogoutConfirmation(true);
@@ -611,7 +649,7 @@ const Pdashboard = () => {
   };
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="flex min-h-screen bg-slate-100">
       {/* Mobile Overlay */}
       {sidebarOpen && (
         <div
@@ -670,23 +708,6 @@ const Pdashboard = () => {
             
             <button
               onClick={() => {
-                setActiveSection('reports');
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 transition-colors tap-target ${
-                activeSection === 'reports' 
-                  ? 'bg-gray-700 text-white' 
-                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
-              }`}
-            >
-              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              ISSP
-            </button>
-
-            <button
-              onClick={() => {
                 setActiveSection('logs');
                 setSidebarOpen(false);
               }}
@@ -733,10 +754,10 @@ const Pdashboard = () => {
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden lg:ml-64">
+      {/* Main Content — aligned with Admin dashboard shell */}
+      <div className="flex flex-col flex-1 min-w-0 min-h-screen overflow-hidden bg-slate-100 lg:ml-64">
         {/* Header */}
-        <header className="bg-white shadow-sm border-b border-gray-200 px-4 sm:px-6 py-4 flex-shrink-0">
+        <header className="flex-shrink-0 bg-white shadow-sm border-b border-gray-200 px-4 sm:px-6 py-4 relative z-30">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-3">
               {/* Hamburger Menu Button */}
@@ -870,7 +891,7 @@ const Pdashboard = () => {
         </header>
 
         {/* Dashboard Content */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6">
+        <main className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-6">
           {error && (
             <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
@@ -878,174 +899,210 @@ const Pdashboard = () => {
           )}
 
           {activeSection === 'dashboard' && (
-            <div className="space-y-4 sm:space-y-6">
+            <div className="space-y-6">
               {loading && (
                 <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600 shadow-sm">
                   Fetching the latest dashboard data…
                 </div>
               )}
               
-              {/* Status Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
-                  <p className="text-sm text-gray-600 font-medium">Approved</p>
-                  <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {isspStats.approved}
-                  </h3>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
-                  <p className="text-sm text-gray-600 font-medium">Rejected</p>
-                  <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {isspStats.rejected}
-                  </h3>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-gray-400">
-                  <p className="text-sm text-gray-600 font-medium">Pending</p>
-                  <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {isspStats.pending}
-                  </h3>
+              {/* ISSP unit tracking summary — same data + labels as Admin Dashboard (office stats API / selected cycle) */}
+              <div className="space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {[
+                    {
+                      label: 'Total units',
+                      value: isspTrackingSummary.total,
+                      iconBg: 'bg-slate-100',
+                      valueClass: 'text-slate-900',
+                      icon: (
+                        <svg className="w-6 h-6 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                      )
+                    },
+                    {
+                      label: 'Submitted',
+                      value: isspTrackingSummary.submitted,
+                      iconBg: 'bg-emerald-100',
+                      valueClass: 'text-emerald-700',
+                      icon: (
+                        <svg className="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      )
+                    },
+                    {
+                      label: 'Pending',
+                      value: isspTrackingSummary.pending,
+                      iconBg: 'bg-orange-100',
+                      valueClass: 'text-orange-700',
+                      icon: (
+                        <svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      )
+                    }
+                  ].map((card) => (
+                    <div
+                      key={card.label}
+                      className="bg-white rounded-lg border border-gray-200 shadow-sm p-4 sm:p-5 flex gap-4"
+                    >
+                      <div className={`shrink-0 w-12 h-12 rounded-lg ${card.iconBg} flex items-center justify-center`}>
+                        {card.icon}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">{card.label}</p>
+                        <p className={`mt-1 text-2xl sm:text-3xl font-bold tabular-nums ${card.valueClass}`}>
+                          {loadingItemStats && isspOfficeStats === null ? (
+                            <span className="inline-block h-8 w-14 bg-gray-100 rounded animate-pulse" aria-hidden />
+                          ) : (
+                            card.value
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              {/* Main Content Grid */}
-              <div className="grid grid-cols-1 gap-4 sm:gap-6">
-                {/* Most Requested Items */}
-                <div className="bg-white rounded-lg shadow-md p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-bold text-gray-900">Most Requested Items</h3>
-                    <span className="text-sm text-gray-500">
-                      Total Items: {topItemsTotal}
-                    </span>
-                  </div>
-                  
-                  <div className="space-y-4">
-                    {loading && topItems.length === 0 ? (
-                      <p className="text-sm text-gray-600">Compiling item statistics…</p>
-                    ) : topItems.length > 0 ? (
-                      topItems.map((item, index) => {
-                        const width = Math.round((item.quantity / topItemsMaxQuantity) * 100);
-                        return (
-                          <div key={`${item.name}-${index}`}>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-medium text-gray-700">{item.name}</span>
-                              <span className="text-sm font-semibold text-gray-700">
-                                {item.quantity} {item.quantity === 1 ? 'request' : 'requests'}
+              {/* Unified 2× tile row — parallel to Admin Dashboard charts */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8 items-stretch">
+                {/* Reports Management — Top Requested Items (same UI as Admin Dashboard) */}
+                <div className="min-w-0 flex flex-col h-full bg-white rounded-xl p-5 sm:p-6 shadow-md border border-gray-200/90">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 mb-4">Reports Management</h3>
+                  <div className="rounded-lg border border-gray-200 bg-gray-50/90 p-4 sm:p-5 flex-1 flex flex-col min-h-[200px]">
+                    <h4 className="text-sm font-semibold text-gray-800 mb-3">Top Requested Items</h4>
+                    {topItems && topItems.length > 0 ? (
+                      <div className="space-y-0 flex-1">
+                        {topItems.map((entry, index) => {
+                          const n = entry.quantity;
+                          return (
+                            <div
+                              key={`${entry.name}-${index}`}
+                              className="flex justify-between items-center gap-4 py-3 border-b border-gray-200/80 last:border-b-0"
+                            >
+                              <span className="text-gray-800 font-medium text-sm min-w-0">
+                                <span className="mr-2 text-gray-500 shrink-0">{index + 1}.</span>
+                                <span className="break-words">{entry.name}</span>
+                              </span>
+                              <span className="text-gray-900 font-semibold text-sm tabular-nums shrink-0">
+                                {n} items
                               </span>
                             </div>
-                            <div className="w-full bg-gray-200 rounded-full h-2.5">
-                              <div
-                                className="bg-gray-600 h-2.5 rounded-full transition-all duration-700 ease-in-out"
-                                style={{ width: `${Math.min(100, Math.max(8, width))}%` }}
-                              ></div>
-                            </div>
-                          </div>
-                        );
-                      })
+                          );
+                        })}
+                      </div>
                     ) : (
-                      <p className="text-sm text-gray-500">No request data available yet.</p>
+                      <p className="text-sm text-gray-500">
+                        {loading ? 'Compiling item statistics…' : 'No request items yet.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Approved ISSP Document */}
+                <div className="min-w-0 flex flex-col h-full bg-white rounded-xl p-5 sm:p-6 shadow-md border border-gray-200/90">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 mb-4">Approved ISSP Document</h3>
+                  <div className="rounded-lg border border-gray-100 bg-slate-50/50 p-4 sm:p-5 flex-1 flex flex-col min-h-[200px] justify-center">
+                    {loadingApprovedISSP ? (
+                      <p className="text-sm text-gray-600 text-center">Loading document…</p>
+                    ) : approvedISSPDocument ? (
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 bg-white rounded-lg border border-gray-200">
+                        <svg className="w-10 h-10 text-gray-600 flex-shrink-0 mx-auto sm:mx-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        <div className="flex-1 min-w-0 text-center sm:text-left">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {approvedISSPDocument.split('/').pop()}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">Approved ISSP file</p>
+                        </div>
+                        <a
+                          href={getFileUrl(approvedISSPDocument)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex justify-center px-4 py-2 text-sm font-medium text-white bg-slate-700 rounded-md hover:bg-slate-800 transition-colors shrink-0"
+                        >
+                          View Document
+                        </a>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-500 text-center px-2">
+                        No approved ISSP document uploaded yet.
+                      </p>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Approved ISSP Document */}
-              {approvedISSPDocument && (
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mt-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h3 className="text-base font-bold text-gray-900">APPROVED ISSP DOCUMENT</h3>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <svg className="w-8 h-8 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">
-                        {approvedISSPDocument.split('/').pop()}
-                      </p>
-                      <p className="text-xs text-gray-500">Approved ISSP</p>
-                    </div>
-                    <a
-                      href={getFileUrl(approvedISSPDocument)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-4 py-2 text-sm font-medium text-white bg-gray-700 rounded-md hover:bg-gray-800 transition-colors flex items-center gap-2"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                      View Document
-                    </a>
-                  </div>
-                </div>
-              )}
-
-              {/* DICT Approval Status */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mt-6">
-                <div className="flex items-center justify-between mb-4">
+              {/* ISSP quick access cards directly on dashboard */}
+              <div className="bg-white rounded-xl p-5 sm:p-6 shadow-md border border-gray-200/90 lg:w-[calc(50%-1rem)]">
+                <div className="mb-4">
                   <div>
-                    <h3 className="text-base font-bold text-gray-900">DICT APPROVAL STATUS</h3>
+                    <h3 className="text-base sm:text-lg font-bold text-slate-900">ISSP Review Quick Access</h3>
                   </div>
                 </div>
-                {loadingApprovedISSP ? (
-                  <div className="p-4 rounded-lg border bg-gray-50 border-gray-200">
-                    <p className="text-sm text-gray-600">Loading status...</p>
-                  </div>
-                ) : dictApprovalStatus && dictApprovalStatus.status ? (
-                  <div className={`p-5 rounded-lg border-2 ${
-                    dictApprovalStatus.status === 'approved_by_dict' ? 'bg-emerald-50 border-emerald-300' :
-                    dictApprovalStatus.status === 'revision_from_dict' ? 'bg-red-50 border-red-300' :
-                    dictApprovalStatus.status === 'approve_for_dict' ? 'bg-yellow-50 border-yellow-300' :
-                    dictApprovalStatus.status === 'collation_compilation' ? 'bg-purple-50 border-purple-300' :
-                    'bg-gray-50 border-gray-300'
-                  }`}>
-                    <div className="flex items-center gap-4 mb-4">
-                      <div className={`text-base font-bold px-5 py-2.5 rounded-full inline-block ${
-                        dictApprovalStatus.status === 'approved_by_dict' ? 'bg-emerald-200 text-emerald-800 border-2 border-emerald-400' :
-                        dictApprovalStatus.status === 'revision_from_dict' ? 'bg-red-200 text-red-800 border-2 border-red-400' :
-                        dictApprovalStatus.status === 'approve_for_dict' ? 'bg-yellow-200 text-yellow-800 border-2 border-yellow-400' :
-                        dictApprovalStatus.status === 'collation_compilation' ? 'bg-purple-200 text-purple-800 border-2 border-purple-400' :
-                        'bg-gray-200 text-gray-800 border-2 border-gray-400'
-                      }`}>
-                        {dictApprovalStatus.status === 'approved_by_dict' ? '✓ Approved by DICT' :
-                         dictApprovalStatus.status === 'revision_from_dict' ? 'Revision from DICT' :
-                         dictApprovalStatus.status === 'approve_for_dict' ? '→ Approve for DICT' :
-                         dictApprovalStatus.status === 'collation_compilation' ? '📋 Collation/Compilation' :
-                         'Pending'}
-                      </div>
-                    </div>
-                    {dictApprovalStatus.updatedAt && (
-                      <p className="text-sm text-gray-700 mb-3 font-medium">
-                        Last Updated: {new Date(dictApprovalStatus.updatedAt).toLocaleString()}
-                      </p>
-                    )}
-                    {dictApprovalStatus.notes && (
-                      <div className="mt-4 pt-4 border-t-2 border-gray-300">
-                        <p className="text-sm font-semibold text-gray-800 mb-2">Admin Notes:</p>
-                        <p className="text-base text-gray-900 bg-white p-3 rounded border border-gray-200">{dictApprovalStatus.notes}</p>
-                      </div>
-                    )}
+
+                {visibleRequests.length > 0 ? (
+                  <div
+                    className={`grid grid-cols-1 gap-6 ${
+                      visibleRequests.length > 1 ? 'lg:grid-cols-2' : ''
+                    }`}
+                  >
+                    {visibleRequests.map((issp) => {
+                      const id = issp?._id || Math.random().toString(36);
+                      const unitName =
+                        typeof issp.userId === 'object' && issp.userId !== null
+                          ? issp.userId.unit || issp.userId.username || 'Unnamed unit'
+                          : 'Unnamed unit';
+                      const submittedBy =
+                        typeof issp.userId === 'object' && issp.userId !== null
+                          ? issp.userId.username || issp.userId.email || 'Unknown user'
+                          : 'Unknown user';
+                      const reviewStatus = issp.review?.status || 'draft';
+                      const statusClass = statusStyles[reviewStatus] || statusStyles.draft;
+                      const isDownloading = downloadingIsspId === issp._id;
+
+                      return (
+                        <div
+                          key={id}
+                          className="min-w-0 flex flex-col h-full bg-white rounded-xl p-5 sm:p-6 shadow-md border border-gray-200/90"
+                        >
+                          <div className="flex items-start justify-between gap-3 min-h-[72px]">
+                            <div className="min-w-0">
+                              <p className="text-base font-semibold text-gray-900 truncate">{unitName}</p>
+                              <p className="text-sm text-gray-500 truncate mt-1">Prepared by: {submittedBy}</p>
+                              <p className="text-sm text-gray-500 mt-1">
+                                Submitted: {formatDate(issp.review?.submittedAt)}
+                              </p>
+                            </div>
+                            <span className={`px-2.5 py-1 text-xs font-semibold rounded-full whitespace-nowrap ${statusClass}`}>
+                              {formatStatusLabel(reviewStatus)}
+                            </span>
+                          </div>
+                          <div className="mt-5">
+                            <button
+                              onClick={() => handleDashboardIsspDownload(issp)}
+                              disabled={isDownloading}
+                              className={`w-full px-3 py-2 text-sm font-medium rounded-md transition-colors ${
+                                isDownloading
+                                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                                  : 'bg-gray-700 text-white hover:bg-gray-800'
+                              }`}
+                            >
+                              {isDownloading ? 'Preparing PDF…' : `Download PDF (${priceDistributionYearCycle})`}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="p-5 rounded-lg border-2 bg-gray-50 border-gray-300">
-                    <div className="flex items-center gap-4 mb-3">
-                      <span className="text-base font-bold px-5 py-2.5 rounded-full inline-block bg-gray-200 text-gray-800 border-2 border-gray-400">
-                        Pending
-                      </span>
-                    </div>
-                    <p className="text-sm text-gray-700">
-                      DICT approval status has not been set yet by the administrator.
-                    </p>
-                  </div>
+                  <p className="text-sm text-gray-500">No ISSP submissions found for quick access yet.</p>
                 )}
               </div>
             </div>
-          )}
-
-          {activeSection === 'reports' && (
-            <PresISSP />
           )}
 
           {activeSection === 'logs' && (

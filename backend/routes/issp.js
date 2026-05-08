@@ -2862,7 +2862,7 @@ router.get('/generate', auth, async (req, res) => {
 
     res.setHeader('Content-Type', 'application/pdf');
     const downloadFileName = queryUserId
-      ? `issp-report-${targetUserId}-${selectedYearCycle}.pdf`
+      ? `issp-report-${queryUserId}-${selectedYearCycle}.pdf`
       : `issp-report-${selectedYearCycle}.pdf`;
 
     res.setHeader('Content-Disposition', `attachment; filename="${downloadFileName}"`);

@@ -248,15 +248,34 @@ const Signup = () => {
     return [];
   };
 
-  // Get program options: only when office is OVPAA and a unit is selected; show programs under that unit
+  // Get program options: OVPAA + unit selected → programs registered to that unit (and campus when set on the program)
   const getProgramOptions = () => {
     if (formData.office !== OVPAA_OFFICE_NAME || !formData.unit) return [];
-    const selectedUnit = units.find(u => u.name === formData.unit);
+    const selectedCampus = campuses.find((c) => c.name === formData.campus);
+    if (!selectedCampus) return [];
+    const selectedUnit = units.find((u) => u.name === formData.unit);
     if (!selectedUnit) return [];
+
+    const matchesUnit = (p) => {
+      const pUnit = p.unit?._id || p.unit;
+      if (pUnit && selectedUnit._id && String(pUnit) === String(selectedUnit._id)) return true;
+      return p.unit?.name === formData.unit;
+    };
+
+    // If the program has no campus, it is offered for any campus under this unit
+    const matchesCampus = (p) => {
+      if (!p.campus) return true;
+      return (
+        p.campus?._id === selectedCampus._id ||
+        p.campus?.name === formData.campus
+      );
+    };
+
     const unitPrograms = programs.filter(
-      p => p.isActive && (p.unit?._id === selectedUnit._id || p.unit?.name === formData.unit)
+      (p) => p.isActive && matchesUnit(p) && matchesCampus(p)
     );
-    return unitPrograms.map(p => p.name);
+    const names = [...new Set(unitPrograms.map((p) => p.name))];
+    return names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   };
 
   // Get units for selected office (when user selects an office like "Office of the President")
@@ -319,6 +338,12 @@ const Signup = () => {
       if (formData.office === 'Faculties') {
         const mainCampus = campuses.find(c => c.name === 'Main' || c.isMain);
         if (!mainCampus) return [];
+        const filterProgramsByCampus = (programList) =>
+          programList.filter(
+            (p) =>
+              p.campus &&
+              (p.campus?._id === mainCampus._id || p.campus?.name === 'Main')
+          );
         
         const mainFaculties = faculties.filter(f => 
           f.campus?._id === mainCampus._id || f.campus?.name === 'Main'
@@ -333,10 +358,11 @@ const Signup = () => {
           const faculty = selectedFaculty || formData.unit;
           const facultyObj = mainFaculties.find(f => f.name === faculty);
           if (facultyObj) {
-            const facultyPrograms = programs.filter(p => 
+            const allFacultyPrograms = programs.filter(p => 
               p.faculty?._id === facultyObj._id || p.faculty?.name === faculty
             );
-            return facultyPrograms.map(p => p.name);
+            const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
+            return [...new Set(facultyPrograms.map(p => p.name))];
           }
           return [];
         }
@@ -346,9 +372,10 @@ const Signup = () => {
         if (formData.unit && !isFacultySelected) {
           // Find which faculty contains this program
           for (const faculty of mainFaculties) {
-            const facultyPrograms = programs.filter(p => 
+            const allFacultyPrograms = programs.filter(p => 
               p.faculty?._id === faculty._id || p.faculty?.name === faculty.name
             );
+            const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
             if (facultyPrograms.some(p => p.name === formData.unit)) {
               programFaculty = faculty;
               break;
@@ -358,10 +385,11 @@ const Signup = () => {
         
         // If unit is a program (final value), show that faculty's programs so it's visible
         if (programFaculty) {
-          const facultyPrograms = programs.filter(p => 
+          const allFacultyPrograms = programs.filter(p => 
             p.faculty?._id === programFaculty._id || p.faculty?.name === programFaculty.name
           );
-          return facultyPrograms.map(p => p.name);
+          const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
+          return [...new Set(facultyPrograms.map(p => p.name))];
         }
         
         // If no faculty selected yet, show all faculties (user must select faculty first)
@@ -396,10 +424,8 @@ const Signup = () => {
               const belongsToFaculty = p.faculty?._id === selectedFaculty._id || p.faculty?.name === formData.office;
               if (!belongsToFaculty) return false;
               
-              // For extension campuses, only show programs that:
-              // 1. Are assigned to this specific campus, OR
-              // 2. Have no campus assigned (available to all campuses)
-              if (!p.campus) return true; // No campus = available to all
+              // Only show programs explicitly assigned to the selected campus
+              if (!p.campus) return false;
               return p.campus?._id === selectedCampus._id || p.campus?.name === formData.campus;
             });
           };
@@ -411,7 +437,7 @@ const Signup = () => {
               p.faculty?._id === selectedFaculty._id || p.faculty?.name === faculty
             );
             const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
-            return facultyPrograms.map(p => p.name);
+            return [...new Set(facultyPrograms.map(p => p.name))];
           }
           
           // Check if unit is a program (find which faculty it belongs to)
@@ -436,7 +462,7 @@ const Signup = () => {
               p.faculty?._id === programFaculty._id || p.faculty?.name === programFaculty.name
             );
             const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
-            return facultyPrograms.map(p => p.name);
+            return [...new Set(facultyPrograms.map(p => p.name))];
           }
           
           // Show programs for selected faculty
@@ -444,7 +470,7 @@ const Signup = () => {
             p.faculty?._id === selectedFaculty._id || p.faculty?.name === formData.office
           );
           const facultyPrograms = filterProgramsByCampus(allFacultyPrograms);
-          return facultyPrograms.map(p => p.name);
+          return [...new Set(facultyPrograms.map(p => p.name))];
         }
       }
       
@@ -617,11 +643,14 @@ const Signup = () => {
       // Combine first name and last name into username
       const username = `${formData.firstName.trim()} ${formData.lastName.trim()}`;
       
-      // Unit value: university-level office name, or unit under selected office
+      // Unit value priority:
+      // 1) University-level office name (special flow)
+      // 2) Selected program (e.g., BSIT) when available
+      // 3) Selected unit as fallback
       const universityLevelOfficeNames = universityLevelOffices.map(o => o.name);
       const unitValue = hasUniversityLevelOffice && universityLevelOfficeNames.includes(formData.universityLevelOffice)
         ? formData.universityLevelOffice
-        : (formData.office && formData.unit ? formData.unit : '');
+        : (formData.office && (formData.program || formData.unit) ? (formData.program || formData.unit) : '');
       
       const response = await fetch(API_ENDPOINTS.auth.signup, {
         method: 'POST',

@@ -8,6 +8,12 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 100
   },
+  program: {
+    type: String,
+    required: false,
+    trim: true,
+    default: ''
+  },
   campus: {
     type: String,
     required: false,

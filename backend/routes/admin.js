@@ -190,20 +190,77 @@ router.get('/dashboard/stats', auth, async (req, res) => {
       ? Math.max(0, 100 - approvalRate - rejectionRate)
       : 0;
 
-    // Top 3 most requested items (by item name), filtered by year cycle when provided
-    const itemCounts = {};
-    requestsForYearCycle.forEach(request => {
-      if (request.items && Array.isArray(request.items)) {
-        request.items.forEach(({ item }) => {
-          const name = (item && String(item).trim()) || 'Unnamed';
-          itemCounts[name] = (itemCounts[name] || 0) + 1;
+    // Top requested items (by item name), with counts per calendar year in the cycle and a grand total
+    const { start: rangeStart, end: rangeEnd } = (() => {
+      const s = (effectiveYearCycle && String(effectiveYearCycle).trim()) || '2024-2026';
+      const parts = s.split('-').map((p) => parseInt(p, 10));
+      if (parts.length >= 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])) {
+        return { start: parts[0], end: parts[1] };
+      }
+      return { start: 2024, end: 2026 };
+    })();
+    const yearsInTopItemsRange = [];
+    for (let y = rangeStart; y <= rangeEnd; y += 1) {
+      yearsInTopItemsRange.push(y);
+    }
+    if (yearsInTopItemsRange.length === 0) {
+      [2024, 2025, 2026].forEach((y) => yearsInTopItemsRange.push(y));
+    }
+
+    const itemYearTotals = {};
+    const addLine = (row) => {
+      const name = (row.item && String(row.item).trim()) || 'Unnamed';
+      if (!itemYearTotals[name]) {
+        const byYear = {};
+        yearsInTopItemsRange.forEach((yy) => {
+          byYear[String(yy)] = 0;
         });
+        itemYearTotals[name] = { byYear, total: 0 };
+      }
+      const qBy = row.quantityByYear || {};
+      const contrib = {};
+      let lineSum = 0;
+      yearsInTopItemsRange.forEach((yy) => {
+        const yk = String(yy);
+        const v = Number(qBy[yk] ?? qBy[yy] ?? 0) || 0;
+        contrib[yk] = v;
+        lineSum += v;
+      });
+      if (lineSum === 0) {
+        const q = Number(row.quantity) || 0;
+        const firstY = String(yearsInTopItemsRange[0]);
+        if (q > 0) {
+          contrib[firstY] = q;
+          lineSum = q;
+        } else {
+          contrib[firstY] = 1;
+          lineSum = 1;
+        }
+      }
+      yearsInTopItemsRange.forEach((yy) => {
+        const yk = String(yy);
+        const add = Number(contrib[yk]) || 0;
+        itemYearTotals[name].byYear[yk] = (itemYearTotals[name].byYear[yk] || 0) + add;
+      });
+      itemYearTotals[name].total += lineSum;
+    };
+
+    requestsForYearCycle.forEach((request) => {
+      if (request.items && Array.isArray(request.items)) {
+        request.items.forEach((row) => addLine(row));
       }
     });
-    const topRequestedItems = Object.entries(itemCounts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3);
+
+    const topRequestedItems = Object.entries(itemYearTotals)
+      .map(([name, { byYear, total }]) => ({
+        name,
+        count: total,
+        total,
+        byYear,
+        years: yearsInTopItemsRange.map(String)
+      }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
 
     // Monthly request counts for this cycle vs previous cycle (Jan-Dec)
     const monthlyThisCycle = Array(12).fill(0);
@@ -238,6 +295,7 @@ router.get('/dashboard/stats', auth, async (req, res) => {
       yearRangeStats,
       approvalsByYear,
       topRequestedItems,
+      topRequestedItemsYearColumns: yearsInTopItemsRange.map(String),
       monthlyRequestCounts: {
         thisCycle: effectiveYearCycle,
         lastCycle: normalizeCycle(compareYearCycle) || null,
@@ -256,13 +314,29 @@ router.get('/office/stats', auth, async (req, res) => {
   try {
     const User = require('../models/User');
     const { yearCycle } = req.query;
+    const getCampusAbbreviation = (campusValue) => {
+      const c = String(campusValue || '').trim().toLowerCase();
+      if (!c || c === 'main' || c === 'main campus') return 'MAIN';
+      if (c === 'baganga') return 'BGA';
+      if (c === 'tarragona') return 'TAR';
+      if (c === 'banaybanay' || c === 'banaybanay campus') return 'BAN';
+      if (c === 'san isidro') return 'SID';
+      if (c === 'president') return '';
+      return String(campusValue || '').trim().toUpperCase();
+    };
+    const resolveDisplayUnit = ({ program, unit, campus }) => {
+      const base = String(program || '').trim() || String(unit || '').trim();
+      if (!base) return 'Unknown Unit';
+      const campusAbbr = getCampusAbbreviation(campus);
+      return campusAbbr ? `${campusAbbr} ${base}` : base;
+    };
     
     // Get all requests
     const requestQuery = {};
     if (yearCycle && typeof yearCycle === 'string' && yearCycle.trim()) {
       requestQuery.year = yearCycle.trim();
     }
-    const allRequests = await Request.find(requestQuery).populate('userId', 'unit');
+    const allRequests = await Request.find(requestQuery).populate('userId', 'unit program campus');
     
     // Calculate request trends
     const newRequests = allRequests.filter(r => r.status === 'pending').length;
@@ -277,17 +351,36 @@ router.get('/office/stats', auth, async (req, res) => {
 
     // Get all unique units from users - exclude admin, president, and Executive
     // Only show regular unit users (Program heads and regular users)
-    const allUsers = await User.find({ 
+    const allUsers = await User.find({
       role: { $nin: ['admin', 'president', 'Executive'] }, // Exclude admin, president, and Executive
       approvalStatus: 'approved', // Only show approved users
       unit: { $exists: true, $ne: '' } // Only users with a unit defined
-    }, 'unit');
-    const allUnits = [...new Set(allUsers.map(u => u.unit).filter(Boolean))];
+    }, 'unit program campus');
+    const allUnitKeys = [
+      ...new Set(
+        allUsers
+          .map((u) => {
+            const campus = String(u.campus || '').trim() || 'Main';
+            const displayUnit = resolveDisplayUnit({ program: u.program, unit: u.unit, campus });
+            return `${displayUnit}|||${campus}`;
+          })
+          .filter(Boolean)
+      )
+    ];
     
     // Track unit submission status
-    const unitStats = allUnits.map(unit => {
-      // Find the most recent request from this unit
-      const unitRequests = allRequests.filter(r => r.userId?.unit === unit);
+    const unitStats = allUnitKeys.map((unitKey) => {
+      const [displayUnit, campus] = unitKey.split('|||');
+      // Find the most recent request from this display-unit + campus
+      const unitRequests = allRequests.filter((r) => {
+        const requestCampus = String(r.campus || r.userId?.campus || '').trim() || 'Main';
+        const requestDisplayUnit = resolveDisplayUnit({
+          program: r.program || r.userId?.program,
+          unit: r.unit || r.userId?.unit,
+          campus: requestCampus
+        });
+        return requestDisplayUnit === displayUnit && requestCampus === campus;
+      });
       // Prioritize resubmitted requests, then sort by most recent
       const latestRequest = unitRequests.sort((a, b) => {
         const aResubmitted = a.status === 'resubmitted' || a.revisionStatus === 'resubmitted';
@@ -298,7 +391,8 @@ router.get('/office/stats', auth, async (req, res) => {
       })[0];
       
       return {
-        unit: unit,
+        unit: displayUnit,
+        campus,
         hasSubmitted: unitRequests.length > 0,
         status: latestRequest ? latestRequest.status : 'not_submitted',
         lastSubmitted: latestRequest ? (latestRequest.revisedAt || latestRequest.updatedAt || latestRequest.createdAt) : null,
@@ -309,7 +403,7 @@ router.get('/office/stats', auth, async (req, res) => {
     // Calculate summary
     const submittedCount = unitStats.filter(u => u.hasSubmitted).length;
     const notSubmittedCount = unitStats.filter(u => !u.hasSubmitted).length;
-    const totalUnits = allUnits.length;
+    const totalUnits = allUnitKeys.length;
     // Share of approved program-head units that have at least one request in the selected year cycle
     const unitSubmissionRate =
       totalUnits > 0 ? Math.round((submittedCount / totalUnits) * 100) : 0;
@@ -329,7 +423,7 @@ router.get('/office/stats', auth, async (req, res) => {
         summary: {
           submitted: submittedCount,
           notSubmitted: notSubmittedCount,
-          total: allUnits.length
+          total: allUnitKeys.length
         }
       }
     });
@@ -351,7 +445,7 @@ router.get('/submitted-requests', auth, async (req, res) => {
     }
     // Get all requests that are submitted, approved, rejected, or resubmitted
     const requests = await Request.find(requestQuery)
-    .populate('userId', 'username email unit campus') // Populate user info including campus
+    .populate('userId', 'username email unit program campus') // Populate user info including campus + program
     .sort({ createdAt: -1 });
 
     console.log(`Admin fetched ${requests.length} submitted requests`);

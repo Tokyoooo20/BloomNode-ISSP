@@ -177,7 +177,7 @@ const validateStrongPassword = (password) => {
 // Signup route with admin approval requirement
 router.post('/signup', async (req, res) => {
   try {
-    const { unit, campus, office, universityLevelOffice, firstName, lastName, username, email, password } = req.body;
+    const { unit, campus, office, universityLevelOffice, program, firstName, lastName, username, email, password } = req.body;
 
     // Validation
     if (!unit || !campus || !username || !email || !password) {
@@ -214,6 +214,7 @@ router.post('/signup', async (req, res) => {
 
     const newUser = new User({
       unit,
+      program: program || '',
       campus,
       office: office || '',
       universityLevelOffice: universityLevelOffice || '',
@@ -240,6 +241,7 @@ router.post('/signup', async (req, res) => {
         id: newUser._id,
         username: newUser.username,
         email: newUser.email,
+        program: newUser.program || '',
         approvalStatus: newUser.approvalStatus,
         isEmailVerified: true
       }
@@ -511,7 +513,9 @@ router.post('/login', async (req, res) => {
         email: user.email,
         role: user.role,
         approvalStatus: user.approvalStatus,
-        unit: user.unit
+        unit: user.unit,
+        program: user.program || '',
+        campus: user.campus || ''
       }
     });
 

@@ -2,7 +2,6 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import axios from 'axios';
 import Modal from '../common/Modal';
 import { API_ENDPOINTS, getAuthHeaders } from '../../utils/api';
-
 const Offices = () => {
   const [animate, setAnimate] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState(null);
@@ -11,7 +10,6 @@ const Offices = () => {
   const [error, setError] = useState(null);
   // Track pending reviews before saving
   const [pendingReviews, setPendingReviews] = useState({}); // { itemKey: { decision, reason } }
-  const [officeStats, setOfficeStats] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [selectedYearCycle, setSelectedYearCycle] = useState('2024-2026');
@@ -21,9 +19,6 @@ const Offices = () => {
   // Pagination for Items for Review table
   const [itemsCurrentPage, setItemsCurrentPage] = useState(1);
   const itemsPerPage = 10;
-  
-  // View item modal state
-  const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
   
   // Return disapproved items modal state
   const [returnDisapprovedModal, setReturnDisapprovedModal] = useState({ 
@@ -165,24 +160,6 @@ const Offices = () => {
     };
   };
 
-  // Fetch office statistics
-  const fetchOfficeStats = async (yearCycle = selectedYearCycle, requestToken = null) => {
-    try {
-      const response = await axios.get(API_ENDPOINTS.admin.officeStats, {
-        headers: getAuthHeaders(),
-        params: { yearCycle }
-      });
-      console.log('Fetched office stats:', response.data);
-      if (requestToken === null || latestFetchTokenRef.current === requestToken) {
-        setOfficeStats(response.data);
-      }
-      return response.data;
-    } catch (err) {
-      console.error('Error fetching office stats:', err);
-      throw err;
-    }
-  };
-
   // Fetch submitted requests
   const fetchSubmittedRequests = async (yearCycle = selectedYearCycle, requestToken = null) => {
     try {
@@ -211,10 +188,7 @@ const Offices = () => {
     setError(null);
 
     try {
-      await Promise.all([
-        fetchOfficeStats(yearCycle, fetchToken),
-        fetchSubmittedRequests(yearCycle, fetchToken)
-      ]);
+      await fetchSubmittedRequests(yearCycle, fetchToken);
 
       // Ignore stale responses from an earlier year-cycle request.
       if (latestFetchTokenRef.current !== fetchToken) {
@@ -245,15 +219,35 @@ const Offices = () => {
 
   // Group requests by unit, campus, and year cycle
   const groupedRequests = useMemo(() => {
+    const getCampusAbbreviation = (campusValue) => {
+      const c = String(campusValue || '').trim().toLowerCase();
+      if (!c || c === 'main' || c === 'main campus') return 'MAIN';
+      if (c === 'baganga') return 'BGA';
+      if (c === 'tarragona') return 'TAR';
+      if (c === 'banaybanay' || c === 'banaybanay campus') return 'BAN';
+      if (c === 'san isidro') return 'SID';
+      if (c === 'president') return '';
+      return String(campusValue || '').trim().toUpperCase();
+    };
+
+    const resolveDisplayUnit = (request, campusValue) => {
+      const programName = (request.program && request.program.trim())
+        ? request.program.trim()
+        : (request.userId?.program && request.userId.program.trim())
+          ? request.userId.program.trim()
+          : '';
+      const unitName = (request.unit && request.unit.trim())
+        ? request.unit.trim()
+        : (request.userId?.unit && request.userId.unit.trim())
+          ? request.userId.unit.trim()
+          : 'Unknown Unit';
+      const base = programName || unitName;
+      const campusAbbr = getCampusAbbreviation(campusValue);
+      return campusAbbr ? `${campusAbbr} ${base}` : base;
+    };
+
     const grouped = {};
     requests.forEach(request => {
-      // Use request.unit field first (from request schema), then fallback to userId.unit
-      const unitName = (request.unit && request.unit.trim()) 
-        ? request.unit.trim() 
-        : (request.userId?.unit && request.userId.unit.trim()) 
-          ? request.userId.unit.trim() 
-          : 'Unknown Unit';
-      
       // Use request.campus first, then userId.campus, default to 'Main' if empty/null
       const campus = (request.campus && request.campus.trim()) 
         ? request.campus.trim() 
@@ -263,6 +257,7 @@ const Offices = () => {
       
       // Normalize campus (empty/null = 'Main')
       const normalizedCampus = campus || 'Main';
+      const unitName = resolveDisplayUnit(request, normalizedCampus);
       const year = request.year || 'Unknown Year';
       
       // Use unit+campus+year as the key to separate units by campus
@@ -331,33 +326,6 @@ const Offices = () => {
     });
     return filtered;
   }, [groupedRequests, statusFilter, priorityFilter, selectedYearCycle, searchQuery]);
-
-  const sortedTrackingUnits = useMemo(() => {
-    const units = officeStats?.unitTracking?.units;
-    if (!Array.isArray(units) || units.length === 0) {
-      return [];
-    }
-    const statusRank = (u) => {
-      const s = String(u?.status || '').toLowerCase();
-      if (s === 'submitted') return 0;
-      if (s === 'resubmitted') return 1;
-      if (s === 'pending') return 2;
-      if (s === 'rejected') return 3;
-      if (s === 'approved') return 4;
-      return 5;
-    };
-    return [...units].sort((a, b) => {
-      if (Boolean(a.hasSubmitted) !== Boolean(b.hasSubmitted)) {
-        return a.hasSubmitted ? -1 : 1;
-      }
-      if (a.hasSubmitted && b.hasSubmitted) {
-        const ra = statusRank(a);
-        const rb = statusRank(b);
-        if (ra !== rb) return ra - rb;
-      }
-      return (a.unit || '').localeCompare(b.unit || '', undefined, { sensitivity: 'base' });
-    });
-  }, [officeStats, selectedYearCycle]);
 
   // Handle inline approve/disapprove
   const handleItemDecision = (item, decision) => {
@@ -452,9 +420,7 @@ const Offices = () => {
           // Clear pending reviews
           setPendingReviews({});
           
-          // Refresh requests and office stats
           await fetchSubmittedRequests();
-          await fetchOfficeStats();
           
           // Refresh the selected unit group
           if (selectedUnitGroup) {
@@ -514,9 +480,7 @@ const Offices = () => {
         autoCloseDelay: 2000
       });
       
-      // Refresh requests, office stats, and close view
       await fetchSubmittedRequests();
-      await fetchOfficeStats();
       setSelectedUnitGroup(null);
     } catch (err) {
       console.error('Error completing review:', err);
@@ -766,9 +730,7 @@ const Offices = () => {
       setReturnDisapprovedModal({ show: false, reason: '' });
       setPendingReviews({});
       
-      // Refresh requests and office stats
       await fetchSubmittedRequests();
-      await fetchOfficeStats();
       
       // Refresh the selected unit group
       if (selectedUnitGroup) {
@@ -825,121 +787,6 @@ const Offices = () => {
                 Review ISSP Requests - {selectedUnitGroup.unitName}
                 {selectedUnitGroup.campus && selectedUnitGroup.campus !== 'Main' && ` - ${selectedUnitGroup.campus}`}
               </h3>
-            </div>
-          </div>
-
-          {/* Group Information */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
-              <h4 className="text-xl font-bold text-gray-900">Group Information</h4>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex items-center space-x-3">
-                  <div className="flex-shrink-0">
-                    <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Unit/Department</p>
-                    <p className="text-lg font-bold text-gray-900 truncate">{selectedUnitGroup.unitName}</p>
-                  </div>
-                </div>
-              </div>
-              
-              {selectedUnitGroup.campus && selectedUnitGroup.campus !== 'Main' && (
-                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                  <div className="flex items-center space-x-3">
-                    <div className="flex-shrink-0">
-                      <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
-                        <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                      </div>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Campus</p>
-                      <p className="text-lg font-bold text-gray-900 truncate">{selectedUnitGroup.campus}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-              
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex items-center space-x-3">
-                  <div className="flex-shrink-0">
-                    <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Year Cycle</p>
-                    <p className="text-lg font-bold text-gray-900">{selectedUnitGroup.year}</p>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex items-center space-x-3">
-                  <div className="flex-shrink-0">
-                    <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Requests</p>
-                    <p className="text-lg font-bold text-gray-900">{selectedUnitGroup.requests.length} request{selectedUnitGroup.requests.length !== 1 ? 's' : ''}</p>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex items-center space-x-3">
-                  <div className="flex-shrink-0">
-                    <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Items</p>
-                    <p className="text-lg font-bold text-gray-900">{allGroupItems.length} item{allGroupItems.length !== 1 ? 's' : ''}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            {/* Status Summary */}
-            <div className="mt-6 pt-6 border-t border-gray-200">
-              <div className="flex flex-wrap gap-4">
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 rounded-full bg-gray-400"></div>
-                  <span className="text-sm text-gray-700">
-                    <span className="font-semibold">{allGroupItems.filter(item => item.approvalStatus === 'pending').length}</span> Pending
-                  </span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 rounded-full bg-gray-600"></div>
-                  <span className="text-sm text-gray-700">
-                    <span className="font-semibold">{allGroupItems.filter(item => item.approvalStatus === 'approved').length}</span> Approved
-                  </span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 rounded-full bg-gray-500"></div>
-                  <span className="text-sm text-gray-700">
-                    <span className="font-semibold">{allGroupItems.filter(item => item.approvalStatus === 'disapproved').length}</span> Disapproved
-                  </span>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -1031,11 +878,40 @@ const Offices = () => {
           {/* Items Table */}
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h4 className="text-lg font-semibold text-gray-900">Items for Review</h4>
-                <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
-                  {allGroupItems.length} {allGroupItems.length === 1 ? 'item' : 'items'}
-                </span>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-gray-600">
+                  <span>
+                    <span className="font-semibold text-gray-900">
+                      {allGroupItems.filter((item) => item.approvalStatus === 'pending').length}
+                    </span>{' '}
+                    Pending
+                  </span>
+                  <span className="text-gray-300 hidden sm:inline" aria-hidden>
+                    ·
+                  </span>
+                  <span>
+                    <span className="font-semibold text-gray-900">
+                      {allGroupItems.filter((item) => item.approvalStatus === 'approved').length}
+                    </span>{' '}
+                    Approved
+                  </span>
+                  <span className="text-gray-300 hidden sm:inline" aria-hidden>
+                    ·
+                  </span>
+                  <span>
+                    <span className="font-semibold text-gray-900">
+                      {allGroupItems.filter((item) => item.approvalStatus === 'disapproved').length}
+                    </span>{' '}
+                    Disapproved
+                  </span>
+                  <span className="text-gray-300 hidden sm:inline" aria-hidden>
+                    ·
+                  </span>
+                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
+                    {allGroupItems.length} {allGroupItems.length === 1 ? 'item' : 'items'}
+                  </span>
+                </div>
               </div>
             </div>
             <div className="overflow-x-auto w-full">
@@ -1052,15 +928,14 @@ const Offices = () => {
                     <>
                     <table className="w-full divide-y divide-gray-200" style={{ tableLayout: 'fixed', width: '100%' }}>
                       <colgroup>
-                        <col style={{ width: '12%' }} />
-                        <col style={{ width: '10%' }} />
-                        <col style={{ width: '7%' }} />
-                        <col style={{ width: '8%' }} />
-                        <col style={{ width: '7%' }} />
-                        <col style={{ width: '20%' }} />
-                        <col style={{ width: '15%' }} />
+                        <col style={{ width: '13%' }} />
                         <col style={{ width: '11%' }} />
-                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '8%' }} />
+                        <col style={{ width: '9%' }} />
+                        <col style={{ width: '8%' }} />
+                        <col style={{ width: '22%' }} />
+                        <col style={{ width: '17%' }} />
+                        <col style={{ width: '12%' }} />
                       </colgroup>
                       <thead className="bg-gray-50">
                         <tr>
@@ -1072,7 +947,6 @@ const Offices = () => {
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Specification</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Purpose</th>
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">Action</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">View</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
@@ -1176,15 +1050,6 @@ const Offices = () => {
                             <span className="text-xs text-gray-400">—</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-center" style={{ overflow: 'hidden', maxWidth: 0 }}>
-                          <button
-                            onClick={() => setViewItemModal({ show: true, item: item })}
-                            className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                            title="View full item details"
-                          >
-                            View
-                          </button>
-                        </td>
                       </tr>
                         ))}
                       </tbody>
@@ -1257,187 +1122,59 @@ const Offices = () => {
             </div>
           </div>
 
-          {/* Action Buttons */}
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 pt-4 border-t border-gray-200 bg-gray-50 px-6 py-4">
-            <div className="text-sm text-gray-600">
-              <span className="font-semibold">{allGroupItems.filter(item => item.approvalStatus === 'pending').length}</span> items pending review
-              {Object.keys(pendingReviews).length > 0 && (
-                <span className="ml-2 text-blue-600 font-semibold">
-                  • {Object.keys(pendingReviews).length} unsaved change{Object.keys(pendingReviews).length !== 1 ? 's' : ''}
-                </span>
-              )}
-              {disapprovedItems.length > 0 && (
-                <span className="ml-2 text-red-600 font-semibold">
-                  • {disapprovedItems.length} disapproved item{disapprovedItems.length !== 1 ? 's' : ''}
-                </span>
-              )}
+          {/* Save / return — only when needed (no empty bar below table) */}
+          {(Object.keys(pendingReviews).length > 0 || disapprovedItems.length > 0) && (
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-sm text-gray-600">
+                {Object.keys(pendingReviews).length > 0 && (
+                  <span className="text-blue-600 font-semibold">
+                    {Object.keys(pendingReviews).length} unsaved change{Object.keys(pendingReviews).length !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {disapprovedItems.length > 0 && (
+                  <span
+                    className={`text-red-600 font-semibold ${
+                      Object.keys(pendingReviews).length > 0 ? 'ml-2' : ''
+                    }`}
+                  >
+                    {Object.keys(pendingReviews).length > 0 ? '• ' : ''}
+                    {disapprovedItems.length} disapproved item{disapprovedItems.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                {disapprovedItems.length > 0 && returnableRequestsCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleReturnDisapprovedItems}
+                    disabled={loading || returningRequests.size > 0}
+                    className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={
+                      returningRequests.size > 0
+                        ? 'Requests are being returned. Please wait...'
+                        : 'Return all requests containing disapproved items'
+                    }
+                  >
+                    {loading || returningRequests.size > 0 ? 'Returning…' : 'Return Disapproved Items'}
+                  </button>
+                )}
+                {Object.keys(pendingReviews).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleSaveReviews}
+                    disabled={loading}
+                    className="px-6 py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loading ? 'Saving…' : 'Save Reviews'}
+                  </button>
+                )}
+              </div>
             </div>
-            <div className="flex flex-col sm:flex-row gap-2">
-              {disapprovedItems.length > 0 && returnableRequestsCount > 0 && (
-                <button
-                  onClick={handleReturnDisapprovedItems}
-                  disabled={loading || returningRequests.size > 0}
-                  className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  title={
-                    returningRequests.size > 0
-                      ? "Requests are being returned. Please wait..."
-                      : "Return all requests containing disapproved items"
-                  }
-                >
-                  {loading || returningRequests.size > 0 ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Returning...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                      Return Disapproved Items
-                    </>
-                  )}
-                </button>
-              )}
-              {Object.keys(pendingReviews).length > 0 && (
-                <button
-                  onClick={handleSaveReviews}
-                  disabled={loading}
-                  className="px-6 py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-lg transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {loading ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      Save Reviews
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
+          )}
         </div>
       ) : (
         // Main List View
         <>
-      <div className="bg-white rounded-lg p-4 sm:p-6 lg:p-8 shadow-sm border border-gray-200">
-        <h2 className="text-xl sm:text-2xl font-bold text-gray-800 mb-4 sm:mb-6">Offices Management</h2>
-        
-        <div className="mb-6 sm:mb-8">
-          {/* ISSP Request Tracking */}
-          <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-lg p-4 sm:p-6">
-            <div className="mb-3 sm:mb-4">
-              <h3 className="text-base sm:text-lg font-semibold text-gray-800">
-                ISSP Request Tracking
-              </h3>
-            </div>
-            <div className="space-y-4">
-              {/* Office List with Status */}
-              <div className="space-y-3 max-h-64 overflow-y-auto">
-                {sortedTrackingUnits.length > 0 ? (
-                  sortedTrackingUnits.map((unitData, index) => {
-                    const hasSubmitted = unitData.hasSubmitted;
-
-                    // Determine status badge color and text
-                    const getStatusBadge = () => {
-                      if (!hasSubmitted) {
-                        return { color: 'bg-red-100 text-red-700', text: 'No Request' };
-                      }
-                      
-                      switch(unitData.status) {
-                        case 'pending':
-                          return { color: 'bg-yellow-100 text-yellow-700', text: 'Pending' };
-                        case 'submitted':
-                          return { color: 'bg-blue-100 text-blue-700', text: 'Submitted' };
-                        case 'resubmitted':
-                          return { color: 'bg-indigo-100 text-indigo-800', text: 'Resubmitted' };
-                        case 'approved':
-                          return { color: 'bg-green-100 text-green-700', text: 'Approved' };
-                        case 'rejected':
-                          return { color: 'bg-red-100 text-red-700', text: 'Rejected' };
-                        default:
-                          return { color: 'bg-gray-100 text-gray-600', text: 'Unknown' };
-                      }
-                    };
-                    
-                    const statusBadge = getStatusBadge();
-                    
-                    return (
-                      <div key={`${unitData.unit || 'unit'}-${index}`} className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-100 hover:border-gray-300 transition-colors">
-                        <div className="flex items-center space-x-3 flex-1 min-w-0">
-                          <div className={`w-3 h-3 rounded-full flex-shrink-0 ${hasSubmitted ? 'bg-gray-600' : 'bg-gray-400'}`}></div>
-                          <div className="flex-1 min-w-0">
-                            <span className="text-gray-800 font-medium block truncate">{unitData.unit}</span>
-                            {unitData.totalRequests > 0 && (
-                              <span className="text-xs text-gray-500">{unitData.totalRequests} request{unitData.totalRequests > 1 ? 's' : ''}</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-2 flex-shrink-0">
-                          <span className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${statusBadge.color}`}>
-                            {statusBadge.text}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="text-center py-4 text-gray-500">
-                    <svg className="w-8 h-8 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                    </svg>
-                    <p className="text-sm font-medium">No units registered</p>
-                    <p className="text-xs text-gray-400 mt-1">Units will appear here once users are registered</p>
-                  </div>
-                )}
-              </div>
-              
-              {/* Summary Stats */}
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center">
-                  <div className="bg-white rounded-lg p-2 border border-gray-100">
-                    <div className="text-base sm:text-lg font-bold text-gray-800">
-                      {officeStats?.unitTracking?.summary?.total || 0}
-                    </div>
-                    <div className="text-xs text-gray-600">Total Units</div>
-                  </div>
-                  <div className="bg-green-50 rounded-lg p-2 border border-green-100">
-                    <div className="text-base sm:text-lg font-bold text-green-700">
-                      {officeStats?.unitTracking?.summary?.submitted || 0}
-                    </div>
-                    <div className="text-xs text-green-700">Submitted</div>
-                  </div>
-                  <div className="bg-red-50 rounded-lg p-2 border border-red-100">
-                    <div className="text-base sm:text-lg font-bold text-red-700">
-                      {officeStats?.unitTracking?.summary?.notSubmitted || 0}
-                    </div>
-                    <div className="text-xs text-red-700">Pending</div>
-                  </div>
-                </div>
-                {officeStats?.unitTracking?.summary?.total > 0 && (
-                  <div className="mt-3 text-center">
-                    <p className="text-xs text-gray-600">
-                      {Math.round((officeStats.unitTracking.summary.submitted / officeStats.unitTracking.summary.total) * 100)}% of units have submitted requests
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
       {/* ISSP Requests Section */}
       <div className="bg-white rounded-lg p-4 sm:p-6 lg:p-8 shadow-sm border border-gray-200">
         <div className="flex flex-col gap-4 mb-6">
@@ -1556,34 +1293,31 @@ const Offices = () => {
               else if (allApproved) overallStatus = 'approved';
               else if (allRejected) overallStatus = 'rejected';
               
+              const updatedDateStr = latestRequest
+                ? new Date(latestRequest.updatedAt || latestRequest.createdAt).toLocaleDateString('en-US', {
+                    month: 'long',
+                    day: 'numeric',
+                    year: 'numeric'
+                  })
+                : null;
+
               return (
                 <div key={`${group.unitName}|||${group.campus}|||${group.year}`} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
                   <div className="flex items-start justify-between mb-4">
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <h2 className="text-lg font-bold text-gray-900 mb-3">
-                        {group.unitName} {group.campus && group.campus !== 'Main' && `- ${group.campus}`} - {group.year}
+                        {group.unitName} {group.campus && group.campus !== 'Main' && group.campus !== 'Main Campus' && `- ${group.campus}`} - {group.year}
                       </h2>
-                      <div className="space-y-1.5">
-                        {group.campus && group.campus !== 'Main' && (
-                          <div className="text-sm text-gray-600">
-                            <span className="font-medium">Campus:</span> {group.campus}
-                          </div>
-                        )}
-                        <div className="text-sm text-gray-700">
-                          <span className="font-medium">Requests:</span> {group.requests.length} request{group.requests.length !== 1 ? 's' : ''}
+                      {group.campus && group.campus !== 'Main' && group.campus !== 'Main Campus' && (
+                        <div className="text-sm text-gray-600 mb-1.5">
+                          <span className="font-medium">Campus:</span> {group.campus}
                         </div>
-                        <div className="text-sm text-gray-700">
-                          <span className="font-medium">Total Items:</span> {totalItems} item{totalItems !== 1 ? 's' : ''}
-                        </div>
-                        <div className="text-sm text-gray-500">
-                          Last Updated: {latestRequest ? new Date(latestRequest.updatedAt || latestRequest.createdAt).toLocaleDateString() : 'N/A'}
-                        </div>
-                      </div>
+                      )}
                     </div>
                     <div className="ml-4 flex-shrink-0">
                       <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${
                         overallStatus === 'approved' ? 'bg-green-50 text-green-700' :
-                        overallStatus === 'submitted' ? 'bg-blue-50 text-blue-700' :
+                        overallStatus === 'submitted' ? 'bg-green-100 text-green-800' :
                         overallStatus === 'rejected' ? 'bg-red-50 text-red-700' :
                         overallStatus === 'resubmitted' ? 'bg-orange-100 text-orange-700' :
                         'bg-yellow-50 text-yellow-700'
@@ -1593,13 +1327,26 @@ const Offices = () => {
                     </div>
                   </div>
 
-                  <div className="flex justify-end pt-4 border-t border-gray-200">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pt-4 border-t border-gray-200">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-600">
+                      <span>
+                        {totalItems} item{totalItems !== 1 ? 's' : ''}
+                      </span>
+                      <span className="hidden sm:inline text-gray-300" aria-hidden>|</span>
+                      <span>
+                        {updatedDateStr ? <>updated {updatedDateStr}</> : 'updated N/A'}
+                      </span>
+                    </div>
                     <button 
                       onClick={() => {
                         setSelectedUnitGroup(group);
                         setItemsCurrentPage(1); // Reset to first page when selecting new unit
                       }}
-                      className="px-4 py-2 bg-gray-200 text-gray-700 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors"
+                      className={`self-end sm:self-auto px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        overallStatus === 'submitted'
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                      }`}
                     >
                       Review Items
                     </button>
@@ -1644,131 +1391,6 @@ const Offices = () => {
         showCloseButton={alertState.showCloseButton}
       >
         {alertState.children}
-      </Modal>
-
-      {/* View Item Details Modal */}
-      <Modal
-        isOpen={viewItemModal.show}
-        variant="default"
-        title="Item Details"
-        message=""
-        confirmLabel="Close"
-        cancelLabel={null}
-        onConfirm={() => setViewItemModal({ show: false, item: null })}
-        onClose={() => setViewItemModal({ show: false, item: null })}
-        closeOnOverlay={true}
-        showCloseButton={true}
-        zIndex={100}
-      >
-        {viewItemModal.item && (
-          <div className="space-y-4">
-            {/* Request Title */}
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Request Title
-              </label>
-              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
-                {viewItemModal.item.requestTitle || '—'}
-              </div>
-            </div>
-
-            {/* Item Name */}
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Item Name
-              </label>
-              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
-                {viewItemModal.item.item || '—'}
-              </div>
-            </div>
-
-            {/* Quantity */}
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Quantity
-              </label>
-              <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
-                {viewItemModal.item.quantity || '—'}
-              </div>
-            </div>
-
-            {/* Price */}
-            {viewItemModal.item.price > 0 && (
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Price
-                </label>
-                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
-                  ₱{viewItemModal.item.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </div>
-              </div>
-            )}
-
-            {/* Range */}
-            {viewItemModal.item.range && (
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Range
-                </label>
-                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg">
-                  {viewItemModal.item.range.toUpperCase()}
-                </div>
-              </div>
-            )}
-
-            {/* Approval Status */}
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-1">
-                Approval Status
-              </label>
-              <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
-                viewItemModal.item.approvalStatus === 'approved' 
-                  ? 'bg-green-50 text-green-700'
-                  : viewItemModal.item.approvalStatus === 'disapproved'
-                  ? 'bg-red-50 text-red-700'
-                  : 'bg-yellow-50 text-yellow-700'
-              }`}>
-                {(viewItemModal.item.approvalStatus || 'pending').toUpperCase()}
-              </span>
-            </div>
-
-            {/* Specification */}
-            {viewItemModal.item.specification && (
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Specification
-                </label>
-                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-60 overflow-y-auto whitespace-pre-wrap">
-                  {viewItemModal.item.specification}
-                </div>
-              </div>
-            )}
-
-            {/* Purpose */}
-            {viewItemModal.item.purpose && (
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Purpose
-                </label>
-                <div className="text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
-                  {viewItemModal.item.purpose}
-                </div>
-              </div>
-            )}
-
-            {/* Approval Reason */}
-            {viewItemModal.item.approvalReason && (
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">
-                  Approval Reason
-                </label>
-                <div className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded-lg max-h-40 overflow-y-auto whitespace-pre-wrap">
-                  {viewItemModal.item.approvalReason}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </Modal>
 
       {/* Return Disapproved Items Modal */}
