@@ -201,25 +201,6 @@ const History = () => {
               </select>
             </div>
           </div>
-
-          <div className="border-t border-gray-200 bg-white px-4 sm:px-6 py-4 sm:py-5 md:px-8">
-            <div className="grid gap-3 sm:gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="bg-white rounded-lg p-4 shadow-sm border-l-4 border-gray-400">
-                <p className="text-sm text-gray-600 font-medium">Total Requests</p>
-                <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                  {totalRequests}
-                </h3>
-              </div>
-              {statusSummary.map((summary) => (
-                <div key={summary.key} className="bg-white rounded-lg p-4 shadow-sm border-l-4 border-gray-400">
-                  <p className="text-sm text-gray-600 font-medium">{summary.label}</p>
-                  <h3 className="text-2xl font-semibold text-gray-900 mt-1">
-                    {summary.count}
-                  </h3>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       )}
 
@@ -258,56 +239,13 @@ const History = () => {
               </div>
             </div>
 
-            {/* Year Group Information */}
-            <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-xl p-4 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <h4 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                  <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
-                    <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                  </div>
-                  Group Information
-                </h4>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Year Cycle</label>
-                  </div>
-                  <div className="text-xl font-bold text-gray-900">{selectedYearGroup.year}</div>
-                </div>
-                <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Requests</label>
-                  </div>
-                  <div className="text-xl font-bold text-gray-900">{selectedYearGroup.requests.length} <span className="text-sm font-normal text-gray-600">request{selectedYearGroup.requests.length !== 1 ? 's' : ''}</span></div>
-                </div>
-                <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-                    </svg>
-                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total Items</label>
-                  </div>
-                  <div className="text-xl font-bold text-gray-900">{allYearGroupItems.length} <span className="text-sm font-normal text-gray-600">item{allYearGroupItems.length !== 1 ? 's' : ''}</span></div>
-                </div>
-              </div>
-            </div>
-
             {/* All Requests Table */}
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
                 <div className="flex items-center justify-between">
                   <h4 className="text-lg font-semibold text-gray-900">All Requests</h4>
                   <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
-                    {selectedYearGroup.requests.length} {selectedYearGroup.requests.length === 1 ? 'request' : 'requests'}
+                    {allYearGroupItems.length} {allYearGroupItems.length === 1 ? 'item' : 'items'}
                   </span>
                 </div>
               </div>
@@ -429,22 +367,9 @@ const History = () => {
                     <div key={year} className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
                       <div className="flex items-start justify-between mb-4">
                         <div className="flex-1">
-                          <h2 className="text-lg font-bold text-gray-900 mb-3">
+                          <h2 className="text-lg font-bold text-gray-900">
                             {year}
                           </h2>
-                          <div className="space-y-1.5">
-                            <div className="text-sm text-gray-700">
-                              <span className="font-medium">Requests:</span> {group.requests.length} request{group.requests.length !== 1 ? 's' : ''}
-                            </div>
-                            <div className="text-sm text-gray-700">
-                              <span className="font-medium">Total Items:</span> {group.totalItems} item{group.totalItems !== 1 ? 's' : ''}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="ml-4 flex-shrink-0">
-                          <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${statusBadge}`}>
-                            {overallStatus.toUpperCase()}
-                          </span>
                         </div>
                       </div>
 

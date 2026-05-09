@@ -360,6 +360,7 @@ const Request = ({ onRequestUpdate }) => {
   const [deletingItem, setDeletingItem] = useState(false);
   const [viewItemModal, setViewItemModal] = useState({ show: false, item: null });
   const [availableYearCycles, setAvailableYearCycles] = useState([]);
+  const [itemFilter, setItemFilter] = useState('pending');
 
   useEffect(() => {
     aiStatusRef.current = aiStatus;
@@ -886,6 +887,8 @@ const Request = ({ onRequestUpdate }) => {
               itemStatusUpdatedAt: existingItem.itemStatusUpdatedAt || item.itemStatusUpdatedAt || null,
               // Keep approvalReason from disapproved item
               approvalReason: existingItem.approvalReason || item.approvalReason || '',
+              // Ensure requestId is preserved
+              requestId: existingItem.requestId || request._id,
             });
           } else {
             // First occurrence of this item name
@@ -901,8 +904,14 @@ const Request = ({ onRequestUpdate }) => {
       }
     });
     
-    // Convert Map to array
-    return Array.from(itemsMap.values());
+    // Convert Map to array and sort by approvalStatus (approved -> pending -> disapproved)
+    const itemsArray = Array.from(itemsMap.values());
+    const statusOrder = { 'approved': 0, 'pending': 1, 'disapproved': 2 };
+    return itemsArray.sort((a, b) => {
+      const statusA = statusOrder[a.approvalStatus] ?? 1;
+      const statusB = statusOrder[b.approvalStatus] ?? 1;
+      return statusA - statusB;
+    });
   }, [selectedYearGroup]);
 
   // Get years from the selected year cycle for the table
@@ -910,6 +919,25 @@ const Request = ({ onRequestUpdate }) => {
     if (!selectedYearGroup) return [];
     return getYearsFromCycle(selectedYearGroup.year);
   }, [selectedYearGroup]);
+
+  // Filtered items based on itemFilter dropdown
+  const filteredYearGroupItems = useMemo(() => {
+    if (itemFilter === 'all') return allYearGroupItems;
+    return allYearGroupItems.filter(item => item.approvalStatus === itemFilter);
+  }, [allYearGroupItems, itemFilter]);
+
+  // Reset filter to pending when year group changes
+  useEffect(() => {
+    setItemFilter('pending');
+  }, [selectedYearGroup]);
+
+  // Set default filter based on whether there are pending items (only when items load)
+  useEffect(() => {
+    const hasPending = allYearGroupItems.some(item => item.approvalStatus === 'pending');
+    if (!hasPending) {
+      setItemFilter('approved');
+    }
+  }, [allYearGroupItems]);
 
   // Handle item status update
   const handleUpdateItemStatus = async () => {
@@ -1114,34 +1142,34 @@ const Request = ({ onRequestUpdate }) => {
       return;
     }
 
+    console.log('Showing confirmation modal');
     // Show confirmation modal
     setSaveItemConfirmationModal({ show: true });
   };
 
   // Actually perform the save after confirmation
   const handleConfirmSaveItemEdit = async () => {
-    if (!editItemModal.item || !editItemModal.requestId || !editItemModal.itemId) return;
-
-    // Validate if item is IT-related using AI
-    const validation = await performITValidation(editItemForm.item);
-    if (!validation.isValid) {
+    if (!editItemModal.item || !editItemModal.requestId || !editItemModal.itemId) {
       setSaveItemConfirmationModal({ show: false });
       setAlertModal({
         show: true,
         variant: 'danger',
-        title: 'Non-IT Item Detected',
-        message: validation.reason
+        title: 'Error',
+        message: `Missing item data. requestId: ${editItemModal.requestId}, itemId: ${editItemModal.itemId}`
       });
-      return; // Don't save the item
+      return;
     }
 
     try {
       setLoading(true);
+
       const token = localStorage.getItem('token');
-      
+
       // Find the request in selectedYearGroup
       const request = selectedYearGroup.requests.find(r => r._id === editItemModal.requestId);
       if (!request) {
+        console.log('Request not found for ID:', editItemModal.requestId);
+        setSaveItemConfirmationModal({ show: false });
         setAlertModal({
           show: true,
           variant: 'danger',
@@ -1151,18 +1179,25 @@ const Request = ({ onRequestUpdate }) => {
         return;
       }
 
+      console.log('Found request:', request._id);
+
       // Calculate total quantity from quantityByYear
       const totalQuantity = Object.values(editItemForm.quantityByYear || {}).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
+      console.log('Total quantity:', totalQuantity);
 
       // Update the item in the request's items array
       const updatedItems = request.items.map(item => {
-        if ((item.id || item._id) === editItemModal.itemId) {
+        const itemId = item.id ? item.id.toString() : item._id.toString();
+        const editItemId = editItemModal.itemId.toString();
+        console.log('Comparing itemId:', itemId, 'with editItemId:', editItemId);
+        if (itemId === editItemId) {
+          console.log('Found matching item, updating');
           return {
             ...item,
             item: editItemForm.item,
             quantity: totalQuantity,
             quantityByYear: editItemForm.quantityByYear || {},
-            price: item.price || 0, // Keep existing price, don't allow editing
+            price: item.price || 0,
             range: editItemForm.range,
             specification: editItemForm.specification || '',
             purpose: editItemForm.purpose || ''
@@ -1171,9 +1206,14 @@ const Request = ({ onRequestUpdate }) => {
         return item;
       });
 
-      // Update the request
+      console.log('Updated items:', updatedItems);
+
+      // Update the request via API
+      const apiUrl = API_ENDPOINTS.requests.get(editItemModal.requestId);
+      console.log('API URL:', apiUrl);
+
       const response = await axios.put(
-        API_ENDPOINTS.requests.get(editItemModal.requestId),
+        apiUrl,
         {
           ...request,
           items: updatedItems
@@ -1183,33 +1223,46 @@ const Request = ({ onRequestUpdate }) => {
         }
       );
 
+      console.log('API response:', response);
+
       // Update selectedYearGroup with the updated request
       setSelectedYearGroup(prev => ({
         ...prev,
-        requests: prev.requests.map(r => 
+        requests: prev.requests.map(r =>
           r._id === editItemModal.requestId ? response.data : r
         )
       }));
 
+      // Close confirmation modal
+      setSaveItemConfirmationModal({ show: false });
+
+      // Show success notification
       setAlertModal({
         show: true,
         variant: 'success',
-        title: 'Item Updated',
+        title: 'Success',
         message: 'Item has been updated successfully!'
       });
 
-      // Close modals and reset form
-      setSaveItemConfirmationModal({ show: false });
+      // Close edit modal and reset form
       setEditItemModal({ show: false, item: null, requestId: null, itemId: null });
       setEditItemForm({ item: '', quantityByYear: {}, range: 'mid', specification: '', purpose: '' });
+
+      // Refresh data
       await fetchRequests();
+
+      console.log('Save completed successfully');
+
     } catch (error) {
       console.error('Error updating item:', error);
+      console.error('Error response:', error.response);
+
+      setSaveItemConfirmationModal({ show: false });
       setAlertModal({
         show: true,
         variant: 'danger',
         title: 'Update Failed',
-        message: error.response?.data?.message || 'Failed to update item.'
+        message: error.response?.data?.message || error.message || 'Failed to update item. Please try again.'
       });
     } finally {
       setLoading(false);
@@ -1452,6 +1505,17 @@ const Request = ({ onRequestUpdate }) => {
           message: validation.reason
         });
         setItemValidationError(validation.reason);
+        return; // Don't add the item
+      }
+
+      // Check if specification is provided
+      if (!currentItem.specification || currentItem.specification.trim() === '') {
+        setAlertModal({
+          show: true,
+          variant: 'danger',
+          title: 'Specification Required',
+          message: 'Please provide a specification for the item before adding it.'
+        });
         return; // Don't add the item
       }
 
@@ -2034,49 +2098,6 @@ const Request = ({ onRequestUpdate }) => {
             </div>
           </div>
 
-          {/* Year Group Information */}
-          <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-xl p-4 shadow-sm">
-            <div className="flex items-center justify-between mb-4">
-              <h4 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
-                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </div>
-                Group Information
-              </h4>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Year Cycle</label>
-                </div>
-                <div className="text-xl font-bold text-gray-900">{selectedYearGroup.year}</div>
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Requests</label>
-                </div>
-                <div className="text-xl font-bold text-gray-900">{selectedYearGroup.requests.length} <span className="text-sm font-normal text-gray-600">request{selectedYearGroup.requests.length !== 1 ? 's' : ''}</span></div>
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-                  </svg>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total Items</label>
-                </div>
-                <div className="text-xl font-bold text-gray-900">{allYearGroupItems.length} <span className="text-sm font-normal text-gray-600">item{allYearGroupItems.length !== 1 ? 's' : ''}</span></div>
-              </div>
-            </div>
-          </div>
-
           {/* Rejected Items Alert Banner */}
           {(() => {
             const { rejectedCount, rejectedRequests } = getRejectedItemsInfo(selectedYearGroup.requests);
@@ -2117,13 +2138,23 @@ const Request = ({ onRequestUpdate }) => {
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
               <div className="flex items-center justify-between">
                 <h4 className="text-lg font-semibold text-gray-900">All Items</h4>
-                <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
-                  {allYearGroupItems.length} {allYearGroupItems.length === 1 ? 'item' : 'items'}
-                </span>
+                <div className="flex items-center gap-3">
+                  <select
+                    value={itemFilter}
+                    onChange={(e) => setItemFilter(e.target.value)}
+                    className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                  </select>
+                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
+                    {filteredYearGroupItems.length} {filteredYearGroupItems.length === 1 ? 'item' : 'items'}
+                  </span>
+                </div>
               </div>
             </div>
             <div className="overflow-x-auto">
-              {allYearGroupItems.length > 0 ? (
+              {filteredYearGroupItems.length > 0 ? (
                   <table className="min-w-full divide-y divide-gray-200 table-fixed">
                     <thead className="bg-gray-50">
                       <tr>
@@ -2145,11 +2176,11 @@ const Request = ({ onRequestUpdate }) => {
                         {allYearGroupItems.some(item => item.approvalStatus === 'approved') && (
                           <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-48">Remarks</th>
                         )}
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-24">View</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider w-24">Action</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {allYearGroupItems.map((item, index) => {
+                      {filteredYearGroupItems.map((item, index) => {
                         const isApproved = item.approvalStatus === 'approved';
                         const isDisapproved = item.approvalStatus === 'disapproved';
                         const itemKey = `${item.requestId}-${item.id || item._id}`;
@@ -2302,13 +2333,44 @@ const Request = ({ onRequestUpdate }) => {
                             </td>
                           )}
                           <td className="px-4 py-3 whitespace-nowrap text-center">
-                            <button
-                              onClick={() => setViewItemModal({ show: true, item: item })}
-                              className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                              title="View full item details"
-                            >
-                              View
-                            </button>
+                            {item.requestStatus === 'pending' || item.requestStatus === 'draft' ? (
+                              <button
+                                onClick={() => {
+                                  const cycleYears = selectedYearGroup ? getYearsFromCycle(selectedYearGroup.year) : [];
+                                  const quantityByYear = {};
+                                  if (item.quantityByYear && typeof item.quantityByYear === 'object') {
+                                    cycleYears.forEach(year => {
+                                      const yearStr = year.toString();
+                                      quantityByYear[yearStr] = item.quantityByYear[yearStr] || item.quantityByYear[year] || 0;
+                                    });
+                                  } else {
+                                    cycleYears.forEach(year => {
+                                      quantityByYear[year.toString()] = 0;
+                                    });
+                                  }
+                                  setEditItemForm({
+                                    item: item.item || '',
+                                    quantityByYear: quantityByYear,
+                                    range: item.range || 'mid',
+                                    specification: item.specification || '',
+                                    purpose: item.purpose || ''
+                                  });
+                                  setEditItemModal({ show: true, item: item, requestId: item.requestId, itemId: item._id || item.id });
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium text-yellow-700 bg-yellow-50 hover:bg-yellow-100 rounded-md transition-colors"
+                                title="Edit item"
+                              >
+                                Edit
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setViewItemModal({ show: true, item: item })}
+                                className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
+                                title="View full item details"
+                              >
+                                View
+                              </button>
+                            )}
                           </td>
                           </tr>
                         );
@@ -2317,7 +2379,11 @@ const Request = ({ onRequestUpdate }) => {
                   </table>
               ) : (
                 <div className="text-center py-12">
-                  <p className="text-gray-500">No items in this year group</p>
+                  <p className="text-gray-500">
+                    {allYearGroupItems.length === 0
+                      ? 'No items in this year group'
+                      : `No ${itemFilter} items found`}
+                  </p>
                 </div>
               )}
             </div>
@@ -2730,7 +2796,7 @@ const Request = ({ onRequestUpdate }) => {
                     </button>
                   </div>
 
-                  {hasCurrentItemName && (
+                  {hasCurrentItemName && !itemValidationError && (
                     <ItemInsightSidebar
                       itemName={currentItem.item}
                       status={aiStatus}
@@ -3052,25 +3118,15 @@ const Request = ({ onRequestUpdate }) => {
                         name="purpose"
                         value={currentItem.purpose}
                         onChange={handleCurrentItemChange}
-                        rows="2"
+                        rows={2}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-gray-400"
                         placeholder="Purpose and intended use of this item"
                       ></textarea>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={addItemToRequest}
-                      className="w-full bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded-lg font-medium transition-colors duration-200 flex items-center justify-center space-x-2"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                      </svg>
-                      <span>Add Item</span>
-                    </button>
                   </div>
 
-                  {hasCurrentItemName && (
+                  {hasCurrentItemName && !itemValidationError && (
                     <ItemInsightSidebar
                       itemName={currentItem.item}
                       status={aiStatus}
@@ -3123,21 +3179,8 @@ const Request = ({ onRequestUpdate }) => {
                 </div>
               )}
               
-              <div className="flex justify-between pt-6 border-t border-gray-200">
-                {requestForm.items.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={addItemToRequest}
-                    className="px-6 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors duration-200 flex items-center space-x-2"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                    </svg>
-                    <span>Add Another Item</span>
-                  </button>
-                )}
-                
-                <div className="flex space-x-3 ml-auto">
+              <div className="flex justify-end pt-6 border-t border-gray-200">
+                <div className="flex space-x-3">
                   <button
                     type="button"
                     onClick={() => {
@@ -3150,18 +3193,28 @@ const Request = ({ onRequestUpdate }) => {
                     Cancel
                   </button>
                   <button
+                    type="button"
+                    onClick={addItemToRequest}
+                    className="px-6 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition-colors duration-200 flex items-center space-x-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    <span>Add Item</span>
+                  </button>
+                  <button
                     type="submit"
                     disabled={requestForm.items.length === 0 || loading || isSubmittingRef.current}
                     className={`px-6 py-2 rounded-lg font-medium transition-colors duration-200 flex items-center space-x-2 ${
                       requestForm.items.length > 0 && !loading && !isSubmittingRef.current
-                        ? 'bg-gray-400 hover:bg-gray-500 text-white' 
+                        ? 'bg-gray-400 hover:bg-gray-500 text-white'
                         : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     }`}
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                     </svg>
-                    <span>{loading || isSubmittingRef.current ? 'Submitting...' : `Submit Item (${requestForm.items.length} items)`}</span>
+                    <span>{loading || isSubmittingRef.current ? 'Saving...' : `Save`}</span>
                   </button>
                 </div>
               </div>
@@ -3589,7 +3642,7 @@ const Request = ({ onRequestUpdate }) => {
                         </button>
                       </div>
 
-                      {hasCurrentItemName && (
+                      {hasCurrentItemName && !itemValidationError && (
                         <ItemInsightSidebar
                           itemName={currentItem.item}
                           status={aiStatus}
@@ -3760,6 +3813,7 @@ const Request = ({ onRequestUpdate }) => {
         cancelLabel={null}
         onConfirm={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
         onClose={() => setAlertModal({ show: false, variant: 'default', title: '', message: '' })}
+        zIndex={200}
       />
 
       {/* Status Update Modal */}
